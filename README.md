@@ -3,6 +3,10 @@
 </p>
 
 <p align="center">
+  <img src="static/assets/deepsee-brand-logo.webp" alt="Openclaw X 大圣之怒 X Hermes" width="520">
+</p>
+
+<p align="center">
   面向 Agent 接入的个人信息流底座，把微信、邮件、会议、新闻、自媒体、公众号与联系人观点统一沉淀为可查询、可推理、可验证的 API 数据层。
 </p>
 
