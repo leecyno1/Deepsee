@@ -1,11 +1,5 @@
 <p align="center">
-  <img src="static/assets/deepsee-brand-logo.webp" alt="Deepsee 深瞳 logo" width="520">
-</p>
-
-<h1 align="center">Deepsee</h1>
-
-<p align="center">
-  <strong>深瞳：全领域个人信息流 API 平台</strong>
+  <img src="static/assets/deepsee-repo-header.png" alt="Deepseek 深瞳：Agent 可接入的全领域个人信息流 API 平台" width="920">
 </p>
 
 <p align="center">
