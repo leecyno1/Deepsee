@@ -101,6 +101,12 @@ Deepsee 可通过 wechatapi.net 的 iPad 协议接入微信，也可在云服务
 3. AI 模型路由配置（用于自动摘要、分析与回复）
 4. Agent 端配置（见下方 wx-auto 配套包）
 
+部署与排障补充：
+
+- 参见 [`docs/wechat-gateway-deployment-notes.md`](docs/wechat-gateway-deployment-notes.md) 获取公网回调绑定、登录状态持久化、WeChatAPI 人脸验证和子 session 行为说明。
+- 直连公网 IP 部署时，Deepsee 需要监听 `0.0.0.0`，否则 wechatapi.net 访问公网 callback 可能报 `push msg err`。
+- 登录成功后保存 token/app_id/wxid/region_id/device_type 的对应关系，二次登录优先复用 app_id。
+
 ### Agent 配套包
 
 **https://github.com/leecyno1/wx-auto** 提供 Hermes/Agent 侧的：
