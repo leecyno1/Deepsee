@@ -93,7 +93,7 @@ AGENT_API_TOKEN=${API_TOKEN}
 DATABASE_URL=sqlite:///./data/app.db
 MEDIA_SERVER_BASE=http://127.0.0.1:8001
 HOST=127.0.0.1
-PORT=8000
+PORT=8001
 SYNC_INTERVAL_SECONDS=0
 NEWSNOW_REFRESH_INTERVAL_SECONDS=3600
 AI_MAX_PARALLEL=12
@@ -195,7 +195,7 @@ sleep 3
 info "Step 8/8: Verifying deployment"
 
 # Health check
-HEALTH=$(curl -sf http://127.0.0.1:8000/api/health 2>/dev/null || echo "FAIL")
+HEALTH=$(curl -sf http://127.0.0.1:8001/api/health 2>/dev/null || echo "FAIL")
 if echo "$HEALTH" | grep -q '"ok"'; then
     info "Health check: OK"
 else
@@ -203,7 +203,7 @@ else
 fi
 
 # Bind callback
-BIND=$(curl -sf -X POST http://127.0.0.1:8000/api/wechat-gateway/bind-callback 2>/dev/null || echo "FAIL")
+BIND=$(curl -sf -X POST http://127.0.0.1:8001/api/wechat-gateway/bind-callback 2>/dev/null || echo "FAIL")
 if echo "$BIND" | grep -q '"ok"'; then
     info "Callback binding: OK"
 else
@@ -215,14 +215,14 @@ echo "============================================"
 echo "  Deployment Complete!"
 echo "============================================"
 echo ""
-echo "  Service:  http://127.0.0.1:8000"
+echo "  Service:  http://127.0.0.1:8001"
 echo "  Config:   ${INSTALL_DIR}/.env"
 echo "  AI Config: ${INSTALL_DIR}/data/ai_config.json"
 echo "  Logs:     ${INSTALL_DIR}/uvicorn.log"
 echo ""
 echo "  Next steps:"
-echo "  1. Set up public tunnel (ngrok/natapp/frp) to expose :8000"
-echo "  2. Visit http://127.0.0.1:8000 to access the dashboard"
+echo "  1. Set up public tunnel (ngrok/natapp/frp) to expose :8001"
+echo "  2. Visit http://127.0.0.1:8001 to access the dashboard"
 echo "  3. Go to WeChat settings tab, verify callback URL, click 'Bind Callback'"
 echo "  4. Test: send 'ai hello' to your WeChat"
 echo ""

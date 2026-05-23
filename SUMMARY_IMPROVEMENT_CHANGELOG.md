@@ -267,7 +267,7 @@ WHERE timestamp > date('now')
 - 📄 详细改进报告：`docs/summary-improvement-report.md`
 - 🚀 快速启动指南：`QUICKSTART_SUMMARY_IMPROVEMENT.md`
 - 🧪 测试脚本：`test_summary_improvement.py`
-- 📊 API 文档：http://127.0.0.1:8000/docs
+- 📊 API 文档：http://127.0.0.1:8001/docs
 
 ---
 

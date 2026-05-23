@@ -18,8 +18,8 @@ For Hermes/Agent-side skills, API docs, and cloud deployment scripts, see:
 - Hot reload dev: `bash scripts/manage.sh dev`
 - Background service: `bash scripts/manage.sh start` · `status` | `logs -f` | `stop`
 - Data sync: `bash scripts/manage.sh sync` (incremental) or `bash scripts/manage.sh syncfull 30`
-- Manual run: `uvicorn app.main:app --host 127.0.0.1 --port 8000`
-- Quick checks: `curl http://127.0.0.1:8000/api/health` and `curl 'http://127.0.0.1:8000/api/messages?q=hello'`
+- Manual run: `uvicorn app.main:app --host 127.0.0.1 --port 8001`
+- Quick checks: `curl http://127.0.0.1:8001/api/health` and `curl 'http://127.0.0.1:8001/api/messages?q=hello'`
 
 ## Coding Style & Naming Conventions
 - Python 3.11+; PEP 8; 4 spaces; soft limit 100-120 columns.

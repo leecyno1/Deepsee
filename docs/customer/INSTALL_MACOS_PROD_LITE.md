@@ -15,7 +15,7 @@ bash scripts/manage.sh start
 bash scripts/manage.sh status
 ```
 
-打开：`http://127.0.0.1:8000`
+打开：`http://127.0.0.1:8001`
 
 ## 配置 AI
 1. 打开“功能设置”。

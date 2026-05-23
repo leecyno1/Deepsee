@@ -68,6 +68,6 @@ echo "持续监控（每5秒刷新）："
 echo "  watch -n 5 bash monitor_derive.sh"
 echo ""
 echo "手动触发更多派生："
-echo "  curl -X POST http://127.0.0.1:8000/api/messages/derive -H 'Content-Type: application/json' -d '{\"period\": \"3days\", \"force\": true}'"
+echo "  curl -X POST http://127.0.0.1:8001/api/messages/derive -H 'Content-Type: application/json' -d '{\"period\": \"3days\", \"force\": true}'"
 echo ""
 

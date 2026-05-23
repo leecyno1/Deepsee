@@ -10,7 +10,7 @@ import requests
 import json
 from datetime import datetime
 
-BASE_URL = "http://127.0.0.1:8000"
+BASE_URL = "http://127.0.0.1:8001"
 
 # 测试用例（模拟真实场景）
 TEST_CASES = [

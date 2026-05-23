@@ -40,7 +40,7 @@ def test_manage_prod_lite_creates_env_and_data_dirs_without_install(tmp_path):
 
 def test_manage_backup_and_restore_roundtrip_requires_confirmation(tmp_path):
     root = _copy_min_project(tmp_path)
-    (root / ".env").write_text("HOST=127.0.0.1\nPORT=8000\n", encoding="utf-8")
+    (root / ".env").write_text("HOST=127.0.0.1\nPORT=8001\n", encoding="utf-8")
     (root / "data" / "app.db").write_text("db-v1", encoding="utf-8")
     (root / "data" / "ai_config.json").write_text('{"x":1}', encoding="utf-8")
 
@@ -115,7 +115,7 @@ def test_manage_script_wraps_launchd_operations():
     source = (PROJECT_ROOT / "scripts" / "manage.sh").read_text(encoding="utf-8")
     assert "launchd <install|restart|status|logs|health|uninstall>" in source
     assert "launchd_svc()" in source
-    assert 'bash "$ROOT_DIR/scripts/launchd_8000.sh" "$action"' in source
+    assert 'bash "$ROOT_DIR/scripts/launchd_8001.sh" "$action"' in source
 
 
 def test_manage_usage_and_invalid_launchd_return_quickly(tmp_path):

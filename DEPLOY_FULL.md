@@ -8,7 +8,7 @@
 
 ```
                     公网                       内网 (127.0.0.1)
-微信用户 ──→ wechatapi.net ──→ natapp隧道 ──→ 0913:8000          Hermes:8642
+微信用户 ──→ wechatapi.net ──→ natapp隧道 ──→ 0913:8001          Hermes:8642
                                     │              │                   │
                                callback      FastAPI server      API Server
                                     │         (reins)             (brain)
@@ -226,7 +226,7 @@ bash scripts/manage.sh start
 hermes gateway start
 
 # 验证
-curl http://127.0.0.1:8000/api/health    # 0913
+curl http://127.0.0.1:8001/api/health    # 0913
 curl http://127.0.0.1:8642/health        # Hermes API Server
 ```
 
@@ -275,14 +275,14 @@ hermes cron list | grep 0913
 
 ```bash
 # 以 natapp 为例
-./natapp -authtoken=<token> -subdomain=<domain> -lport=8000
+./natapp -authtoken=<token> -subdomain=<domain> -lport=8001
 
 # 确认回调路径: https://<domain>/api/wechat-gateway/callback
 ```
 
 ### 2.8 绑定微信回调
 
-1. 访问 `http://127.0.0.1:8000` → WeChat Settings
+1. 访问 `http://127.0.0.1:8001` → WeChat Settings
 2. 确认 callback_public_url 为完整路径 `https://<domain>/api/wechat-gateway/callback`
 3. 点击 "Bind Callback"
 4. 在微信中发 `ai hello` 验证自动回复
@@ -295,7 +295,7 @@ hermes cron list | grep 0913
 
 ```bash
 # 0913 服务
-curl http://127.0.0.1:8000/api/health
+curl http://127.0.0.1:8001/api/health
 # 期望: {"status":"ok"}
 
 # Hermes API Server
@@ -303,7 +303,7 @@ curl http://127.0.0.1:8642/health
 # 期望: {"status":"healthy"}
 
 # 微信在线状态
-curl -X POST http://127.0.0.1:8000/api/wechat-gateway/check-online
+curl -X POST http://127.0.0.1:8001/api/wechat-gateway/check-online
 # 期望: {"online":true}
 ```
 
@@ -355,7 +355,7 @@ API_TOKEN=<你的密码>
 AGENT_API_TOKEN=<与API_TOKEN相同>
 DATABASE_URL=sqlite:///./data/app.db
 HOST=127.0.0.1
-PORT=8000
+PORT=8001
 SYNC_INTERVAL_SECONDS=0
 AI_MAX_PARALLEL=12
 
@@ -451,7 +451,7 @@ hermes gateway restart
 ### 故障排查顺序
 
 ```
-1. curl 0913:8000/api/health          → 0913 alive?
+1. curl 0913:8001/api/health          → 0913 alive?
 2. curl Hermes:8642/health              → Hermes alive?
 3. 查 messages 最新 id/timestamp       → 消息在入库吗？
 4. POST /login/checkOnline              → token 有效吗？

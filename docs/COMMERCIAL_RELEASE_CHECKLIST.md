@@ -14,8 +14,8 @@ bash scripts/manage.sh status
 ```
 
 验收：
-- `http://127.0.0.1:8000/api/health` 返回 `ok`。
-- `http://127.0.0.1:8000/api/ready` 返回检查列表，核心项不为 `fail`。
+- `http://127.0.0.1:8001/api/health` 返回 `ok`。
+- `http://127.0.0.1:8001/api/ready` 返回检查列表，核心项不为 `fail`。
 - `bash scripts/manage.sh diagnose` 可输出完整诊断报告。
 
 ## 3. macOS 开机自启

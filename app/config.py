@@ -33,7 +33,7 @@ class Settings(BaseSettings):
 
     # Server
     HOST: str = Field(default="127.0.0.1")
-    PORT: int = Field(default=8000)
+    PORT: int = Field(default=8001)
     SYNC_INTERVAL_SECONDS: int | None = Field(default=0)
     EMAIL_SYNC_INTERVAL_SECONDS: int | None = Field(default=0)
     SUMMARY_OVERLAY_INTERVAL_SECONDS: int | None = Field(default=3600)

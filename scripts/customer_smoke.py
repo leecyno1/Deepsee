@@ -69,7 +69,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             ready = {"healthy": False, "error": str(exc), "checks": []}
             errors.append(f"ready {exc}")
 
-    port = int(args.port or base.rsplit(":", 1)[-1].split("/", 1)[0] or 8000)
+    port = int(args.port or base.rsplit(":", 1)[-1].split("/", 1)[0] or 8001)
     pid = _find_pid_on_port(port)
     rss = _rss_mb(pid)
     max_rss = float(args.max_rss_mb)
@@ -93,8 +93,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Customer low-resource smoke test for Dasheng local deployment.")
-    parser.add_argument("--base-url", default="http://127.0.0.1:8000", help="Service base URL")
-    parser.add_argument("--port", type=int, default=8000, help="Local service port for RSS detection")
+    parser.add_argument("--base-url", default="http://127.0.0.1:8001", help="Service base URL")
+    parser.add_argument("--port", type=int, default=8001, help="Local service port for RSS detection")
     parser.add_argument("--iterations", type=int, default=8, help="Number of health probes to run")
     parser.add_argument("--interval", type=float, default=0.25, help="Seconds between health probes")
     parser.add_argument("--timeout", type=float, default=5.0, help="HTTP timeout in seconds")

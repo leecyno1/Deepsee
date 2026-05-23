@@ -311,7 +311,7 @@ git commit -m "style: add quant bar visualization styles"
 - Create: `docs/quant-analysis.md` (short usage notes)
 
 **Step 1: Verify core flows**
-- `curl http://127.0.0.1:8000/api/health`
+- `curl http://127.0.0.1:8001/api/health`
 - Generate AI summary for 1 day with `market` + `newswatch` enabled.
 - Confirm:
   - `## 量化分析` appears under both sections

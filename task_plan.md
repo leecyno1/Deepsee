@@ -14,7 +14,7 @@
 
 ## Latest Verification
 - `pytest -q tests/test_manage_delivery_scripts.py tests/test_commercial_readiness.py tests/test_commercial_ui_system.py tests/test_aggregation_retention.py tests/test_production_guardrails.py tests/test_sync_stability.py tests/test_messages_derive_fallback.py` → 56 passed。
-- `NO_INSTALL=1 bash scripts/manage.sh restart` 后 `http://127.0.0.1:8000/api/health` 通过。
+- `NO_INSTALL=1 bash scripts/manage.sh restart` 后 `http://127.0.0.1:8001/api/health` 通过。
 - `/api/ready` 当前为 healthy=true，核心检查全部 ok。
 - `bash scripts/manage.sh diagnose` 当前报告：服务运行健康，RSS 约 170MB，数据目录约 1.2G，数据库约 1.1G。
 

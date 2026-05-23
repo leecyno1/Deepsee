@@ -6,7 +6,7 @@
 
 ## 1. 目标
 
-把 `wechatapi` 的“接收 / 控制 / 发送 / 去重 / 聚合”能力收敛进 `0913` 项目内部，形成一个只对“微信自动化体系”生效的网关模块；规则流水线参考 `LangBot` 的 pipeline/stage/config 设计，但实现落点必须是 `0913` 自身的后端、数据库和 8000 端口设置页。
+把 `wechatapi` 的“接收 / 控制 / 发送 / 去重 / 聚合”能力收敛进 `0913` 项目内部，形成一个只对“微信自动化体系”生效的网关模块；规则流水线参考 `LangBot` 的 pipeline/stage/config 设计，但实现落点必须是 `0913` 自身的后端、数据库和 8001 端口设置页。
 
 ## 2. 本次代码级分析结论
 
@@ -557,7 +557,7 @@ v1 建议：
 - Modify: `static/index.html`
 - Test: `tests/test_wechat_gateway_config.py`（后端），前端手测
 
-目标：在 8000 设置页可视化配置规则。
+目标：在 8001 设置页可视化配置规则。
 
 ### Task 9: 运行态与审计
 文件：
@@ -637,7 +637,7 @@ Hermes 当前事实：
 - `/Volumes/PSSD/Projects/hermes-agent/gateway/platforms/weixin.py` 内置 Weixin/iLink 适配器，默认直连 `https://ilinkai.weixin.qq.com`，不是 wechatapi。
 - 本轮新增默认关闭的 0913 网关桥接，只作用于 `Platform.WEIXIN`：
   - `WEIXIN_0913_GATEWAY_ENABLED=true`
-  - `WEIXIN_0913_GATEWAY_URL=http://127.0.0.1:8000`
+  - `WEIXIN_0913_GATEWAY_URL=http://127.0.0.1:8001`
   - `WEIXIN_0913_GATEWAY_TOKEN=<0913 API_TOKEN，可选>`
 - 开启后，Hermes Weixin 入站会先转发到 `0913 /api/wechat-gateway/agent-event`；Hermes Weixin 出站文本会调用 `0913 /api/wechat-gateway/agent-send-text`。
 - 默认关闭，且只改 `gateway/platforms/weixin.py`，不会影响 Hermes CLI、terminal UI、main 交互或其他平台。

@@ -15,7 +15,7 @@ if [[ -f "$ENV_FILE" ]]; then
 fi
 
 HOST="${HOST:-127.0.0.1}"
-PORT="${PORT:-8000}"
+PORT="${PORT:-8001}"
 
 if [[ ! -x "$PYBIN" ]]; then
   PYBIN="$ROOT_DIR/.venv/bin/python3"

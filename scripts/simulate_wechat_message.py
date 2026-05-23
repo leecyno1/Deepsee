@@ -9,7 +9,7 @@
 import json, time, sys, requests
 
 # ── 配置 ──
-GATEWAY_URL = "http://127.0.0.1:8000"
+GATEWAY_URL = "http://127.0.0.1:8001"
 CALLBACK_URL = f"{GATEWAY_URL}/api/wechat-gateway/callback"
 
 # ── 模拟微信用户 ──

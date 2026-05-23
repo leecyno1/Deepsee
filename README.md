@@ -87,10 +87,10 @@ bash scripts/manage.sh start
 本地访问：
 
 ```bash
-uvicorn app.main:app --host 127.0.0.1 --port 8000
+uvicorn app.main:app --host 127.0.0.1 --port 8001
 ```
 
-打开浏览器访问 `http://127.0.0.1:8000/`。
+打开浏览器访问 `http://127.0.0.1:8001/`。
 
 ## WeChat API 对接
 

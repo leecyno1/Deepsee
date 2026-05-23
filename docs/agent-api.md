@@ -50,7 +50,7 @@ AGENT_API_BLOCKLIST=/api/admin
 示例：
 
 ```bash
-curl -sS http://127.0.0.1:8000/api/agent/capabilities \
+curl -sS http://127.0.0.1:8001/api/agent/capabilities \
   -H 'Authorization: Bearer change-me' | jq '.count, .items[0]'
 ```
 
@@ -63,7 +63,7 @@ curl -sS http://127.0.0.1:8000/api/agent/capabilities \
 示例：
 
 ```bash
-curl -sS http://127.0.0.1:8000/api/agent/modules \
+curl -sS http://127.0.0.1:8001/api/agent/modules \
   -H 'X-Agent-Token: change-me' | jq
 ```
 
@@ -76,7 +76,7 @@ curl -sS http://127.0.0.1:8000/api/agent/modules \
 示例：
 
 ```bash
-curl -sS http://127.0.0.1:8000/api/agent/openapi \
+curl -sS http://127.0.0.1:8001/api/agent/openapi \
   -H 'Authorization: Bearer change-me' | jq '.openapi, (.paths|keys|length)'
 ```
 
@@ -113,7 +113,7 @@ curl -sS http://127.0.0.1:8000/api/agent/openapi \
 示例：
 
 ```bash
-curl -sS -X POST http://127.0.0.1:8000/api/agent/invoke \
+curl -sS -X POST http://127.0.0.1:8001/api/agent/invoke \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer change-me' \
   -d '{"method":"GET","path":"/api/mp/articles","query":{"limit":5}}' | jq
@@ -141,7 +141,7 @@ curl -sS -X POST http://127.0.0.1:8000/api/agent/invoke \
 示例：
 
 ```bash
-curl -sS -X POST http://127.0.0.1:8000/api/agent/invoke-batch \
+curl -sS -X POST http://127.0.0.1:8001/api/agent/invoke-batch \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer change-me' \
   -d '{"requests":[{"method":"GET","path":"/api/messages","query":{"size":5}}],"stop_on_error":false}' | jq

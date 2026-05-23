@@ -175,7 +175,7 @@ diagnose_svc() {
   export_env || true
   local host port pid pid_on_port
   host=${HOST:-127.0.0.1}
-  port=${PORT:-8000}
+  port=${PORT:-8001}
   pid=$(read_pid)
   pid_on_port=$(lsof -nPiTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -n1 || true)
   if [[ -n "$pid_on_port" && "$pid_on_port" != "${pid:-}" ]]; then
@@ -236,24 +236,24 @@ tracked_pid_running() {
 }
 
 is_port_listening() {
-  local port=${1:-8000}
+  local port=${1:-8001}
   lsof -nPiTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1
 }
 
 pid_on_port() {
-  local port=${1:-8000}
+  local port=${1:-8001}
   lsof -nPiTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -n1 || true
 }
 
 health_ok() {
   local host=${1:-127.0.0.1}
-  local port=${2:-8000}
+  local port=${2:-8001}
   curl -fsS --max-time 3 "http://$host:$port/api/health" >/dev/null 2>&1
 }
 
 is_running() {
   local port
-  port=${1:-${PORT:-8000}}
+  port=${1:-${PORT:-8001}}
   local pid
   pid=$(read_pid)
   if [[ -n "${pid}" ]] && ps -p "$pid" >/dev/null 2>&1; then
@@ -274,7 +274,7 @@ is_running() {
 
 wait_health() {
   local host=${1:-127.0.0.1}
-  local port=${2:-8000}
+  local port=${2:-8001}
   local max_try=${3:-10}
   local i
   for ((i=1; i<=max_try; i++)); do
@@ -292,7 +292,7 @@ start_bg() {
   export_env
   local host port
   host=${HOST:-127.0.0.1}
-  port=${PORT:-8000}
+  port=${PORT:-8001}
   if is_running "$port"; then
     ok "服务已在运行 (PID: $(cat "$PID_FILE"))"
     exit 0
@@ -376,7 +376,7 @@ start_fg() {
   export_env
   local host port
   host=${HOST:-127.0.0.1}
-  port=${PORT:-8000}
+  port=${PORT:-8001}
   info "以前台方式启动: Ctrl+C 退出"
   cd "$ROOT_DIR"
   local pybin
@@ -390,7 +390,7 @@ start_fg() {
 stop_svc() {
   local host port
   host=${HOST:-127.0.0.1}
-  port=${PORT:-8000}
+  port=${PORT:-8001}
   if is_running "$port"; then
     local pid
     pid=$(cat "$PID_FILE")
@@ -425,7 +425,7 @@ stop_svc() {
 status_svc() {
   local host port pid
   host=${HOST:-127.0.0.1}
-  port=${PORT:-8000}
+  port=${PORT:-8001}
   pid=$(read_pid)
   if is_running "$port"; then
     pid=$(read_pid)
@@ -457,7 +457,7 @@ logs_svc() {
 sync_once() {
   export_env || true
   local port
-  port=${PORT:-8000}
+  port=${PORT:-8001}
   info "触发一次拉取同步: /api/sync/chatlog"
   curl -fsS -X POST "http://127.0.0.1:$port/api/sync/chatlog" || true
   echo
@@ -466,7 +466,7 @@ sync_once() {
 sync_full() {
   export_env || true
   local port days
-  port=${PORT:-8000}
+  port=${PORT:-8001}
   days=${1:-30}
   info "触发全量近${days}天: /api/sync/chatlog/full"
   curl -fsS -X POST "http://127.0.0.1:$port/api/sync/chatlog/full?days=$days" || true
@@ -478,7 +478,7 @@ launchd_svc() {
   action=${1:-status}
   case "$action" in
     install|restart|status|logs|health|uninstall|remove)
-      bash "$ROOT_DIR/scripts/launchd_8000.sh" "$action"
+      bash "$ROOT_DIR/scripts/launchd_8001.sh" "$action"
       ;;
     *)
       err "用法: bash scripts/manage.sh launchd <install|restart|status|logs|health|uninstall>"
@@ -522,7 +522,7 @@ usage() {
 doctor_svc() {
   local host port pid pid_on_port
   host=${HOST:-127.0.0.1}
-  port=${PORT:-8000}
+  port=${PORT:-8001}
   pid=$(read_pid)
   pid_on_port=$(lsof -nPiTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -n1 || true)
   echo "pid_file=${pid:-<empty>}"
@@ -548,7 +548,7 @@ case "$cmd" in
     cd "$ROOT_DIR"
     pybin="$VENV_DIR/bin/python"
     [[ -x "$pybin" ]] || pybin="$VENV_DIR/bin/python3"
-    "$pybin" -m uvicorn "$APP_IMPORT" --host "${HOST:-127.0.0.1}" --port "${PORT:-8000}" --reload
+    "$pybin" -m uvicorn "$APP_IMPORT" --host "${HOST:-127.0.0.1}" --port "${PORT:-8001}" --reload
     ;;
   stop) stop_svc ;;
   status) status_svc ;;
@@ -563,7 +563,7 @@ case "$cmd" in
   emailsync)
     export_env || true
     id=${2:-}
-    port=${PORT:-8000}
+    port=${PORT:-8001}
     if [[ -n "$id" ]]; then
       info "同步邮箱账户 #$id"
       curl -fsS -X POST "http://127.0.0.1:$port/api/email/accounts/$id/sync" || true

@@ -2,16 +2,16 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-LABEL="com.dasheng.aiintel.8000"
+LABEL="com.dasheng.aiintel.8001"
 UID_NUM="$(id -u)"
 DOMAIN="gui/${UID_NUM}"
 SERVICE_TARGET="${DOMAIN}/${LABEL}"
 LAUNCH_AGENT_DIR="$HOME/Library/LaunchAgents"
 PLIST_PATH="${LAUNCH_AGENT_DIR}/${LABEL}.plist"
 LOG_DIR="$HOME/Library/Logs/0913"
-STDOUT_LOG="${LOG_DIR}/launchd-8000.out.log"
-STDERR_LOG="${LOG_DIR}/launchd-8000.err.log"
-RUNNER_PATH="${ROOT_DIR}/scripts/run_uvicorn_8000.sh"
+STDOUT_LOG="${LOG_DIR}/launchd-8001.out.log"
+STDERR_LOG="${LOG_DIR}/launchd-8001.err.log"
+RUNNER_PATH="${ROOT_DIR}/scripts/run_uvicorn_8001.sh"
 
 color() { printf "\033[%sm%s\033[0m\n" "$1" "$2"; }
 info() { color "36" "$1"; }
@@ -111,7 +111,7 @@ health_check() {
   host="$(grep -E '^HOST=' "$ROOT_DIR/.env" 2>/dev/null | tail -n1 | cut -d= -f2- || true)"
   port="$(grep -E '^PORT=' "$ROOT_DIR/.env" 2>/dev/null | tail -n1 | cut -d= -f2- || true)"
   host="${host:-127.0.0.1}"
-  port="${port:-8000}"
+  port="${port:-8001}"
   if curl -fsS --max-time 5 "http://${host}:${port}/api/health" >/dev/null 2>&1; then
     ok "health ok: http://${host}:${port}/api/health"
   else

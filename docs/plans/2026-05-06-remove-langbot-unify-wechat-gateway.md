@@ -400,7 +400,7 @@ Run: `pytest -q tests/test_wechat_gateway_routes.py tests/test_wechat_gateway_he
 Expected: PASS
 
 ### Task 4.2: 增加 bind-callback API
-Objective: 让 8000 设置页真能完成 setCallback。
+Objective: 让 8001 设置页真能完成 setCallback。
 
 Files:
 - Modify: `app/routers/wechat_gateway.py`
@@ -484,7 +484,7 @@ Objective: 对照用户原始 5 项目标逐条验收。
 Checklist:
 - [ ] 0913 已不再依赖旧 LangBot 网关/DB/备份同步/前端入口
 - [ ] 所有微信自动化收发通过 0913 wechat gateway
-- [ ] 8000 设置页可配置 gateway config + trigger rules + callback bind
+- [ ] 8001 设置页可配置 gateway config + trigger rules + callback bind
 - [ ] 微信消息去重后并入主 Message 聚合
 - [ ] 规则仅作用于微信自动化体系，不影响 main / terminal UI / 非微信渠道
 - [ ] agent/openapi/config/send/sync 元数据无 LangBot 主路径暴露

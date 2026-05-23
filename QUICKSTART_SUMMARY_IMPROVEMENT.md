@@ -39,7 +39,7 @@ python test_summary_improvement.py
 摘要生成改进 - 自动化测试
 ================================================================================
 测试时间: 2025-10-21 15:30:00
-服务地址: http://127.0.0.1:8000
+服务地址: http://127.0.0.1:8001
 测试用例数: 5
 ================================================================================
 
@@ -66,7 +66,7 @@ python test_summary_improvement.py
 #### 方法B：手动测试单条消息
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/ai/test-tool-summary \
+curl -X POST http://127.0.0.1:8001/api/ai/test-tool-summary \
   -H "Content-Type: application/json" \
   -d '{
     "text": "XX证券邀请您参加腾讯会议（会议号123456789），讨论芯片板块观点：看好国产替代加速",
@@ -97,10 +97,10 @@ curl -X POST http://127.0.0.1:8000/api/ai/test-tool-summary \
 
 ```bash
 # 1. 触发一次消息派生
-curl -X POST http://127.0.0.1:8000/api/messages/derive?period=1day
+curl -X POST http://127.0.0.1:8001/api/messages/derive?period=1day
 
 # 2. 查看派生结果
-curl http://127.0.0.1:8000/api/messages?limit=10 | jq '.rows[] | {
+curl http://127.0.0.1:8001/api/messages?limit=10 | jq '.rows[] | {
   id: .id,
   content: .content_text[:50],
   summary: .derived.summary,
@@ -272,7 +272,7 @@ LIMIT 20;
 
 - 详细改进报告：`docs/summary-improvement-report.md`
 - 测试脚本：`test_summary_improvement.py`
-- API 文档：访问 http://127.0.0.1:8000/docs
+- API 文档：访问 http://127.0.0.1:8001/docs
 
 ---
 

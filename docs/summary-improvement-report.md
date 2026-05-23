@@ -192,7 +192,7 @@ bash scripts/manage.sh install
 
 **请求示例**：
 ```bash
-curl -X POST http://127.0.0.1:8000/api/ai/test-tool-summary \
+curl -X POST http://127.0.0.1:8001/api/ai/test-tool-summary \
   -H "Content-Type: application/json" \
   -d '{
     "text": "XX证券分析师李明邀请您参加腾讯会议，会议号123-456-789，讨论芯片板块最新观点：看好国产替代加速，建议关注设备与材料龙头",
