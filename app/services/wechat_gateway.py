@@ -52,7 +52,7 @@ DEFAULT_TRIGGER_RULES: dict[str, Any] = {
     "private_enabled": True,
     "prefixes": ["ai"],
     "regexp_patterns": [],
-    "at_mention_enabled": False,
+    "at_mention_enabled": True,
     "random_rate": 0,
     "whitelist_chat_ids_enabled": False,
     "whitelist_chat_ids": [],
@@ -649,7 +649,7 @@ def _message_has_at_mention(message_meta: Any) -> bool:
     mentioned = set(_extract_at_user_list(data.get("MsgSource")))
     if self_wxid and self_wxid in mentioned:
         return True
-    return bool(mentioned)
+    return False
 
 
 def _pick_trigger_match(text: str, rules: dict[str, Any], message_meta: Any = None) -> tuple[bool, str | None]:
@@ -659,21 +659,21 @@ def _pick_trigger_match(text: str, rules: dict[str, Any], message_meta: Any = No
     random_rate = int(rules.get("random_rate") or 0)
     normalized_text = str(text or "").strip()
 
+    if at_mention_enabled and _message_has_at_mention(message_meta):
+        return True, "at_mention"
     if prefixes and _message_has_prefix(normalized_text, prefixes):
         return True, "prefix"
     if regexp_patterns and _message_matches_regexp(normalized_text, regexp_patterns):
         return True, "regexp"
-    if at_mention_enabled and _message_has_at_mention(message_meta):
-        return True, "at_mention"
     if random_rate > 0 and random.random() < (float(random_rate) / 100.0):
         return True, "random"
 
+    if at_mention_enabled:
+        return False, "at_mention_required"
     if prefixes:
         return False, "prefix_miss"
     if regexp_patterns:
         return False, "regexp_miss"
-    if at_mention_enabled:
-        return False, "at_mention_required"
     if random_rate > 0:
         return False, "random_miss"
     return True, "always"

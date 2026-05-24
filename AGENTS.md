@@ -1,5 +1,7 @@
 # Repository Guidelines
 
+> **新 Agent 必读**：先看 `AGENTS_ONBOARDING.md`，它有完整的 memory 写入指引和首次部署流程。
+
 ## Project Structure & Module Organization
 - `app/`: FastAPI app (`main.py`), `routers/*`, `services/*`, models/db/config/schemas.
 - `data/`: SQLite DB and AI artifacts (default `data/app.db`). Runtime output; do not commit.
