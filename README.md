@@ -107,6 +107,12 @@ Deepsee 可通过 wechatapi.net 的 iPad 协议接入微信，也可在云服务
 - 直连公网 IP 部署时，Deepsee 需要监听 `0.0.0.0`，否则 wechatapi.net 访问公网 callback 可能报 `push msg err`。
 - 登录成功后保存 token/app_id/wxid/region_id/device_type 的对应关系，二次登录优先复用 app_id。
 
+触发规则（2026-05 更新）：
+
+- `at_mention_enabled` 默认开启，群聊中被 @ 时自动触发回复。
+- 自动回复范围已放宽：除违法内容和系统配置指令外，日常闲聊也可正常互动。
+- 黑白名单、前缀匹配、正则匹配、随机触发等规则可通过 `POST /api/wechat-gateway/trigger-rules` 配置。
+
 ### Agent 配套包
 
 **https://github.com/leecyno1/wx-auto** 提供 Hermes/Agent 侧的：
