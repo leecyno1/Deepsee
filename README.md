@@ -121,6 +121,10 @@ Deepsee 可通过 wechatapi.net 的 iPad 协议接入微信，也可在云服务
 - Hermes Skill 模板
 - 新环境安装指引
 
+文档边界：
+- 本仓库（Deepsee/0913）内部署/迁移的唯一维护文档：`DEPLOY_FULL.md`
+- `wx-auto/DEPLOY.md` 是独立的 Agent 侧 / 跨机部署手册，不替代本仓库内部部署文档
+
 ## 开发
 
 ```bash

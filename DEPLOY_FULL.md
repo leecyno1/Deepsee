@@ -2,6 +2,36 @@
 
 > 版本: 2026-05-19 | 适用于全新服务器部署
 
+本文件是 0913 / Deepsee 仓库内唯一维护的部署与迁移 source of truth。
+注意：这不影响 `wx-auto/DEPLOY.md`，后者仍然是 Agent 侧 / 跨机部署视角的独立手册。
+
+---
+
+## 快速开始（新服务器）
+
+```bash
+# 1. 克隆项目
+git clone <your-repo-url> /opt/0913
+cd /opt/0913
+
+# 2. 一键部署
+bash scripts/deploy-0913.sh /opt/0913
+```
+
+部署脚本会交互式询问：
+1. wechatapi token + app_id
+2. Callback public URL
+3. SiliconFlow API key
+4. MiniMax API key
+5. API Token
+
+最小上线检查：
+- `curl http://127.0.0.1:8001/api/health`
+- `curl http://127.0.0.1:8642/health`
+- 配置公网隧道到 8001
+- 绑定 `/api/wechat-gateway/callback`
+- 微信发送 `ai test` 验证自动回复
+
 ---
 
 ## 架构概览
@@ -14,7 +44,7 @@
                                     │         (reins)             (brain)
                                     │              │                   │
                                     │    ┌─ wechat_gateway.py ─→ hermes_bridge.py ──→ /v1/chat/completions
-                                    │    │  (入库+规则评估)         (格式约束+per-chat session)
+                                    │    │  (入库+规则评估)         (格式约束+bridge-scoped session key)
                                     │    │                             │
                                     │    └─ reply_generation.py (降级)  ├─ wiki / 记忆 / web search
                                     │                                   ├─ skills (llm-wiki, 0913-wechat-smart-reply)
@@ -37,7 +67,7 @@
 |------|------|------|:--:|
 | **核心源码** | `app/` (全部) | FastAPI 入口 + 29 routers + 35 services | ✓ |
 | **网关核心** | `app/services/wechat_gateway.py` | 回调入库 + 触发规则 + 自动回复编排 | ✓ |
-| **Hermes桥接** | `app/services/hermes_bridge.py` | API Server 桥接 (per-chat session) | ✓ |
+| **Hermes桥接** | `app/services/hermes_bridge.py` | API Server 桥接（bridge-scoped session key；优先 subsession，缺省回落 chat） | ✓ |
 | **降级回复** | `app/services/reply_generation.py` | SiliconFlow 直调降级路径 | ✓ |
 | **API客户端** | `app/services/wechatapi_client.py` | 125 方法 wechatapi.net 客户端 | ✓ |
 | **消息过滤** | `app/services/message_filters.py` | gh_*/system 噪声过滤 | ✓ |
@@ -53,7 +83,7 @@
 | **依赖** | `requirements.txt` | Python 依赖清单 | ✓ |
 | **文档** | `docs/wechatapi-docs/` | 142页 API 文档镜像 | ✓ |
 | **配置模板** | `.env.example`, `data/ai_config.json.example` | 配置模板 | ✓ |
-| **项目文档** | `DEPLOY.md`, `ARCHITECTURE.md`, `MODULES.md` | 项目说明 | ✓ |
+| **项目文档** | `DEPLOY_FULL.md`, `ARCHITECTURE.md`, `MODULES.md` | 项目说明 | ✓ |
 | **计划文档** | `docs/plans/` | 历史架构决策记录 | 可选 |
 | **测试** | `tests/` | pytest 测试套件 | 可选 |
 | **数据库** | `data/app.db` | **不要打包** (含敏感聊天记录) | ✗ |
@@ -71,7 +101,7 @@ tar czf /tmp/0913-source.tar.gz \
   --exclude='data/minutes' --exclude='chatlog_*' \
   app/ static/ media-collector/ scripts/ docs/ tests/ \
   .env.example data/ai_config.json.example \
-  requirements.txt DEPLOY.md ARCHITECTURE.md MODULES.md AGENTS.md \
+  requirements.txt DEPLOY_FULL.md ARCHITECTURE.md MODULES.md AGENTS.md \
   VERSION pytest.ini
 ```
 
@@ -422,7 +452,7 @@ DEEPSEEK_API_KEY=<DeepSeek key>  # 主对话模型
 
 | # | 问题 | 现象 | 修复 |
 |---|------|------|------|
-| 6 | session 膨胀到1.98M tokens | 回复来自无关对话 | per-chat session 已修复 (hermes_bridge.py) |
+| 6 | session 膨胀到1.98M tokens | 回复来自无关对话 | 已改为 bridge-scoped session key（优先 subsession，缺省回落 chat） |
 | 7 | prefix "ai" 匹配自然语言 | "AI涨价主线"触发了配置泄露 | 换更明确前缀如 "/ai" |
 | 8 | 时区错误 (utcnow) | 8小时静默期 | 全部用 datetime.fromtimestamp() |
 | 9 | natapp 断线 | 消息丢失 | 重连后重新 bind callback |
@@ -505,7 +535,7 @@ tar czf /tmp/0913-migrate.tar.gz \
   --exclude='.venv' --exclude='.env' --exclude='data/hot' \
   --exclude='data/search' --exclude='data/authors' \
   app/ static/ media-collector/ scripts/ docs/ requirements.txt \
-  .env.example data/ai_config.json.example DEPLOY.md
+  .env.example data/ai_config.json.example DEPLOY_FULL.md
 tar czf /tmp/hermes-migrate.tar.gz \
   -C ~/.hermes/skills/software-development 0913-wechat-smart-reply \
   -C ~/.hermes/scripts 0913_hot_collect.sh 0913_batch_search.sh \
