@@ -9,11 +9,28 @@ import requests
 
 # ── 配置 ──
 HERMES_URL = "http://127.0.0.1:8642/v1/chat/completions"
-API_KEY = os.getenv("HERMES_API_KEY", "")
+def _resolve_api_key() -> str:
+    explicit = os.getenv("HERMES_API_KEY", "").strip()
+    if explicit:
+        return explicit
+    process_api_server_key = os.getenv("API_SERVER_KEY", "").strip()
+    if process_api_server_key:
+        return process_api_server_key
+    hermes_home = os.getenv("HERMES_HOME") or os.path.expanduser("~/.hermes")
+    env_path = os.path.join(hermes_home, ".env")
+    if os.path.exists(env_path):
+        for raw in open(env_path, encoding="utf-8"):
+            line = raw.strip()
+            if line.startswith("API_SERVER_KEY="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return ""
+
+
+API_KEY = _resolve_api_key()
 SESSION_ID = "wechat_gateway_e2e_test"
 
 if not API_KEY:
-    raise SystemExit("请先设置 HERMES_API_KEY 环境变量后再运行端到端测试。")
+    raise SystemExit("请先设置 HERMES_API_KEY，或确保本机 Hermes 的 API_SERVER_KEY 可读取后再运行端到端测试。")
 
 # ── 模拟 0913 回调发来的微信消息 ──
 TEST_CASES = [

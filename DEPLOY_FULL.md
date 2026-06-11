@@ -396,7 +396,8 @@ MINIMAX_API_KEY=<key>
 
 # Hermes Bridge
 HERMES_API_BASE=http://127.0.0.1:8642
-HERMES_API_KEY=<与Hermes API_SERVER_KEY一致>
+# 可显式设置 HERMES_API_KEY；若留空，0913 会自动回退读取本机 Hermes 的 API_SERVER_KEY（进程环境或 $HERMES_HOME/.env）
+HERMES_API_KEY=
 HERMES_FALLBACK_ENABLED=false   # 生产建议false，避免静默降级
 ```
 

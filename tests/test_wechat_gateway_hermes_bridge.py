@@ -149,6 +149,84 @@ def test_call_hermes_for_reply_resolves_prompt_from_subsession_and_sets_executio
     assert result["execution"]["fallback_used"] is False
 
 
+def test_call_hermes_for_reply_uses_local_api_server_key_when_hermes_api_key_missing(tmp_path, monkeypatch):
+    import app.services.hermes_bridge as hermes_bridge_service
+
+    captured = {}
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [{"message": {"content": "bridge reply"}}],
+                "usage": {"prompt_tokens": 9, "completion_tokens": 3},
+                "model": "hermes-agent",
+            }
+
+    def _fake_post(url, json, headers, timeout):
+        captured["headers"] = headers
+        return DummyResponse()
+
+    hermes_home = tmp_path / "hermes-home"
+    hermes_home.mkdir()
+    (hermes_home / ".env").write_text("API_SERVER_KEY=file-bridge-key\n", encoding="utf-8")
+
+    monkeypatch.delenv("HERMES_API_KEY", raising=False)
+    monkeypatch.delenv("API_SERVER_KEY", raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setattr(hermes_bridge_service.requests, "post", _fake_post)
+
+    result = hermes_bridge_service.call_hermes_for_reply(
+        "ai 你好",
+        subsession_id="wechat_gateway_default",
+        system_prompt="你是固定 prompt。",
+    )
+
+    assert result["status"] == "ok"
+    assert captured["headers"]["Authorization"] == "Bearer file-bridge-key"
+
+
+def test_call_hermes_for_reply_prefers_explicit_hermes_api_key_over_api_server_key(tmp_path, monkeypatch):
+    import app.services.hermes_bridge as hermes_bridge_service
+
+    captured = {}
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [{"message": {"content": "bridge reply"}}],
+                "usage": {"prompt_tokens": 9, "completion_tokens": 3},
+                "model": "hermes-agent",
+            }
+
+    def _fake_post(url, json, headers, timeout):
+        captured["headers"] = headers
+        return DummyResponse()
+
+    hermes_home = tmp_path / "hermes-home"
+    hermes_home.mkdir()
+    (hermes_home / ".env").write_text("API_SERVER_KEY=file-bridge-key\n", encoding="utf-8")
+
+    monkeypatch.setenv("HERMES_API_KEY", "explicit-client-key")
+    monkeypatch.setenv("API_SERVER_KEY", "process-api-server-key")
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setattr(hermes_bridge_service.requests, "post", _fake_post)
+
+    result = hermes_bridge_service.call_hermes_for_reply(
+        "ai 你好",
+        subsession_id="wechat_gateway_default",
+        system_prompt="你是固定 prompt。",
+    )
+
+    assert result["status"] == "ok"
+    assert captured["headers"]["Authorization"] == "Bearer explicit-client-key"
+
+
 def test_call_hermes_for_reply_fail_closed_without_silent_fallback(monkeypatch):
     import requests
     import app.services.hermes_bridge as hermes_bridge_service

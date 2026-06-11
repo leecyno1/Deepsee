@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import os
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -21,9 +22,41 @@ from ..models import WechatSubsession
 
 logger = logging.getLogger(__name__)
 
+
+def _read_env_file_value(path: Path, key: str) -> str:
+    try:
+        if not path.exists():
+            return ""
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            current_key, value = line.split("=", 1)
+            if current_key.strip() == key:
+                return value.strip().strip('"').strip("'")
+    except Exception:
+        return ""
+    return ""
+
+
+def _resolve_hermes_api_key() -> str:
+    explicit = str(os.getenv("HERMES_API_KEY", "") or "").strip()
+    if explicit:
+        return explicit
+
+    process_api_server_key = str(os.getenv("API_SERVER_KEY", "") or "").strip()
+    if process_api_server_key:
+        return process_api_server_key
+
+    hermes_home = Path(os.getenv("HERMES_HOME") or (Path.home() / ".hermes"))
+    env_key = _read_env_file_value(hermes_home / ".env", "API_SERVER_KEY")
+    if env_key:
+        return env_key
+    return ""
+
+
 # ── Hermes API Server 配置 ──────────────────────────────────────────
 HERMES_API_BASE = os.getenv("HERMES_API_BASE", "http://127.0.0.1:8642")
-HERMES_API_KEY = os.getenv("HERMES_API_KEY", "")
 HERMES_SESSION_ID = "wechat_gateway_default"  # fallback when chat_id is empty
 HERMES_CHAT_URL = f"{HERMES_API_BASE.rstrip('/')}/v1/chat/completions"
 TIMEOUT = 180  # agent loop 可能较慢（tool calls, wiki 搜索等）
@@ -286,7 +319,7 @@ def _call_hermes_api(
 
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {HERMES_API_KEY}",
+        "Authorization": f"Bearer {_resolve_hermes_api_key()}",
         "X-Hermes-Session-Id": session_id,
         "X-Hermes-Session-Key": session_id,
     }
