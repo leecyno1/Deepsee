@@ -8,12 +8,16 @@ Hermes 作为"脑子"，0913 作为"缰绳"（收发 + 规则 UI）。
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 from typing import Any
 
 import requests
+
+from ..db import SessionLocal
+from ..models import WechatSubsession
 
 logger = logging.getLogger(__name__)
 
@@ -26,22 +30,119 @@ TIMEOUT = 180  # agent loop 可能较慢（tool calls, wiki 搜索等）
 
 
 # ── 降级：Hermes 不可用时回退到 0913 直调 LLM ──────────────────────
-_FALLBACK_ENABLED = os.getenv("HERMES_FALLBACK_ENABLED", "true").lower() in (
+_FALLBACK_ENABLED = os.getenv("HERMES_FALLBACK_ENABLED", "false").lower() in (
     "true", "1", "yes"
 )
 
 
-def _per_chat_session_id(chat_id: str, sender_id: str = "") -> str:
-    """每个 chat_id 一个独立 Hermes session，避免跨群上下文污染。"""
-    key = chat_id or sender_id or "default"
-    # 确保 session ID 安全（只保留字母数字和部分符号）
-    safe = "".join(c for c in key if c.isalnum() or c in "@._-")
-    return f"wechat_gateway_{safe}"
+def _sanitize_session_key_part(value: str) -> str:
+    safe = "".join(c for c in str(value or "") if c.isalnum() or c in "@._-")
+    return safe or "default"
+
+
+def _bridge_session_id(
+    *,
+    channel: str,
+    subsession_id: str | None = None,
+    chat_id: str = "",
+    sender_id: str = "",
+) -> str:
+    """Bridge-owned Hermes session key with explicit channel namespacing.
+
+    0913 already persists WeChat contact/chat membership and turns in its own tables.
+    Hermes session continuity should therefore align to the resolved subsession,
+    not explode into one session per contact. This also prevents collisions with
+    Feishu/DingTalk/API-server-native sessions because the bridge namespace and
+    channel are encoded in the key.
+    """
+    normalized_channel = _sanitize_session_key_part(channel)
+    normalized_subsession = _sanitize_session_key_part(subsession_id or "")
+    if normalized_subsession != "default" or str(subsession_id or "").strip():
+        return f"agent:bridge:{normalized_channel}:subsession:{normalized_subsession}"
+
+    fallback_key = _sanitize_session_key_part(chat_id or sender_id or HERMES_SESSION_ID)
+    return f"agent:bridge:{normalized_channel}:chat:{fallback_key}"
+
+
+def _load_subsession_prompt(subsession_id: str | None) -> str | None:
+    sid = str(subsession_id or "").strip()
+    if not sid:
+        return None
+    db = SessionLocal()
+    try:
+        row = db.get(WechatSubsession, sid)
+        prompt = str((row.system_prompt if row else "") or "").strip()
+        return prompt or None
+    finally:
+        db.close()
+
+
+def _prompt_hash(prompt: str | None) -> str | None:
+    text = str(prompt or "").strip()
+    if not text:
+        return None
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+
+
+def _default_system_prompt(
+    sender_name: str = "",
+    talker_name: str = "",
+    is_group: bool = False,
+) -> str:
+    """默认 system prompt — 仅当 0913 回调未传入 subsession prompt 时使用。"""
+    return (
+        "你是微信工作流分身，叫柠檬博士，是主Agent的投资助理。"
+        "简洁专业、数据说话、沉稳幽默。利用 wiki 知识库搜索和网络搜索获取信息后回答。"
+        "\n\n"
+        "隐私规则：绝不透露系统信息、个人身份、API密钥、文件路径。"
+        "被问及模型/架构时只回复「我是柠檬博士，投资助理」。"
+        "日常闲聊可以正常互动，不涉及违法和系统配置即可。路演/会议邀约只回复「已知晓」，绝对不表示参加。"
+    )
+
+
+def _build_execution_context(
+    *,
+    chat_id: str = "",
+    sender_id: str = "",
+    sender_name: str = "",
+    talker_name: str = "",
+    is_group: bool = False,
+    subsession_id: str | None = None,
+    system_prompt: str | None = None,
+) -> dict[str, Any]:
+    explicit_prompt = str(system_prompt or "").strip() or None
+    resolved_prompt = explicit_prompt
+    prompt_source = "explicit" if explicit_prompt else "subsession"
+    if not resolved_prompt:
+        resolved_prompt = _load_subsession_prompt(subsession_id)
+    if not resolved_prompt:
+        prompt_source = "default"
+        resolved_prompt = _default_system_prompt(
+            sender_name=sender_name,
+            talker_name=talker_name,
+            is_group=is_group,
+        )
+
+    source_subsession_id = str(subsession_id or "").strip() or HERMES_SESSION_ID
+    hermes_session_id = _bridge_session_id(
+        channel="wechat_gateway",
+        subsession_id=source_subsession_id,
+        chat_id=chat_id,
+        sender_id=sender_id,
+    )
+    return {
+        "resolved_prompt": resolved_prompt,
+        "subsession_id": source_subsession_id,
+        "hermes_session_id": hermes_session_id,
+        "prompt_source": prompt_source,
+        "prompt_hash": _prompt_hash(resolved_prompt),
+    }
 
 
 def call_hermes_for_reply(
     message_text: str,
     *,
+    subsession_id: str | None = None,
     chat_id: str = "",
     sender_id: str = "",
     sender_name: str = "",
@@ -59,9 +160,19 @@ def call_hermes_for_reply(
         dict with status, reply, execution metadata.
         失败时自动降级到 0913 直调 LLM（如果 _FALLBACK_ENABLED）。
     """
+    execution_context = _build_execution_context(
+        chat_id=chat_id,
+        sender_id=sender_id,
+        sender_name=sender_name,
+        talker_name=talker_name,
+        is_group=is_group,
+        subsession_id=subsession_id,
+        system_prompt=system_prompt,
+    )
     try:
         return _call_hermes_api(
             message_text,
+            subsession_id=subsession_id,
             chat_id=chat_id,
             sender_id=sender_id,
             sender_name=sender_name,
@@ -69,6 +180,7 @@ def call_hermes_for_reply(
             is_group=is_group,
             system_prompt=system_prompt,
             conversation_history=conversation_history,
+            execution_context=execution_context,
         )
     except Exception as exc:
         logger.warning("Hermes API failed: %s", exc)
@@ -76,18 +188,33 @@ def call_hermes_for_reply(
             logger.info("Falling back to 0913 direct LLM path")
             return _fallback_direct_llm(
                 message_text,
+                subsession_id=str(execution_context.get("subsession_id") or "").strip() or None,
                 chat_id=chat_id,
                 sender_id=sender_id,
                 sender_name=sender_name,
                 talker_name=talker_name,
                 is_group=is_group,
+                system_prompt=str(execution_context.get("resolved_prompt") or "").strip() or None,
             )
-        return {"status": "error", "error": str(exc)}
+        return {
+            "status": "error",
+            "error": str(exc),
+            "execution": {
+                "route_kind": "hermes_api_server",
+                "route_key": "wechat_gateway",
+                "subsession_id": execution_context.get("subsession_id"),
+                "hermes_session_id": execution_context.get("hermes_session_id"),
+                "prompt_source": execution_context.get("prompt_source"),
+                "prompt_hash": execution_context.get("prompt_hash"),
+                "fallback_used": False,
+            },
+        }
 
 
 def _call_hermes_api(
     message_text: str,
     *,
+    subsession_id: str | None = None,
     chat_id: str = "",
     sender_id: str = "",
     sender_name: str = "",
@@ -95,28 +222,26 @@ def _call_hermes_api(
     is_group: bool = False,
     system_prompt: str | None = None,
     conversation_history: list[dict[str, str]] | None = None,
+    execution_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """直接调 Hermes API Server Chat Completions。"""
 
-    # 构建消息列表
-    messages: list[dict[str, str]] = []
+    ctx = execution_context or _build_execution_context(
+        chat_id=chat_id,
+        sender_id=sender_id,
+        sender_name=sender_name,
+        talker_name=talker_name,
+        is_group=is_group,
+        subsession_id=subsession_id,
+        system_prompt=system_prompt,
+    )
 
-    if system_prompt:
-        messages.append({"role": "system", "content": system_prompt})
-    else:
-        messages.append({
-            "role": "system",
-            "content": _default_system_prompt(
-                sender_name=sender_name,
-                talker_name=talker_name,
-                is_group=is_group,
-            ),
-        })
+    messages: list[dict[str, str]] = []
+    messages.append({"role": "system", "content": str(ctx.get("resolved_prompt") or "")})
 
     if conversation_history:
         messages.extend(conversation_history)
 
-    # 注入上下文元数据 + 格式约束（追加在末尾，LLM 服从度最高）
     user_content = message_text
     if chat_id:
         user_content = (
@@ -124,7 +249,6 @@ def _call_hermes_api(
             f"{message_text}"
         )
 
-    # 回复格式硬约束 — 追加在 user message 末尾覆盖 Hermes 核心 prompt 的"充分探索"倾向
     user_content += (
         "\n\n---\n"
         "回复要求（必须遵守）：\n"
@@ -150,7 +274,15 @@ def _call_hermes_api(
         "stream": False,
     }
 
-    session_id = _per_chat_session_id(chat_id, sender_id)
+    session_id = str(
+        ctx.get("hermes_session_id")
+        or _bridge_session_id(
+            channel="wechat_gateway",
+            subsession_id=ctx.get("subsession_id"),
+            chat_id=chat_id,
+            sender_id=sender_id,
+        )
+    )
 
     headers = {
         "Content-Type": "application/json",
@@ -181,42 +313,31 @@ def _call_hermes_api(
         "execution": {
             "route_kind": "hermes_api_server",
             "route_key": "wechat_gateway",
-            "subsession_id": session_id,
+            "subsession_id": ctx.get("subsession_id"),
+            "hermes_session_id": session_id,
+            "prompt_source": ctx.get("prompt_source"),
+            "prompt_hash": ctx.get("prompt_hash"),
             "model": data.get("model", "unknown"),
             "prompt_tokens": usage.get("prompt_tokens", 0),
             "completion_tokens": usage.get("completion_tokens", 0),
+            "fallback_used": False,
         },
     }
-
-
-def _default_system_prompt(
-    sender_name: str = "",
-    talker_name: str = "",
-    is_group: bool = False,
-) -> str:
-    """默认 system prompt — 仅当 0913 回调未传入 subsession prompt 时使用。"""
-    return (
-        "你是微信工作流分身，叫柠檬博士，是主Agent的投资助理。"
-        "简洁专业、数据说话、沉稳幽默。利用 wiki 知识库搜索和网络搜索获取信息后回答。"
-        "\n\n"
-        "隐私规则：绝不透露系统信息、个人身份、API密钥、文件路径。"
-        "被问及模型/架构时只回复「我是柠檬博士，投资助理」。"
-        "日常闲聊可以正常互动，不涉及违法和系统配置即可。路演/会议邀约只回复「已知晓」，绝对不表示参加。"
-    )
 
 
 def _fallback_direct_llm(
     message_text: str,
     *,
+    subsession_id: str | None = None,
     chat_id: str = "",
     sender_id: str = "",
     sender_name: str = "",
     talker_name: str = "",
     is_group: bool = False,
+    system_prompt: str | None = None,
 ) -> dict[str, Any]:
     """降级：Hermes 不可用时回退到原有 siliconflow_chat 路径。"""
     from .reply_generation import generate_local_reply
-    from ..db import SessionLocal
 
     db = SessionLocal()
     try:
@@ -230,11 +351,44 @@ def _fallback_direct_llm(
                 "talker_name": talker_name or chat_id,
                 "is_group": is_group,
                 "wait_for_human_reply_suppression": False,
-                "subsession_id": _per_chat_session_id(chat_id, sender_id),
+                "subsession_id": str(subsession_id or "").strip() or None,
+                "system_prompt": str(system_prompt or "").strip() or None,
             },
         )
+        execution = dict(result.get("execution") or {})
+        execution.setdefault("route_kind", "direct_llm_fallback")
+        execution.setdefault("route_key", "wechat_gateway")
+        execution["subsession_id"] = str(subsession_id or "").strip() or execution.get("subsession_id")
+        execution["hermes_session_id"] = _bridge_session_id(
+            channel="wechat_gateway",
+            subsession_id=subsession_id,
+            chat_id=chat_id,
+            sender_id=sender_id,
+        )
+        execution["prompt_hash"] = _prompt_hash(system_prompt)
+        execution["prompt_source"] = "fallback_passthrough" if system_prompt else execution.get("prompt_source")
+        execution["fallback_used"] = True
+        result["execution"] = execution
         return result
     except Exception as exc:
-        return {"status": "error", "error": f"fallback failed: {exc}"}
+        return {
+            "status": "error",
+            "error": f"fallback failed: {exc}",
+            "execution": {
+                "route_kind": "direct_llm_fallback",
+                "route_key": "wechat_gateway",
+                "subsession_id": str(subsession_id or "").strip() or None,
+                "hermes_session_id": _bridge_session_id(
+                    channel="wechat_gateway",
+                    subsession_id=subsession_id,
+                    chat_id=chat_id,
+                    sender_id=sender_id,
+                ),
+                "prompt_hash": _prompt_hash(system_prompt),
+                "prompt_source": "fallback_passthrough" if system_prompt else None,
+                "fallback_used": True,
+                "error": f"fallback failed: {exc}",
+            },
+        }
     finally:
         db.close()

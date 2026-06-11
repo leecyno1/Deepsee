@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
+from concurrent.futures import ThreadPoolExecutor
+
 from fastapi import APIRouter, Depends, HTTPException, Response, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
 
 from ..db import SessionLocal
-from ..models import Message, WechatSubsession
+from ..models import Message
 from ..services.wechatapi_client import WechatApiClient
 from ..services.wechat_gateway import (
     apply_outbound_random_delay,
@@ -23,12 +26,94 @@ from ..services.wechat_gateway import (
 
 
 router = APIRouter(prefix="/api/wechat-gateway", tags=["wechat-gateway"])
+logger = logging.getLogger(__name__)
+_auto_reply_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="wechat-auto-reply")
 
 
 def get_db():
     db = SessionLocal()
     try:
         yield db
+    finally:
+        db.close()
+
+
+def _run_auto_reply_for_message(message_id: int) -> None:
+    db = SessionLocal()
+    try:
+        message = db.get(Message, message_id)
+        if not message or message.direction != "in" or str(message.type or "") != "text":
+            return
+
+        from ..services.hermes_bridge import call_hermes_for_reply
+
+        subsession_id = ((message.meta or {}).get("subsession") or {}).get("id") or "wechat_gateway_default"
+        generated = call_hermes_for_reply(
+            message_text=str(message.content_text or ""),
+            subsession_id=subsession_id,
+            chat_id=str(message.chat_id or ""),
+            sender_id=str(message.sender_id or ""),
+            sender_name=str(message.sender_name or ""),
+            talker_name=str(message.talker_name or message.chat_id or ""),
+            is_group=str(message.chat_id or "").endswith("@chatroom"),
+        )
+        if generated.get("status") != "ok":
+            logger.info("wechat auto reply skipped: message_id=%s status=%s", message_id, generated.get("status"))
+            return
+
+        final_gate = evaluate_auto_reply_rules(
+            db,
+            chat_id=str(message.chat_id or ""),
+            sender_id=str(message.sender_id or "") or None,
+            text=str(message.content_text or ""),
+            is_group=str(message.chat_id or "").endswith("@chatroom"),
+            message_time=message.timestamp.isoformat() if message.timestamp else None,
+            wait_for_human_reply_suppression=True,
+            message_meta=message.meta,
+        )
+        if not final_gate.get("allowed"):
+            logger.info("wechat auto reply blocked: message_id=%s reason=%s", message_id, final_gate.get("reason"))
+            return
+
+        cfg = load_config(db)
+        reply_text = str(generated.get("reply") or "")
+        rule = evaluate_outbound_message(cfg, target=str(message.chat_id or ""), text=reply_text)
+        if not rule.get("allowed", True):
+            logger.info("wechat outbound blocked: message_id=%s reason=%s", message_id, rule.get("reason"))
+            return
+
+        client = WechatApiClient(
+            base_url=str(cfg.get("base_url") or ""),
+            token=str(cfg.get("token") or ""),
+            header_name=str(cfg.get("header_name") or "VideosApi-token"),
+            app_id=str(cfg.get("app_id") or ""),
+        )
+        if not client.configured():
+            logger.warning("wechat auto reply skipped: gateway not configured")
+            return
+
+        delay_seconds = apply_outbound_random_delay(cfg)
+        provider_result = client.send_text(to_wxid=str(message.chat_id or ""), text=reply_text)
+        outbound = record_outbound_message(
+            db,
+            target=str(message.chat_id or ""),
+            text=reply_text,
+            provider_result=provider_result,
+        )
+        meta = dict(outbound.meta or {})
+        meta["auto_reply"] = {
+            "trigger_message_id": message.id,
+            "rule": final_gate,
+            "prompt_key": generated.get("prompt_key"),
+            "execution": generated.get("execution") or None,
+            "outbound_rule": rule,
+            "outbound_delay_seconds": delay_seconds,
+        }
+        outbound.meta = meta
+        db.add(outbound)
+        db.commit()
+    except Exception:
+        logger.exception("wechat auto reply failed: message_id=%s", message_id)
     finally:
         db.close()
 
@@ -115,98 +200,12 @@ def bind_wechat_gateway_callback(db: Session = Depends(get_db)):
 @router.post("/callback")
 def receive_wechat_gateway_callback(payload: dict, response: Response, db: Session = Depends(get_db)):
     result = ingest_callback_event(db, payload if isinstance(payload, dict) else {})
-    auto_reply: dict | None = None
     if result.get("stored") and not result.get("duplicate"):
-        message = db.get(Message, int(result.get("message_id") or 0)) if result.get("message_id") else None
+        message_id = int(result.get("message_id") or 0)
+        message = db.get(Message, message_id) if message_id else None
         if message and message.direction == "in" and str(message.type or "") == "text":
-            # ── Hermes 智能回复 (wiki + 记忆 + 工具 + 技能) ──
-            from ..services.hermes_bridge import call_hermes_for_reply
-
-            # 读取子 session system_prompt（0913 前端可编辑）
-            subsession_id = ((message.meta or {}).get("subsession") or {}).get("id") or "wechat_gateway_default"
-            sub = db.get(WechatSubsession, subsession_id)
-            subsession_prompt = sub.system_prompt if sub and sub.system_prompt else None
-
-            generated = call_hermes_for_reply(
-                message_text=str(message.content_text or ""),
-                chat_id=str(message.chat_id or ""),
-                sender_id=str(message.sender_id or ""),
-                sender_name=str(message.sender_name or ""),
-                talker_name=str(message.talker_name or message.chat_id or ""),
-                is_group=str(message.chat_id or "").endswith("@chatroom"),
-                system_prompt=subsession_prompt,
-            )
-            if generated.get("status") == "ok":
-                final_gate = evaluate_auto_reply_rules(
-                    db,
-                    chat_id=str(message.chat_id or ""),
-                    sender_id=str(message.sender_id or "") or None,
-                    text=str(message.content_text or ""),
-                    is_group=str(message.chat_id or "").endswith("@chatroom"),
-                    message_time=message.timestamp.isoformat() if message.timestamp else None,
-                    wait_for_human_reply_suppression=True,
-                    message_meta=message.meta,
-                )
-                if not final_gate.get("allowed"):
-                    auto_reply = {"status": "blocked", "reason": str(final_gate.get("reason") or "blocked"), "rule": final_gate}
-                else:
-                    cfg = load_config(db)
-                    rule = evaluate_outbound_message(cfg, target=str(message.chat_id or ""), text=str(generated.get("reply") or ""))
-                    if not rule.get("allowed", True):
-                        auto_reply = {"status": "blocked", "reason": str(rule.get("reason") or "blocked"), "rule": rule}
-                    else:
-                        client = WechatApiClient(
-                            base_url=str(cfg.get("base_url") or ""),
-                            token=str(cfg.get("token") or ""),
-                            header_name=str(cfg.get("header_name") or "VideosApi-token"),
-                            app_id=str(cfg.get("app_id") or ""),
-                        )
-                        if not client.configured():
-                            auto_reply = {"status": "error", "error": "wechatapi gateway not configured"}
-                        else:
-                            try:
-                                delay_seconds = apply_outbound_random_delay(cfg)
-                                provider_result = client.send_text(to_wxid=str(message.chat_id or ""), text=str(generated.get("reply") or ""))
-                                outbound = record_outbound_message(
-                                    db,
-                                    target=str(message.chat_id or ""),
-                                    text=str(generated.get("reply") or ""),
-                                    provider_result=provider_result,
-                                )
-                                meta = dict(outbound.meta or {})
-                                meta["auto_reply"] = {
-                                    "trigger_message_id": message.id,
-                                    "rule": final_gate,
-                                    "prompt_key": generated.get("prompt_key"),
-                                    "execution": generated.get("execution") or None,
-                                    "outbound_rule": rule,
-                                    "outbound_delay_seconds": delay_seconds,
-                                }
-                                outbound.meta = meta
-                                db.add(outbound)
-                                db.commit()
-                                db.refresh(outbound)
-                                auto_reply = {
-                                    "status": "sent",
-                                    "reply": str(generated.get("reply") or ""),
-                                    "message_id": outbound.id,
-                                    "rule": final_gate,
-                                    "execution": generated.get("execution") or None,
-                                    "outbound_rule": rule,
-                                }
-                            except Exception as exc:
-                                auto_reply = {"status": "error", "error": str(exc), "rule": final_gate}
-            elif generated.get("status") == "blocked":
-                auto_reply = {"status": "blocked", "reason": str(generated.get("reason") or "blocked"), "rule": generated.get("rule")}
-            elif generated.get("status") == "error":
-                auto_reply = {
-                    "status": "error",
-                    "error": str(generated.get("error") or "reply generation failed"),
-                    "rule": generated.get("rule"),
-                    "execution": generated.get("execution") or None,
-                }
-    if auto_reply is not None:
-        result["auto_reply"] = auto_reply
+            _auto_reply_executor.submit(_run_auto_reply_for_message, message_id)
+            result["auto_reply"] = {"status": "queued", "message_id": message_id}
     response.status_code = 200
     return result
 

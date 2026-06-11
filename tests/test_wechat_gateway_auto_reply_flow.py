@@ -19,7 +19,7 @@ from app.db import Base
 from app.main import create_app
 from app.models import Chat, Contact, Message, SyncState, WechatSubsession, WechatSubsessionMembership, WechatSubsessionTurn
 from app.routers import wechat_gateway as wechat_gateway_router
-from app.services.wechat_gateway import ingest_callback_event, save_config, save_trigger_rules
+from app.services.wechat_gateway import ingest_callback_event, save_config, save_subsession_config, save_trigger_rules
 
 
 def _gateway_payload(**overrides):
@@ -75,6 +75,21 @@ def _private_callback(*, text: str, new_msg_id: int = 202, create_time: int = 17
     }
 
 
+def _force_inline_auto_reply(monkeypatch, Session):
+    class _ImmediateExecutor:
+        def submit(self, fn, *args, **kwargs):
+            fn(*args, **kwargs)
+
+            class _DoneFuture:
+                def result(self, timeout=None):
+                    return None
+
+            return _DoneFuture()
+
+    monkeypatch.setattr(wechat_gateway_router, "SessionLocal", Session, raising=False)
+    monkeypatch.setattr(wechat_gateway_router, "_auto_reply_executor", _ImmediateExecutor(), raising=False)
+
+
 def test_reply_local_uses_single_trigger_rule_layer(tmp_path, monkeypatch):
     Session = _session_factory(tmp_path)
     db = Session()
@@ -86,6 +101,7 @@ def test_reply_local_uses_single_trigger_rule_layer(tmp_path, monkeypatch):
                 "smart_reply_enabled": True,
                 "group_enabled": True,
                 "private_enabled": True,
+                "at_mention_enabled": False,
                 "prefixes": ["!"],
                 "whitelist_chat_ids": [],
                 "blacklist_chat_ids": [],
@@ -169,6 +185,7 @@ def test_private_reply_wakeup_allows_prefixless_followup_within_3_minutes(tmp_pa
                 "smart_reply_enabled": True,
                 "group_enabled": True,
                 "private_enabled": True,
+                "at_mention_enabled": False,
                 "prefixes": ["ai"],
                 "whitelist_chat_ids": [],
                 "blacklist_chat_ids": [],
@@ -253,6 +270,7 @@ def test_private_reply_wakeup_window_is_configurable(tmp_path, monkeypatch):
                 "smart_reply_enabled": True,
                 "group_enabled": True,
                 "private_enabled": True,
+                "at_mention_enabled": False,
                 "prefixes": ["ai"],
                 "private_wakeup_window_seconds": 30,
                 "min_text_length": 2,
@@ -327,6 +345,7 @@ def test_private_reply_wakeup_can_be_limited_to_whitelisted_private_chats(tmp_pa
                 "smart_reply_enabled": True,
                 "group_enabled": True,
                 "private_enabled": True,
+                "at_mention_enabled": False,
                 "prefixes": ["ai"],
                 "private_wakeup_whitelist_enabled": True,
                 "private_wakeup_whitelist_chat_ids": ["wxid_allowed"],
@@ -414,6 +433,7 @@ def test_private_reply_wakeup_can_be_exited_by_command(tmp_path, monkeypatch):
                 "smart_reply_enabled": True,
                 "group_enabled": True,
                 "private_enabled": True,
+                "at_mention_enabled": False,
                 "prefixes": ["ai"],
                 "private_wakeup_exit_commands": ["暂停", "结束"],
                 "min_text_length": 2,
@@ -490,6 +510,7 @@ def test_private_reply_wakeup_expires_after_3_minutes_and_requires_retrigger(tmp
                 "smart_reply_enabled": True,
                 "group_enabled": True,
                 "private_enabled": True,
+                "at_mention_enabled": False,
                 "prefixes": ["ai"],
                 "whitelist_chat_ids": [],
                 "blacklist_chat_ids": [],
@@ -578,6 +599,7 @@ def test_callback_auto_reply_sends_when_trigger_rules_pass(tmp_path, monkeypatch
                 "smart_reply_enabled": True,
                 "group_enabled": True,
                 "private_enabled": True,
+                "at_mention_enabled": False,
                 "prefixes": ["!"],
                 "whitelist_chat_ids": [],
                 "blacklist_chat_ids": [],
@@ -609,13 +631,26 @@ def test_callback_auto_reply_sends_when_trigger_rules_pass(tmp_path, monkeypatch
         finally:
             session.close()
 
+    import app.services.hermes_bridge as hermes_bridge_service
+
     monkeypatch.setattr(
-        wechat_gateway_router,
-        "generate_local_reply",
-        lambda db, payload: {"status": "ok", "reply": "自动回复已发送", "prompt_key": "reply_da", "rule": {"allowed": True, "reason": "passed"}},
-        raising=False,
+        hermes_bridge_service,
+        "call_hermes_for_reply",
+        lambda message_text, **kwargs: {
+            "status": "ok",
+            "reply": "自动回复已发送",
+            "prompt_key": "reply_da",
+            "rule": {"allowed": True, "reason": "passed"},
+            "execution": {
+                "route_kind": "hermes_api_server",
+                "route_key": "wechat_gateway",
+                "subsession_id": kwargs.get("subsession_id"),
+                "fallback_used": False,
+            },
+        },
     )
     monkeypatch.setattr(wechat_gateway_router, "WechatApiClient", DummyWechatApiClient, raising=False)
+    _force_inline_auto_reply(monkeypatch, Session)
 
     app = create_app()
     app.dependency_overrides[wechat_gateway_router.get_db] = override_get_db
@@ -625,8 +660,8 @@ def test_callback_auto_reply_sends_when_trigger_rules_pass(tmp_path, monkeypatch
     assert response.status_code == 200
     data = response.json()
     assert data["stored"] is True
-    assert data["auto_reply"]["status"] == "sent"
-    assert data["auto_reply"]["reply"] == "自动回复已发送"
+    assert data["auto_reply"]["status"] == "queued"
+    assert data["auto_reply"]["message_id"] > 0
     assert send_calls == [("wxid_friend", "自动回复已发送")]
 
     verify = Session()
@@ -643,180 +678,8 @@ def test_callback_auto_reply_sends_when_trigger_rules_pass(tmp_path, monkeypatch
         verify.close()
 
 
-def test_generate_local_reply_prefers_subsession_prompt_and_route_over_global(tmp_path, monkeypatch):
-    Session = _session_factory(tmp_path)
-    db = Session()
-    try:
-        save_trigger_rules(
-            db,
-            {
-                "enabled": True,
-                "smart_reply_enabled": True,
-                "group_enabled": True,
-                "private_enabled": True,
-                "prefixes": ["ai"],
-                "min_text_length": 2,
-            },
-        )
-        db.add(
-            WechatSubsession(
-                id="wechat_gateway_default",
-                channel="wechat_gateway",
-                name="微信工作流分身",
-                enabled=True,
-                mode="fixed",
-                system_prompt="你是 subsession 专属助手，只能按 subsession 规则回答。",
-                model_route_kind="tool",
-                model_route_key="reply_subsession",
-                model_override="subsession-model",
-            )
-        )
-        db.commit()
-    finally:
-        db.close()
 
-    import app.services.reply_generation as reply_generation_service
-
-    monkeypatch.setattr(
-        reply_generation_service,
-        "load_ai_config",
-        lambda: {
-            "api_key": "***",
-            "tool_model": "global-model",
-            "tool_prompts": {
-                "reply_da": {
-                    "system": "全局 system prompt",
-                    "user": "全局用户模板：{{message_text}}",
-                }
-            },
-        },
-    )
-    captured = {}
-
-    def _fake_chat(messages, **kwargs):
-        captured["messages"] = messages
-        captured["kwargs"] = kwargs
-        return "subsession reply"
-
-    monkeypatch.setattr(reply_generation_service, "siliconflow_chat", _fake_chat)
-
-    verify = Session()
-    try:
-        result = reply_generation_service.generate_local_reply(
-            verify,
-            {
-                "message_text": "ai 请按 subsession 回复",
-                "chat_id": "room_a@chatroom",
-                "sender_id": "wxid_sender_a",
-                "sender_name": "发送者A",
-                "talker_name": "群A",
-                "is_group": True,
-                "subsession_id": "wechat_gateway_default",
-            },
-        )
-        assert result["status"] == "ok"
-        assert result["reply"] == "subsession reply"
-        assert result["subsession_id"] == "wechat_gateway_default"
-        assert result["prompt_key"] == "reply_da"
-        assert captured["messages"][0]["content"] == "你是 subsession 专属助手，只能按 subsession 规则回答。"
-        assert captured["messages"][1]["content"] == "全局用户模板：ai 请按 subsession 回复"
-        assert captured["kwargs"]["model_override"] == "subsession-model"
-        assert captured["kwargs"]["route_kind"] == "tool"
-        assert captured["kwargs"]["route_key"] == "reply_subsession"
-    finally:
-        verify.close()
-
-
-def test_generate_local_reply_returns_execution_metadata_for_subsession_route(tmp_path, monkeypatch):
-    Session = _session_factory(tmp_path)
-    db = Session()
-    try:
-        save_trigger_rules(
-            db,
-            {
-                "enabled": True,
-                "smart_reply_enabled": True,
-                "group_enabled": True,
-                "private_enabled": True,
-                "prefixes": ["ai"],
-                "min_text_length": 2,
-            },
-        )
-        db.add(
-            WechatSubsession(
-                id="wechat_gateway_default",
-                channel="wechat_gateway",
-                name="微信工作流分身",
-                enabled=True,
-                mode="fixed",
-                system_prompt="你是 subsession 专属助手，只能按 subsession 规则回答。",
-                model_route_kind="tool",
-                model_route_key="reply_subsession",
-                model_override="subsession-model",
-            )
-        )
-        db.commit()
-    finally:
-        db.close()
-
-    import app.services.reply_generation as reply_generation_service
-
-    monkeypatch.setattr(
-        reply_generation_service,
-        "load_ai_config",
-        lambda: {
-            "api_key": "***",
-            "tool_model": "global-model",
-            "tool_prompts": {
-                "reply_da": {
-                    "system": "全局 system prompt",
-                    "user": "全局用户模板：{{message_text}}",
-                }
-            },
-        },
-    )
-
-    def _fake_chat(messages, **kwargs):
-        return {
-            "text": "subsession reply",
-            "execution": {
-                "route_kind": kwargs.get("route_kind"),
-                "route_key": kwargs.get("route_key"),
-                "final_model": "resolved-subsession-model",
-                "provider": "api.siliconflow.cn",
-                "channel_id": "tool-reply-primary",
-            },
-        }
-
-    monkeypatch.setattr(reply_generation_service, "siliconflow_chat", _fake_chat)
-
-    verify = Session()
-    try:
-        result = reply_generation_service.generate_local_reply(
-            verify,
-            {
-                "message_text": "ai 请按 subsession 回复",
-                "chat_id": "room_a@chatroom",
-                "sender_id": "wxid_sender_a",
-                "sender_name": "发送者A",
-                "talker_name": "群A",
-                "is_group": True,
-                "subsession_id": "wechat_gateway_default",
-            },
-        )
-        assert result["status"] == "ok"
-        assert result["reply"] == "subsession reply"
-        assert result["execution"]["route_kind"] == "tool"
-        assert result["execution"]["route_key"] == "reply_subsession"
-        assert result["execution"]["configured_model"] == "subsession-model"
-        assert result["execution"]["final_model"] == "resolved-subsession-model"
-        assert result["execution"]["provider"] == "api.siliconflow.cn"
-        assert result["execution"]["channel_id"] == "tool-reply-primary"
-    finally:
-        verify.close()
-
-
-def test_callback_auto_reply_passes_subsession_id_into_generate_local_reply(tmp_path, monkeypatch):
+def test_callback_auto_reply_passes_subsession_id_into_hermes_bridge(tmp_path, monkeypatch):
     Session = _session_factory(tmp_path)
     db = Session()
     try:
@@ -865,12 +728,27 @@ def test_callback_auto_reply_passes_subsession_id_into_generate_local_reply(tmp_
         finally:
             session.close()
 
-    def _capture_generate(db, payload):
-        captured.update(payload)
-        return {"status": "ok", "reply": "subsession auto reply", "prompt_key": "reply_da", "rule": {"allowed": True, "reason": "passed"}, "subsession_id": payload.get("subsession_id")}
+    import app.services.hermes_bridge as hermes_bridge_service
 
-    monkeypatch.setattr(wechat_gateway_router, "generate_local_reply", _capture_generate, raising=False)
+    def _capture_hermes_reply(message_text: str, **kwargs):
+        captured["message_text"] = message_text
+        captured.update(kwargs)
+        return {
+            "status": "ok",
+            "reply": "subsession auto reply",
+            "prompt_key": "reply_da",
+            "rule": {"allowed": True, "reason": "passed"},
+            "execution": {
+                "route_kind": "hermes_api_server",
+                "route_key": "wechat_gateway",
+                "subsession_id": kwargs.get("subsession_id"),
+                "fallback_used": False,
+            },
+        }
+
+    monkeypatch.setattr(hermes_bridge_service, "call_hermes_for_reply", _capture_hermes_reply)
     monkeypatch.setattr(wechat_gateway_router, "WechatApiClient", DummyWechatApiClient, raising=False)
+    _force_inline_auto_reply(monkeypatch, Session)
 
     app = create_app()
     app.dependency_overrides[wechat_gateway_router.get_db] = override_get_db
@@ -880,10 +758,104 @@ def test_callback_auto_reply_passes_subsession_id_into_generate_local_reply(tmp_
     assert response.status_code == 200
     data = response.json()
     assert data["stored"] is True
+    assert data["auto_reply"]["status"] == "queued"
+    assert data["auto_reply"]["message_id"] > 0
     assert data["subsession_id"] == "wechat_gateway_default"
     assert captured["subsession_id"] == "wechat_gateway_default"
-    assert isinstance(captured.get("message_meta"), dict)
-    assert (captured.get("message_meta") or {}).get("subsession", {}).get("id") == "wechat_gateway_default"
+    assert captured["message_text"] == "ai 进入 subsession"
+
+
+def test_callback_auto_reply_routes_only_subsession_id_to_hermes_bridge(tmp_path, monkeypatch):
+    Session = _session_factory(tmp_path)
+    db = Session()
+    try:
+        save_config(
+            db,
+            _gateway_payload(
+                token="***",
+                app_id="wx_app_test",
+                sessionized_reply_enabled=True,
+                fixed_subsession_enabled=True,
+                fixed_subsession_id="wechat_gateway_default",
+                fixed_subsession_name="微信工作流分身",
+                auto_learn_subsession_members=True,
+            ),
+        )
+        save_subsession_config(
+            db,
+            subsession_id="wechat_gateway_default",
+            payload={
+                "name": "微信工作流分身",
+                "system_prompt": "你是 subsession 专属助手，只能按 subsession 规则回答。",
+            },
+        )
+        save_trigger_rules(
+            db,
+            {
+                "enabled": True,
+                "smart_reply_enabled": True,
+                "group_enabled": True,
+                "private_enabled": True,
+                "prefixes": ["ai"],
+                "min_text_length": 2,
+            },
+        )
+    finally:
+        db.close()
+
+    captured = {}
+
+    class DummyWechatApiClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def configured(self):
+            return True
+
+        def send_text(self, to_wxid: str, text: str):
+            return {"ret": 200, "msg": "操作成功", "data": {"toWxid": to_wxid, "msgId": 11, "newMsgId": 22, "type": 1}}
+
+    def override_get_db():
+        session = Session()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    import app.services.hermes_bridge as hermes_bridge_service
+
+    def _capture_hermes_reply(message_text: str, **kwargs):
+        captured["message_text"] = message_text
+        captured.update(kwargs)
+        return {
+            "status": "ok",
+            "reply": "subsession auto reply",
+            "execution": {
+                "route_kind": "hermes_api_server",
+                "route_key": "wechat_gateway",
+                "subsession_id": kwargs.get("subsession_id"),
+                "hermes_session_id": "agent:bridge:wechat_gateway:subsession:wechat_gateway_default",
+                "prompt_hash": "abc123def456",
+                "fallback_used": False,
+            },
+        }
+
+    monkeypatch.setattr(hermes_bridge_service, "call_hermes_for_reply", _capture_hermes_reply)
+    monkeypatch.setattr(wechat_gateway_router, "WechatApiClient", DummyWechatApiClient, raising=False)
+    _force_inline_auto_reply(monkeypatch, Session)
+
+    app = create_app()
+    app.dependency_overrides[wechat_gateway_router.get_db] = override_get_db
+    client = TestClient(app)
+
+    response = client.post("/api/wechat-gateway/callback", json=_private_callback(text="ai 进入 subsession", new_msg_id=1303))
+    assert response.status_code == 200
+    data = response.json()
+    assert data["stored"] is True
+    assert data["auto_reply"]["status"] == "queued"
+    assert data["auto_reply"]["message_id"] > 0
+    assert captured["subsession_id"] == "wechat_gateway_default"
+    assert captured.get("system_prompt") is None
 
 
 def test_callback_auto_reply_persists_execution_metadata_into_response_and_outbound_meta(tmp_path, monkeypatch):
@@ -901,6 +873,7 @@ def test_callback_auto_reply_persists_execution_metadata_into_response_and_outbo
                 "smart_reply_enabled": True,
                 "group_enabled": True,
                 "private_enabled": True,
+                "at_mention_enabled": False,
                 "prefixes": ["ai"],
                 "whitelist_chat_ids": [],
                 "blacklist_chat_ids": [],
@@ -929,27 +902,32 @@ def test_callback_auto_reply_persists_execution_metadata_into_response_and_outbo
         finally:
             session.close()
 
+    import app.services.hermes_bridge as hermes_bridge_service
+
     monkeypatch.setattr(
-        wechat_gateway_router,
-        "generate_local_reply",
-        lambda db, payload: {
+        hermes_bridge_service,
+        "call_hermes_for_reply",
+        lambda message_text, **kwargs: {
             "status": "ok",
             "reply": "自动回复已发送",
             "prompt_key": "reply_da",
             "rule": {"allowed": True, "reason": "passed"},
             "subsession_id": "wechat_gateway_default",
             "execution": {
-                "route_kind": "tool",
-                "route_key": "reply_subsession",
+                "route_kind": "hermes_api_server",
+                "route_key": "wechat_gateway",
+                "subsession_id": "wechat_gateway_default",
+                "hermes_session_id": "agent:bridge:wechat_gateway:subsession:wechat_gateway_default",
                 "configured_model": "subsession-model",
                 "final_model": "resolved-subsession-model",
                 "provider": "api.siliconflow.cn",
                 "channel_id": "tool-reply-primary",
+                "fallback_used": False,
             },
         },
-        raising=False,
     )
     monkeypatch.setattr(wechat_gateway_router, "WechatApiClient", DummyWechatApiClient, raising=False)
+    _force_inline_auto_reply(monkeypatch, Session)
 
     app = create_app()
     app.dependency_overrides[wechat_gateway_router.get_db] = override_get_db
@@ -959,9 +937,8 @@ def test_callback_auto_reply_persists_execution_metadata_into_response_and_outbo
     assert response.status_code == 200
     data = response.json()
     assert data["stored"] is True
-    assert data["auto_reply"]["status"] == "sent"
-    assert data["auto_reply"]["execution"]["route_key"] == "reply_subsession"
-    assert data["auto_reply"]["execution"]["final_model"] == "resolved-subsession-model"
+    assert data["auto_reply"]["status"] == "queued"
+    assert data["auto_reply"]["message_id"] > 0
 
     verify = Session()
     try:
@@ -969,12 +946,15 @@ def test_callback_auto_reply_persists_execution_metadata_into_response_and_outbo
         assert len(rows) == 2
         outbound = rows[1]
         execution = ((outbound.meta or {}).get("auto_reply") or {}).get("execution") or {}
-        assert execution["route_kind"] == "tool"
-        assert execution["route_key"] == "reply_subsession"
+        assert execution["route_kind"] == "hermes_api_server"
+        assert execution["route_key"] == "wechat_gateway"
         assert execution["configured_model"] == "subsession-model"
         assert execution["final_model"] == "resolved-subsession-model"
         assert execution["provider"] == "api.siliconflow.cn"
         assert execution["channel_id"] == "tool-reply-primary"
+        assert execution["subsession_id"] == "wechat_gateway_default"
+        assert execution["hermes_session_id"] == "agent:bridge:wechat_gateway:subsession:wechat_gateway_default"
+        assert execution["fallback_used"] is False
     finally:
         verify.close()
 
@@ -1008,21 +988,25 @@ def test_callback_auto_reply_returns_execution_metadata_when_generation_errors(t
         finally:
             session.close()
 
+    import app.services.hermes_bridge as hermes_bridge_service
+
     monkeypatch.setattr(
-        wechat_gateway_router,
-        "generate_local_reply",
-        lambda db, payload: {
+        hermes_bridge_service,
+        "call_hermes_for_reply",
+        lambda message_text, **kwargs: {
             "status": "error",
             "error": "provider timeout",
             "rule": {"allowed": True, "reason": "passed"},
             "execution": {
-                "route_kind": "tool",
-                "route_key": "reply_subsession",
+                "route_kind": "hermes_api_server",
+                "route_key": "wechat_gateway",
+                "subsession_id": kwargs.get("subsession_id"),
+                "hermes_session_id": "agent:bridge:wechat_gateway:subsession:wechat_gateway_default",
                 "configured_model": "subsession-model",
                 "error": "provider timeout",
+                "fallback_used": False,
             },
         },
-        raising=False,
     )
 
     app = create_app()
@@ -1033,9 +1017,16 @@ def test_callback_auto_reply_returns_execution_metadata_when_generation_errors(t
     assert response.status_code == 200
     data = response.json()
     assert data["stored"] is True
-    assert data["auto_reply"]["status"] == "error"
-    assert data["auto_reply"]["execution"]["route_key"] == "reply_subsession"
-    assert data["auto_reply"]["execution"]["error"] == "provider timeout"
+    assert data["auto_reply"]["status"] == "queued"
+    assert data["auto_reply"]["message_id"] > 0
+
+    verify = Session()
+    try:
+        rows = verify.query(Message).order_by(Message.id.asc()).all()
+        assert len(rows) == 1
+        assert rows[0].direction == "in"
+    finally:
+        verify.close()
 
 
 def test_callback_auto_reply_blocks_when_manual_reply_arrives_within_suppression_window(tmp_path, monkeypatch):
@@ -1053,6 +1044,7 @@ def test_callback_auto_reply_blocks_when_manual_reply_arrives_within_suppression
                 "smart_reply_enabled": True,
                 "group_enabled": True,
                 "private_enabled": True,
+                "at_mention_enabled": False,
                 "prefixes": ["ai"],
                 "whitelist_chat_ids": [],
                 "blacklist_chat_ids": [],
@@ -1085,10 +1077,12 @@ def test_callback_auto_reply_blocks_when_manual_reply_arrives_within_suppression
         finally:
             session.close()
 
-    def _manual_reply_generate(db, payload):
+    import app.services.hermes_bridge as hermes_bridge_service
+
+    def _manual_reply_hermes(message_text: str, **kwargs):
         import threading
         import time
-        inbound_message_time = datetime.fromisoformat(str(payload.get("message_time")))
+        inbound_message_time = datetime.fromtimestamp(int(time.time()))
 
         def _writer():
             time.sleep(0.2)
@@ -1112,11 +1106,20 @@ def test_callback_auto_reply_blocks_when_manual_reply_arrives_within_suppression
                 session.close()
 
         threading.Thread(target=_writer, daemon=True).start()
-        from app.services.reply_generation import generate_local_reply as real_generate
-        return real_generate(db, payload)
+        return {
+            "status": "ok",
+            "reply": "subsession auto reply",
+            "execution": {
+                "route_kind": "hermes_api_server",
+                "route_key": "wechat_gateway",
+                "subsession_id": kwargs.get("subsession_id"),
+                "fallback_used": False,
+            },
+        }
 
-    monkeypatch.setattr(wechat_gateway_router, "generate_local_reply", _manual_reply_generate, raising=False)
+    monkeypatch.setattr(hermes_bridge_service, "call_hermes_for_reply", _manual_reply_hermes)
     monkeypatch.setattr(wechat_gateway_router, "WechatApiClient", DummyWechatApiClient, raising=False)
+    _force_inline_auto_reply(monkeypatch, Session)
 
     app = create_app()
     app.dependency_overrides[wechat_gateway_router.get_db] = override_get_db
@@ -1130,8 +1133,8 @@ def test_callback_auto_reply_blocks_when_manual_reply_arrives_within_suppression
     assert response.status_code == 200
     data = response.json()
     assert data["stored"] is True
-    assert data["auto_reply"]["status"] == "blocked"
-    assert data["auto_reply"]["reason"] == "human_reply_suppressed"
+    assert data["auto_reply"]["status"] == "queued"
+    assert data["auto_reply"]["message_id"] > 0
     assert send_calls == []
 
 
@@ -1150,6 +1153,7 @@ def test_callback_auto_reply_rechecks_human_takeover_before_sending(tmp_path, mo
                 "smart_reply_enabled": True,
                 "group_enabled": True,
                 "private_enabled": True,
+                "at_mention_enabled": False,
                 "prefixes": ["ai"],
                 "whitelist_chat_ids": [],
                 "blacklist_chat_ids": [],
@@ -1182,58 +1186,50 @@ def test_callback_auto_reply_rechecks_human_takeover_before_sending(tmp_path, mo
         finally:
             session.close()
 
-    import app.services.reply_generation as reply_generation_service
+    import app.services.hermes_bridge as hermes_bridge_service
 
-    monkeypatch.setattr(
-        reply_generation_service,
-        "load_ai_config",
-        lambda: {"api_key": "***", "tool_model": "fake-model", "tool_prompts": {}},
-    )
-
-    def _slow_chat(*args, **kwargs):
+    def _slow_hermes_reply(message_text: str, **kwargs):
         import threading
         import time as _time
-        message_time = kwargs.pop("_message_time", None)
-        if message_time:
-            inbound_message_time = datetime.fromisoformat(str(message_time))
+        inbound_message_time = datetime.fromtimestamp(int(time.time()))
 
-            def _writer():
-                _time.sleep(0.2)
-                session = Session()
-                try:
-                    session.add(
-                        Message(
-                            chat_id="wxid_friend",
-                            sender_id="self_wxid",
-                            sender_name="self_wxid",
-                            talker_name="wxid_friend",
-                            timestamp=inbound_message_time + timedelta(seconds=1.2),
-                            direction="out",
-                            type="text",
-                            content_text="人工接管",
-                            meta={"source": "wechat_gateway", "manual": True},
-                        )
+        def _writer():
+            _time.sleep(0.2)
+            session = Session()
+            try:
+                session.add(
+                    Message(
+                        chat_id="wxid_friend",
+                        sender_id="self_wxid",
+                        sender_name="self_wxid",
+                        talker_name="wxid_friend",
+                        timestamp=inbound_message_time + timedelta(seconds=1.2),
+                        direction="out",
+                        type="text",
+                        content_text="人工接管",
+                        meta={"source": "wechat_gateway", "manual": True},
                     )
-                    session.commit()
-                finally:
-                    session.close()
+                )
+                session.commit()
+            finally:
+                session.close()
 
-            threading.Thread(target=_writer, daemon=True).start()
+        threading.Thread(target=_writer, daemon=True).start()
         _time.sleep(0.6)
-        return "自动回复已发送"
+        return {
+            "status": "ok",
+            "reply": "自动回复已发送",
+            "execution": {
+                "route_kind": "hermes_api_server",
+                "route_key": "wechat_gateway",
+                "subsession_id": kwargs.get("subsession_id"),
+                "fallback_used": False,
+            },
+        }
 
-    original_generate = wechat_gateway_router.generate_local_reply
-
-    def _wrapped_generate(db, payload):
-        original_chat = reply_generation_service.siliconflow_chat
-        reply_generation_service.siliconflow_chat = lambda *args, **kwargs: _slow_chat(*args, _message_time=payload.get("message_time"), **kwargs)
-        try:
-            return original_generate(db, payload)
-        finally:
-            reply_generation_service.siliconflow_chat = original_chat
-
-    monkeypatch.setattr(wechat_gateway_router, "generate_local_reply", _wrapped_generate, raising=False)
+    monkeypatch.setattr(hermes_bridge_service, "call_hermes_for_reply", _slow_hermes_reply)
     monkeypatch.setattr(wechat_gateway_router, "WechatApiClient", DummyWechatApiClient, raising=False)
+    _force_inline_auto_reply(monkeypatch, Session)
 
     app = create_app()
     app.dependency_overrides[wechat_gateway_router.get_db] = override_get_db
@@ -1247,8 +1243,8 @@ def test_callback_auto_reply_rechecks_human_takeover_before_sending(tmp_path, mo
     assert response.status_code == 200
     data = response.json()
     assert data["stored"] is True
-    assert data["auto_reply"]["status"] == "blocked"
-    assert data["auto_reply"]["reason"] == "human_reply_suppressed"
+    assert data["auto_reply"]["status"] == "queued"
+    assert data["auto_reply"]["message_id"] > 0
     assert send_calls == []
 
 
@@ -1278,7 +1274,7 @@ def test_callback_auto_reply_blocks_without_sending_when_trigger_rules_fail(tmp_
     finally:
         db.close()
 
-    calls = {"generate": 0}
+    calls = {"hermes": 0}
 
     def override_get_db():
         session = Session()
@@ -1287,11 +1283,24 @@ def test_callback_auto_reply_blocks_without_sending_when_trigger_rules_fail(tmp_
         finally:
             session.close()
 
-    def _blocked_generate(db, payload):
-        calls["generate"] += 1
-        return {"status": "blocked", "reason": "prefix_miss", "rule": {"allowed": False, "reason": "prefix_miss"}}
+    import app.services.hermes_bridge as hermes_bridge_service
 
-    monkeypatch.setattr(wechat_gateway_router, "generate_local_reply", _blocked_generate, raising=False)
+    def _blocked_hermes_reply(message_text: str, **kwargs):
+        calls["hermes"] += 1
+        return {
+            "status": "blocked",
+            "reason": "prefix_miss",
+            "rule": {"allowed": False, "reason": "prefix_miss"},
+            "execution": {
+                "route_kind": "hermes_api_server",
+                "route_key": "wechat_gateway",
+                "subsession_id": kwargs.get("subsession_id"),
+                "fallback_used": False,
+            },
+        }
+
+    monkeypatch.setattr(hermes_bridge_service, "call_hermes_for_reply", _blocked_hermes_reply)
+    _force_inline_auto_reply(monkeypatch, Session)
 
     app = create_app()
     app.dependency_overrides[wechat_gateway_router.get_db] = override_get_db
@@ -1301,9 +1310,9 @@ def test_callback_auto_reply_blocks_without_sending_when_trigger_rules_fail(tmp_
     assert response.status_code == 200
     data = response.json()
     assert data["stored"] is True
-    assert data["auto_reply"]["status"] == "blocked"
-    assert data["auto_reply"]["reason"] == "prefix_miss"
-    assert calls["generate"] == 1
+    assert data["auto_reply"]["status"] == "queued"
+    assert data["auto_reply"]["message_id"] > 0
+    assert calls["hermes"] == 1
 
     verify = Session()
     try:
