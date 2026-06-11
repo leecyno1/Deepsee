@@ -1,3 +1,4 @@
+import asyncio
 import os
 import sys
 import tempfile
@@ -342,21 +343,19 @@ def test_static_index_replaces_primary_ai_toolbar_emojis_with_svg_markup():
     assert "🌙 深色" not in html
 
 
-def test_static_index_contains_access_gate_and_guest_readonly_guards():
+def test_static_index_disables_workspace_access_gate_but_keeps_guest_guard_stubs():
     html = open(os.path.join(PROJECT_ROOT, "static", "index.html"), "r", encoding="utf-8").read()
-    assert 'id="accessGate"' in html
-    assert 'id="accessConfirmBtn"' in html
-    assert 'id="accessGuestBtn"' in html
-    assert "GUEST_CLEAR_MODULES = new Set(['dashboard', 'ai-summary'])" in html
-    assert "guest-blur-panel" in html
-    assert "bindGuestReadOnlyGuard" in html
-    assert "canAccessModule" in html
-    assert "function isGuestAllowedApiPath(urlLike)" in html
-    assert "游客模式不可访问此接口" in html
-    assert "if (guestUseCacheOnly() && !isGuestAllowedApiPath(url))" in html
-    assert "if (guestUseCacheOnly()) return;" in html
-    assert "if (guestUseCacheOnly() && isGuestBlurModule(targetModule))" in html
+    assert 'id="accessGate"' not in html
+    assert 'id="accessConfirmBtn"' not in html
+    assert 'id="accessGuestBtn"' not in html
+    assert "function canAccessModule(moduleId) {" in html
+    assert "return true;" in html
+    assert "function guestUseCacheOnly() {" in html
     assert "function shouldSkipGuestModuleLoad(moduleId)" in html
+    assert "function isGuestAllowedApiPath(urlLike)" in html
+    assert "if (guestUseCacheOnly() && !isGuestAllowedApiPath(url))" in html
+    assert "游客模式不可访问此接口" in html
+    assert "if (guestUseCacheOnly() && isGuestBlurModule(targetModule))" in html
     assert "if (guestUseCacheOnly()) return;" in html
 
 
@@ -478,10 +477,10 @@ def test_list_contact_ratings_returns_compact_mapping():
 
 
 
-def test_api_token_helpers_cover_core_api_and_exempt_paths(monkeypatch):
+def test_api_token_helpers_keep_token_parsing_but_leave_workspace_gate_disabled(monkeypatch):
     monkeypatch.setattr("app.main.settings.APP_ENV", "production")
     monkeypatch.setattr("app.main.settings.API_TOKEN", "prod-token")
-    assert _api_token_auth_enabled() is True
+    assert _api_token_auth_enabled() is False
     assert _configured_api_tokens() == {"prod-token"}
     assert _is_api_auth_exempt_path("/api/health") is True
     assert _is_api_auth_exempt_path("/api/ready") is True
@@ -496,10 +495,10 @@ def test_api_token_helpers_cover_core_api_and_exempt_paths(monkeypatch):
     assert _extract_api_token(header_request) == "prod-token"
 
 
-def test_api_token_auth_enabled_whenever_token_is_configured(monkeypatch):
+def test_api_token_auth_stays_disabled_even_when_token_is_configured(monkeypatch):
     monkeypatch.setattr("app.main.settings.APP_ENV", "development")
     monkeypatch.setattr("app.main.settings.API_TOKEN", "dev-local-token")
-    assert _api_token_auth_enabled() is True
+    assert _api_token_auth_enabled() is False
 
 
 
@@ -520,13 +519,13 @@ def test_cors_options_switch_between_dev_and_prod(monkeypatch):
 def test_verify_access_token_requires_match_when_configured(monkeypatch):
     monkeypatch.setattr("app.routers.health.settings.API_TOKEN", "iv19whot")
     ok_req = Request({"type": "http", "headers": [(b"x-api-token", b"iv19whot")]})
-    assert health_router.verify_access_token(ok_req) == {"status": "ok", "configured": True}
+    assert asyncio.run(health_router.verify_access_token(ok_req)) == {"status": "ok", "configured": True}
 
 
 def test_verify_access_token_returns_config_unset(monkeypatch):
     monkeypatch.setattr("app.routers.health.settings.API_TOKEN", "")
     req = Request({"type": "http", "headers": []})
-    assert health_router.verify_access_token(req) == {"status": "ok", "configured": False}
+    assert asyncio.run(health_router.verify_access_token(req)) == {"status": "ok", "configured": False}
 
 
 def test_background_runtime_endpoint_returns_runtime_snapshot(monkeypatch):
@@ -554,7 +553,7 @@ def test_background_runtime_endpoint_returns_runtime_snapshot(monkeypatch):
             },
         },
     )
-    payload = health_router.background_runtime()
+    payload = asyncio.run(health_router.background_runtime())
     assert payload["status"] == "ok"
     assert payload["total"] == 2
     assert payload["enabled"] == 1

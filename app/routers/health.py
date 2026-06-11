@@ -11,7 +11,7 @@ router = APIRouter(prefix="/api", tags=["health"])
 
 
 @router.get("/health", response_model=Health)
-def health():
+async def health():
     return Health(status="ok", chatlog_http_base=settings.CHATLOG_HTTP_BASE, chatlog_dir=settings.CHATLOG_DIR)
 
 
@@ -23,7 +23,7 @@ def _extract_token_from_request(request: Request) -> str:
 
 
 @router.get("/access/verify")
-def verify_access_token(request: Request):
+async def verify_access_token(request: Request):
     configured = str(getattr(settings, "API_TOKEN", "") or "").strip()
     if not configured:
         return {"status": "ok", "configured": False}
@@ -34,7 +34,7 @@ def verify_access_token(request: Request):
 
 
 @router.get("/background/runtime")
-def background_runtime():
+async def background_runtime():
     runtime = get_background_runtime_snapshot()
     enabled = {k: v for k, v in runtime.items() if bool(v.get("enabled"))}
     return {

@@ -133,7 +133,7 @@ def create_app() -> FastAPI:
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
     @app.get("/")
-    def index():
+    async def index():
         """Serve the unified UI only from static/index.html.
         We intentionally deprecate legacy pages (0811/0801) to avoid confusion.
         """
@@ -144,7 +144,7 @@ def create_app() -> FastAPI:
         return Response("UI not found", media_type="text/plain", status_code=404)
 
     @app.get("/ui/legacy")
-    def legacy_ui():
+    async def legacy_ui():
         # Deprecated permanently to avoid confusion with unified static UI
         return Response("Legacy UI removed", status_code=404)
 

@@ -222,6 +222,40 @@ def run_summary_overlay_once(db, *, cfg: dict | None = None) -> dict[str, int]:
     return result
 
 
+def _run_chatlog_sync_job() -> None:
+    db = SessionLocal()
+    try:
+        sync_from_chatlog(db)
+        try:
+            run_summary_overlay_once(db)
+        except Exception as exc:
+            logger.warning("background subtask failed: summary_overlay_once: %s", exc)
+        db.commit()
+    finally:
+        db.close()
+
+
+def _run_summary_overlay_job() -> dict[str, int]:
+    db = SessionLocal()
+    try:
+        stats = run_summary_overlay_once(db)
+        db.commit()
+        return stats
+    finally:
+        db.close()
+
+
+def _run_aggregation_retention_job() -> dict:
+    db = SessionLocal()
+    try:
+        retention_days = int(settings.__dict__.get("AGGREGATION_RETENTION_DAYS", 90) or 90)
+        result = prune_aggregation_data(db, retention_days=retention_days)
+        db.commit()
+        return result
+    finally:
+        db.close()
+
+
 async def _sync_loop():
     loop_name = "chatlog_sync"
     interval = int(settings.__dict__.get("SYNC_INTERVAL_SECONDS", 0) or 0)
@@ -232,16 +266,7 @@ async def _sync_loop():
     while True:
         try:
             _bg_mark_start(loop_name)
-            db = SessionLocal()
-            try:
-                res = sync_from_chatlog(db)
-                try:
-                    run_summary_overlay_once(db)
-                except Exception as exc:
-                    logger.warning("background subtask failed: summary_overlay_once: %s", exc)
-                db.commit()
-            finally:
-                db.close()
+            await asyncio.to_thread(_run_chatlog_sync_job)
             _bg_mark_success(loop_name)
         except Exception as exc:
             _bg_mark_error(loop_name, exc)
@@ -388,14 +413,8 @@ async def _aggregation_retention_loop():
     while True:
         try:
             _bg_mark_start(loop_name)
-            db = SessionLocal()
-            try:
-                retention_days = int(settings.__dict__.get("AGGREGATION_RETENTION_DAYS", 90) or 90)
-                result = prune_aggregation_data(db, retention_days=retention_days)
-                db.commit()
-                logger.info("aggregation retention pruned: %s", result)
-            finally:
-                db.close()
+            result = await asyncio.to_thread(_run_aggregation_retention_job)
+            logger.info("aggregation retention pruned: %s", result)
             _bg_mark_success(loop_name)
         except Exception as exc:
             _bg_mark_error(loop_name, exc)
@@ -413,13 +432,8 @@ async def _summary_overlay_loop():
     while True:
         try:
             _bg_mark_start(loop_name)
-            db = SessionLocal()
-            try:
-                stats = run_summary_overlay_once(db)
-                db.commit()
-                logger.info("summary overlay updated: %s", stats)
-            finally:
-                db.close()
+            stats = await asyncio.to_thread(_run_summary_overlay_job)
+            logger.info("summary overlay updated: %s", stats)
             _bg_mark_success(loop_name)
         except Exception as exc:
             _bg_mark_error(loop_name, exc)
