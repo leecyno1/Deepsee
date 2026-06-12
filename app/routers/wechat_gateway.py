@@ -98,7 +98,11 @@ def _run_auto_reply_for_message(message_id: int) -> None:
             db,
             target=str(message.chat_id or ""),
             text=reply_text,
-            provider_result=provider_result,
+            provider_result={
+                "source": "wechat_gateway_auto_reply",
+                "auto_reply": {"trigger_message_id": message.id},
+                **(provider_result if isinstance(provider_result, dict) else {}),
+            },
         )
         meta = dict(outbound.meta or {})
         meta["auto_reply"] = {

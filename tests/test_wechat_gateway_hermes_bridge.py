@@ -227,6 +227,43 @@ def test_call_hermes_for_reply_prefers_explicit_hermes_api_key_over_api_server_k
     assert captured["headers"]["Authorization"] == "Bearer explicit-client-key"
 
 
+def test_call_hermes_for_reply_appends_brief_followup_and_no_long_paraphrase_constraints(tmp_path, monkeypatch):
+    import app.services.hermes_bridge as hermes_bridge_service
+
+    captured = {}
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [{"message": {"content": "bridge reply"}}],
+                "usage": {"prompt_tokens": 9, "completion_tokens": 3},
+                "model": "hermes-agent",
+            }
+
+    def _fake_post(url, json, headers, timeout):
+        captured["json"] = json
+        return DummyResponse()
+
+    monkeypatch.setattr(hermes_bridge_service.requests, "post", _fake_post)
+
+    result = hermes_bridge_service.call_hermes_for_reply(
+        "对方刚回复了进展",
+        subsession_id="wechat_gateway_default",
+        system_prompt="你是固定 prompt。",
+    )
+
+    assert result["status"] == "ok"
+    user_content = captured["json"]["messages"][-1]["content"]
+    assert "优先顺着对方最新一句继续交流" in user_content
+    assert "若对方已经回答了上一轮问题，默认不要继续追问" in user_content
+    assert "更适合简短确认或致谢时，直接回复“收到/好的/明白/谢谢”" in user_content
+    assert "不要大段复述对方原话" in user_content
+    assert "如需总结，只允许用1-2句话提炼" in user_content
+
+
 def test_call_hermes_for_reply_fail_closed_without_silent_fallback(monkeypatch):
     import requests
     import app.services.hermes_bridge as hermes_bridge_service

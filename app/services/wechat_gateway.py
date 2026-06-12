@@ -877,6 +877,24 @@ def _resolve_display_name(db: Session, wxid: str | None, fallback: str | None = 
     return fb or None
 
 
+def _find_recent_outbound_by_external_new_msg_id(db: Session, chat_id: str, external_new_msg_id: Any) -> Message | None:
+    target = str(external_new_msg_id or "").strip()
+    if not target:
+        return None
+    recent_rows = (
+        db.query(Message)
+        .filter(Message.chat_id == chat_id, Message.direction == "out")
+        .order_by(Message.id.desc())
+        .limit(50)
+        .all()
+    )
+    for row in recent_rows:
+        meta = row.meta if isinstance(row.meta, dict) else {}
+        if str(meta.get("external_new_msg_id") or "").strip() == target:
+            return row
+    return None
+
+
 def ingest_callback_event(db: Session, payload: dict[str, Any]) -> dict[str, Any]:
     event_type = str(payload.get("TypeName") or "").strip()
     app_id = str(payload.get("Appid") or "").strip()
@@ -920,6 +938,37 @@ def ingest_callback_event(db: Session, payload: dict[str, Any]) -> dict[str, Any
     display_text = appmsg_fields.get("title") or clean_text
     if appmsg_fields.get("sourceusername") and str(appmsg_fields.get("sourceusername")).startswith("gh_"):
         sender_id = appmsg_fields.get("sourceusername") or sender_id
+    if direction == "out":
+        existing_outbound = _find_recent_outbound_by_external_new_msg_id(db, chat_id, data.get("NewMsgId"))
+        if existing_outbound is not None:
+            meta = dict(existing_outbound.meta or {})
+            if not meta.get("auto_reply"):
+                meta["manual"] = True
+                meta["human_manual"] = True
+            msg_id_value = data.get("MsgId") if isinstance(data, dict) else None
+            new_msg_id_value = data.get("NewMsgId") if isinstance(data, dict) else None
+            msg_type_value = data.get("MsgType") if isinstance(data, dict) else None
+            meta["event_type"] = event_type
+            meta["external_msg_id"] = msg_id_value
+            meta["external_new_msg_id"] = new_msg_id_value
+            meta["msg_type"] = msg_type_value
+            meta["raw"] = payload
+            existing_outbound.timestamp = timestamp or existing_outbound.timestamp
+            existing_outbound.meta = meta
+            db.add(existing_outbound)
+            db.add(SyncState(key=dedupe_key, value=str(existing_outbound.id)))
+            db.commit()
+            db.refresh(existing_outbound)
+            subsession_raw = meta.get("subsession")
+            subsession_meta = subsession_raw if isinstance(subsession_raw, dict) else {}
+            return {
+                "ok": True,
+                "duplicate": False,
+                "stored": True,
+                "message_id": existing_outbound.id,
+                "pipeline": None,
+                "subsession_id": subsession_meta.get("id"),
+            }
     pipeline = evaluate_inbound_message(conf, chat_id=chat_id, sender_id=sender_id, text=display_text)
     if pipeline.get("action") == "drop":
         dedupe = SyncState(key=dedupe_key, value="dropped")
@@ -961,6 +1010,7 @@ def ingest_callback_event(db: Session, payload: dict[str, Any]) -> dict[str, Any
             "msg_type": data.get("MsgType"),
             "pipeline": pipeline,
             "subsession": subsession_meta,
+            **({"manual": True, "human_manual": True} if direction == "out" else {}),
             "raw": payload,
         },
     )
@@ -1108,6 +1158,20 @@ def _extract_provider_result_data(result: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _looks_like_manual_wechat_outbound_event(*, result: dict[str, Any], data: dict[str, Any]) -> bool:
+    if not result:
+        return False
+    if str(result.get("source") or "").strip() == "wechat_gateway_auto_reply":
+        return False
+    if isinstance(result.get("auto_reply"), dict):
+        return False
+    if result.get("manual") is True or result.get("human_manual") is True:
+        return True
+    if data.get("msgId") or data.get("MsgId") or data.get("newMsgId") or data.get("NewMsgId"):
+        return True
+    return False
+
+
 def record_outbound_message(db: Session, *, target: str, text: str, provider_result: dict[str, Any] | None = None) -> Message:
     result = provider_result if isinstance(provider_result, dict) else {}
     data = _extract_provider_result_data(result)
@@ -1147,6 +1211,7 @@ def record_outbound_message(db: Session, *, target: str, text: str, provider_res
             "external_new_msg_id": data.get("newMsgId") or data.get("NewMsgId"),
             "provider_result": result,
             "subsession": subsession_meta,
+            **({"manual": True, "human_manual": True} if _looks_like_manual_wechat_outbound_event(result=result, data=data) else {}),
         },
         send_status="sent",
     )

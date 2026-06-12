@@ -100,10 +100,34 @@ def test_ingest_callback_event_ack_and_dedupe(tmp_path):
         assert (message.meta or {}).get("source") == "wechat_gateway"
         assert (message.meta or {}).get("pipeline", {}).get("action") == "allow"
 
+        outbound_payload = {
+            "TypeName": "AddMsg",
+            "Appid": "wx_app_test",
+            "Wxid": "self_wxid",
+            "Data": {
+                "MsgId": 303,
+                "NewMsgId": 404,
+                "MsgType": 1,
+                "CreateTime": 1778036770,
+                "FromUserName": {"string": "self_wxid"},
+                "ToUserName": {"string": "wxid_friend"},
+                "Content": {"string": "这是人工回复"},
+                "MsgSource": "<msgsource></msgsource>",
+            },
+        }
+        outbound_result = ingest_callback_event(db, outbound_payload)
+        assert outbound_result["ok"] is True
+        assert outbound_result["stored"] is True
+        outbound_message = db.get(Message, int(outbound_result["message_id"]))
+        assert outbound_message is not None
+        assert outbound_message.direction == "out"
+        assert (outbound_message.meta or {}).get("manual") is True
+        assert (outbound_message.meta or {}).get("human_manual") is True
+
         second = ingest_callback_event(db, payload)
         assert second["ok"] is True
         assert second["duplicate"] is True
-        assert db.query(Message).count() == 1
+        assert db.query(Message).count() == 2
     finally:
         db.close()
 

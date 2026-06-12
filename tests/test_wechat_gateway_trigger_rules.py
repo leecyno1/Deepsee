@@ -515,6 +515,55 @@ def test_auto_reply_rules_human_reply_suppression_uses_incoming_message_timestam
         db.close()
 
 
+def test_auto_reply_rules_human_reply_suppression_uses_real_wechat_outbound_callback(tmp_path):
+    Session = _session_factory(tmp_path)
+    db = Session()
+    try:
+        save_trigger_rules(
+            db,
+            {
+                "enabled": True,
+                "smart_reply_enabled": True,
+                "group_enabled": False,
+                "private_enabled": True,
+                "prefixes": ["ai"],
+                "min_text_length": 2,
+                "human_reply_suppression_seconds": 20,
+            },
+        )
+        ingest_callback_event(
+            db,
+            {
+                "TypeName": "AddMsg",
+                "Appid": "wx_app_test",
+                "Wxid": "self_wxid",
+                "Data": {
+                    "MsgId": 201,
+                    "NewMsgId": 301,
+                    "MsgType": 1,
+                    "CreateTime": 1778036763,
+                    "FromUserName": {"string": "self_wxid"},
+                    "ToUserName": {"string": "wxid_friend"},
+                    "Content": {"string": "这是人工回复"},
+                    "MsgSource": "<msgsource></msgsource>",
+                },
+            },
+        )
+
+        blocked = evaluate_auto_reply_rules(
+            db,
+            chat_id="wxid_friend",
+            sender_id="wxid_friend",
+            text="ai 继续问",
+            is_group=False,
+            message_time=datetime.fromtimestamp(1778036763).isoformat(),
+        )
+        assert blocked["allowed"] is False
+        assert blocked["reason"] == "human_reply_suppressed"
+    finally:
+        db.close()
+
+
 def test_auto_reply_rules_require_smart_reply_switch(tmp_path):
     Session = _session_factory(tmp_path)
     db = Session()
