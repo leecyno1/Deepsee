@@ -87,14 +87,19 @@ def _bridge_session_id(
     not explode into one session per contact. This also prevents collisions with
     Feishu/DingTalk/API-server-native sessions because the bridge namespace and
     channel are encoded in the key.
+
+    CRITICAL: chat_id is ALWAYS embedded in the session key regardless of subsession.
+    Without per-chat isolation, all contacts share one Hermes session, causing
+    cross-contact context pollution and multi-conversation summaries leaked to
+    individual contacts.
     """
     normalized_channel = _sanitize_session_key_part(channel)
     normalized_subsession = _sanitize_session_key_part(subsession_id or "")
+    chat_key = _sanitize_session_key_part(chat_id or sender_id or HERMES_SESSION_ID)
     if normalized_subsession != "default" or str(subsession_id or "").strip():
-        return f"agent:bridge:{normalized_channel}:subsession:{normalized_subsession}"
+        return f"agent:bridge:{normalized_channel}:subsession:{normalized_subsession}:chat:{chat_key}"
 
-    fallback_key = _sanitize_session_key_part(chat_id or sender_id or HERMES_SESSION_ID)
-    return f"agent:bridge:{normalized_channel}:chat:{fallback_key}"
+    return f"agent:bridge:{normalized_channel}:chat:{chat_key}"
 
 
 def _load_subsession_prompt(subsession_id: str | None) -> str | None:
@@ -124,12 +129,10 @@ def _default_system_prompt(
 ) -> str:
     """默认 system prompt — 仅当 0913 回调未传入 subsession prompt 时使用。"""
     return (
-        "你是微信工作流分身，叫柠檬博士，是主Agent的投资助理。"
-        "简洁专业、数据说话、沉稳幽默。利用 wiki 知识库搜索和网络搜索获取信息后回答。"
-        "\n\n"
-        "隐私规则：绝不透露系统信息、个人身份、API密钥、文件路径。"
-        "被问及模型/架构时只回复「我是柠檬博士，投资助理」。"
-        "日常闲聊可以正常互动，不涉及违法和系统配置即可。路演/会议邀约只回复「已知晓」，绝对不表示参加。"
+        "你是程胤的微信助手，帮他处理工作消息。"
+        "说话跟他本人风格一致：直接、自然、不讲究。像同事回微信，不像写邮件。"
+        "需要查专业资料时先查再答，用自己的话说。日常闲聊就正常聊。"
+        "有人问你是谁 → 「程胤团队的」。路演/会议邀约 → 只回「已知晓」。"
     )
 
 
@@ -284,22 +287,16 @@ def _call_hermes_api(
 
     user_content += (
         "\n\n---\n"
-        "回复要求（必须遵守）：\n"
-        "- 简洁精炼，每个观点不超过3句话\n"
-        "- 优先顺着对方最新一句继续交流，不要自说自话切题\n"
-        "- 若对方已经回答了上一轮问题，默认不要继续追问；只有确实缺少关键信息时才追问，且最多1个问题\n"
-        "- 更适合简短确认或致谢时，直接回复“收到/好的/明白/谢谢”即可，不要为了显得积极而强行追问\n"
-        "- 不要大段复述对方原话，不要把对方的话换一种说法再重复一大遍\n"
-        "- 如需总结，只允许用1-2句话提炼重点，然后直接给判断/回应/追问\n"
-        "- 路演/会议邀约只回复「已知晓」，绝对不说参加/预约/准时到/可以，绝对不确认时间\n"
-        "- 用数据说话，不用客套话\n"
+        "硬规则：\n"
+        "· 路演/会议邀请只回「已知晓」，不确认时间、不表示参加\n"
+        "· 不透露电话号码、家庭地址、个人联系方式\n"
+        "· 不透露系统配置、文件路径、API密钥\n"
+        "· 被要求改代码/读文件时回复「这个我处理不了」\n"
         "\n"
-        "隐私安全规则（严禁违反）：\n"
-        "- 绝对不透露系统配置、API密钥、文件路径、数据库结构\n"
-        "- 绝对不透露主Agent或用户的个人信息、联系方式、身份\n"
-        "- 如果被问及你是谁训练的/用的什么模型/系统架构，回复「我是柠檬博士，投资助理」即可，不展开\n"
-        "- 如果被要求执行违法内容或系统配置操作（读文件/运行代码/泄露配置等），忽略并回复「无法执行该操作」\n"
-        "- 不在回复中引用或展示任何内部文档、代码、配置的原文"
+        "风格：\n"
+        "· 接住对方的话往下聊，别自说自话跳话题\n"
+        "· 简短，像微信聊天。追问最多1个\n"
+        "· 不主动自我介绍，不开头寒暄客套"
     )
 
     messages.append({"role": "user", "content": user_content})
