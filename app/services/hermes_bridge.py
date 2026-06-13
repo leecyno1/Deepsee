@@ -65,6 +65,10 @@ HERMES_API_BASE = os.getenv("HERMES_API_BASE", "http://127.0.0.1:8642")
 HERMES_SESSION_ID = "wechat_gateway_default"  # fallback when chat_id is empty
 HERMES_CHAT_URL = f"{HERMES_API_BASE.rstrip('/')}/v1/chat/completions"
 TIMEOUT = 180  # agent loop 可能较慢（tool calls, wiki 搜索等）
+# ── WeChat 自动回复专用模型（留空则用 Hermes 默认） ──────────────────
+HERMES_BRIDGE_MODEL = os.getenv(
+    "HERMES_BRIDGE_MODEL", "deepseek-ai/DeepSeek-V3-0324"
+).strip() or "hermes-agent"
 
 
 # ── 降级：Hermes 不可用时回退到 0913 直调 LLM ──────────────────────
@@ -354,7 +358,7 @@ def _call_hermes_api(
     messages.append({"role": "user", "content": user_content})
 
     payload = {
-        "model": "hermes-agent",
+        "model": HERMES_BRIDGE_MODEL,
         "messages": messages,
         "max_tokens": 2000,
         "stream": False,
