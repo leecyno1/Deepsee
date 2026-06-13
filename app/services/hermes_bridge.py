@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,10 @@ from ..db import SessionLocal
 from ..models import WechatSubsession
 
 logger = logging.getLogger(__name__)
+
+# ── 会话自动刷新：超过此空闲时间（小时）则启动新 Hermes session ────
+CST = timezone(timedelta(hours=8))
+_IDLE_RESET_HOURS = float(os.getenv("HERMES_SESSION_IDLE_RESET_HOURS", "4"))
 
 
 def _read_env_file_value(path: Path, key: str) -> str:
@@ -71,6 +76,45 @@ _FALLBACK_ENABLED = os.getenv("HERMES_FALLBACK_ENABLED", "false").lower() in (
 def _sanitize_session_key_part(value: str) -> str:
     safe = "".join(c for c in str(value or "") if c.isalnum() or c in "@._-")
     return safe or "default"
+
+
+def _chat_last_message_hours(chat_id: str) -> float | None:
+    """返回 chat_id 最后一次消息距今的小时数，没有历史则返回 None。"""
+    if not chat_id:
+        return None
+    db = SessionLocal()
+    try:
+        from sqlalchemy import text
+
+        row = db.execute(
+            text("SELECT max(timestamp) FROM messages WHERE chat_id = :cid"),
+            {"cid": chat_id},
+        ).scalar()
+        if not row:
+            return None
+        last_ts = datetime.fromisoformat(str(row))
+        if last_ts.tzinfo is None:
+            last_ts = last_ts.replace(tzinfo=CST)
+        delta = datetime.now(CST) - last_ts
+        return delta.total_seconds() / 3600
+    except Exception:
+        return None
+    finally:
+        db.close()
+
+
+def _session_freshness_suffix(chat_id: str) -> str:
+    """如果 chat 空闲超过阈值，返回时间窗口后缀，否则返回空字符串。
+
+    用 round-to-4h 窗口防抖动：同个 4h 窗口内始终同一个 session。
+    """
+    hours = _chat_last_message_hours(chat_id)
+    if hours is None or hours < _IDLE_RESET_HOURS:
+        return ""
+    now = datetime.now(CST)
+    # 向下取整到 4 小时窗口
+    window = int(now.timestamp() / (_IDLE_RESET_HOURS * 3600))
+    return f":fresh{window}"
 
 
 def _bridge_session_id(
@@ -166,6 +210,14 @@ def _build_execution_context(
         chat_id=chat_id,
         sender_id=sender_id,
     )
+    # 空闲超过阈值则切换 session，防止上下文无限膨胀
+    freshness = _session_freshness_suffix(chat_id)
+    if freshness:
+        hermes_session_id = f"{hermes_session_id}{freshness}"
+        logger.info(
+            "Session refreshed for chat_id=%s: idle > %.0fh → new session suffix=%s",
+            chat_id, _IDLE_RESET_HOURS, freshness,
+        )
     return {
         "resolved_prompt": resolved_prompt,
         "subsession_id": source_subsession_id,
