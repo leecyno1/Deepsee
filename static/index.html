@@ -26245,24 +26245,44 @@ if (document.readyState === 'loading') {
             attachToTasks((document.getElementById('sendAttachmentUrl')?.value || '').trim());
         });
         rebind('sendContactsReload', async ()=>{
-            setContactHint('正在同步通讯录：优先 WeChat API，失败后使用 chatlog 兜底…', 'info');
+            const btn = document.getElementById('sendContactsReload');
+            const origText = btn ? btn.textContent : '同步通讯录';
+            if (btn) { btn.disabled = true; btn.textContent = '同步中…'; }
+            setContactHint('⏳ 正在同步通讯录…', 'info');
+
             let synced = false;
+            let stats = {};
             try{
                 const syncRes = await requestJson('/api/contacts/sync-book?insert_missing=1', { method:'POST' });
                 if (syncRes && syncRes.status === 'ok'){
                     synced = true;
+                    stats = syncRes;
+                    const ins = syncRes.inserted ?? 0;
+                    const upd = syncRes.updated ?? 0;
                     const ua = syncRes.updated_alias ?? 0;
                     const ul = syncRes.updated_labels ?? 0;
-                    setContactHint(`通讯录已同步：备注 ${ua}，标签 ${ul}`, 'success');
+                    setContactHint(`📋 通讯录已同步：新增 ${ins} 人，更新 ${upd} 条。正在刷新界面…`, 'info');
                 }
             }catch(e){
                 console.warn('sync contact book failed; fallback to loaded chatlog/db contacts', e);
-                setContactHint('WeChat API/通讯录同步不可用，已使用 chatlog/本地通讯录兜底', 'warn');
+                setContactHint('⚠️ WeChat API 同步不可用，使用本地通讯录兜底。正在刷新界面…', 'warn');
             }
+
+            setContactHint('🔄 正在加载群组…', 'info');
             await loadChats();
+            setContactHint('🔄 正在加载联系人…', 'info');
             await loadContacts();
             renderContacts();
-            if (synced) setContactHint('通讯录已刷新并合并标签', 'success');
+
+            if (synced) {
+                const ins = stats.inserted ?? 0;
+                const ua = stats.updated_alias ?? 0;
+                const ul = stats.updated_labels ?? 0;
+                setContactHint(`✅ 同步完成：新增 ${ins} 人，备注 ${ua} 条，标签 ${ul} 个`, 'success');
+            } else {
+                setContactHint('✅ 已使用本地通讯录刷新完成', 'success');
+            }
+            if (btn) { btn.disabled = false; btn.textContent = origText; }
         });
         rebind('sendAddLink', ()=>{ addComposerLink(); });
         rebind('sendUploadFiles', async ()=>{
