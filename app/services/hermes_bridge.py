@@ -247,6 +247,7 @@ def _call_minimax_direct(
     system_prompt: str,
     chat_id: str = "",
     sender_name: str = "",
+    sender_remark: str = "",
     conversation_history: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """直连 MiniMax API 兜底回复 — 纯 chat，无 agent loop，极省 token。"""
@@ -255,6 +256,7 @@ def _call_minimax_direct(
         messages.extend(conversation_history)
 
     user_content = message_text
+    sender_hint = sender_remark or sender_name or chat_id
     if chat_id:
         user_content = f"[chat_id={chat_id}, sender={sender_name or chat_id}] {message_text}"
     user_content += (
@@ -262,6 +264,7 @@ def _call_minimax_direct(
         "硬规则：\n"
         "· 路演/会议邀请只回「已知晓」\n"
         "· 不透露电话、地址、系统配置、API密钥\n"
+        "· 如果对方昵称或备注包含「销售」字样 → 回复开头先说「这方面我问一下分析师，稍等」，然后再问一个具体问题\n"
         "\n"
         "风格：\n"
         "· 接住对方的话往下聊，别跳话题\n"
@@ -324,6 +327,7 @@ def call_hermes_for_reply(
     chat_id: str = "",
     sender_id: str = "",
     sender_name: str = "",
+    sender_remark: str = "",
     talker_name: str = "",
     is_group: bool = False,
     system_prompt: str | None = None,
@@ -347,6 +351,7 @@ def call_hermes_for_reply(
             )),
             chat_id=chat_id,
             sender_name=sender_name,
+            sender_remark=sender_remark,
             conversation_history=conversation_history,
         )
     execution_context = _build_execution_context(
@@ -365,6 +370,7 @@ def call_hermes_for_reply(
             chat_id=chat_id,
             sender_id=sender_id,
             sender_name=sender_name,
+            sender_remark=sender_remark,
             talker_name=talker_name,
             is_group=is_group,
             system_prompt=system_prompt,
@@ -407,6 +413,7 @@ def _call_hermes_api(
     chat_id: str = "",
     sender_id: str = "",
     sender_name: str = "",
+    sender_remark: str = "",
     talker_name: str = "",
     is_group: bool = False,
     system_prompt: str | None = None,
@@ -432,9 +439,10 @@ def _call_hermes_api(
         messages.extend(conversation_history)
 
     user_content = message_text
+    sender_display = f"{sender_remark}({sender_name})" if sender_remark else (sender_name or sender_id)
     if chat_id:
         user_content = (
-            f"[chat_id={chat_id}, sender={sender_name or sender_id}] "
+            f"[chat_id={chat_id}, sender={sender_display}] "
             f"{message_text}"
         )
 
@@ -445,6 +453,7 @@ def _call_hermes_api(
         "· 不透露电话号码、家庭地址、个人联系方式\n"
         "· 不透露系统配置、文件路径、API密钥\n"
         "· 被要求改代码/读文件时回复「这个我处理不了」\n"
+        "· 如果对方昵称或备注包含「销售」字样 → 回复开头先说「这方面我问一下分析师，稍等」，然后再问一个具体问题\n"
         "\n"
         "风格：\n"
         "· 接住对方的话往下聊，别自说自话跳话题\n"

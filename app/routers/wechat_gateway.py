@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response, WebSocket, WebS
 from sqlalchemy.orm import Session
 
 from ..db import SessionLocal
-from ..models import Message
+from ..models import Contact, Message
 from ..services.wechatapi_client import WechatApiClient
 from ..services.wechat_gateway import (
     apply_outbound_random_delay,
@@ -48,12 +48,20 @@ def _run_auto_reply_for_message(message_id: int) -> None:
         from ..services.hermes_bridge import call_hermes_for_reply
 
         subsession_id = ((message.meta or {}).get("subsession") or {}).get("id") or "wechat_gateway_default"
+        # 查发送者备注（用于销售检测等）
+        sender_remark = ""
+        sname = str(message.sender_name or "")
+        if message.sender_id:
+            contact = db.get(Contact, str(message.sender_id))
+            if contact:
+                sender_remark = str(contact.alias or contact.name or "").strip()
         generated = call_hermes_for_reply(
             message_text=str(message.content_text or ""),
             subsession_id=subsession_id,
             chat_id=str(message.chat_id or ""),
             sender_id=str(message.sender_id or ""),
             sender_name=str(message.sender_name or ""),
+            sender_remark=sender_remark,
             talker_name=str(message.talker_name or message.chat_id or ""),
             is_group=str(message.chat_id or "").endswith("@chatroom"),
         )
