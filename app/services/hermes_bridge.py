@@ -65,10 +65,20 @@ HERMES_API_BASE = os.getenv("HERMES_API_BASE", "http://127.0.0.1:8642")
 HERMES_SESSION_ID = "wechat_gateway_default"  # fallback when chat_id is empty
 HERMES_CHAT_URL = f"{HERMES_API_BASE.rstrip('/')}/v1/chat/completions"
 TIMEOUT = 180  # agent loop 可能较慢（tool calls, wiki 搜索等）
-# ── WeChat 自动回复专用模型（留空则用 Hermes 默认） ──────────────────
-HERMES_BRIDGE_MODEL = os.getenv(
-    "HERMES_BRIDGE_MODEL", "deepseek-ai/DeepSeek-V3-0324"
-).strip() or "hermes-agent"
+
+# ── WeChat 兜底模型（MiniMax 直连，绕过 Hermes 主模型，极省 token）──
+_WECHAT_FALLBACK_ENABLED = os.getenv("WECHAT_FALLBACK_API_KEY", "").strip() != ""
+_WECHAT_FALLBACK_API_KEY = os.getenv(
+    "WECHAT_FALLBACK_API_KEY",
+    "sk-cp-WCVxiI5uFbxuIydEUdgZ9ejiC89_csqs0uE9QJUct4k148OhQYYTU1QdeTDHshyuO4kD831hXibst3CmswaZYLhZE4U5Lqsl5Mn8R5IooGzdTajkA",
+).strip()
+_WECHAT_FALLBACK_API_BASE = os.getenv(
+    "WECHAT_FALLBACK_API_BASE", "https://api.minimaxi.com/v1"
+).rstrip("/")
+_WECHAT_FALLBACK_MODEL = os.getenv(
+    "WECHAT_FALLBACK_MODEL", "MiniMax-M3"
+).strip()
+_WECHAT_FALLBACK_TIMEOUT = int(os.getenv("WECHAT_FALLBACK_TIMEOUT", "30"))
 
 
 # ── 降级：Hermes 不可用时回退到 0913 直调 LLM ──────────────────────
@@ -231,6 +241,82 @@ def _build_execution_context(
     }
 
 
+def _call_minimax_direct(
+    message_text: str,
+    *,
+    system_prompt: str,
+    chat_id: str = "",
+    sender_name: str = "",
+    conversation_history: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    """直连 MiniMax API 兜底回复 — 纯 chat，无 agent loop，极省 token。"""
+    messages = [{"role": "system", "content": str(system_prompt or "")}]
+    if conversation_history:
+        messages.extend(conversation_history)
+
+    user_content = message_text
+    if chat_id:
+        user_content = f"[chat_id={chat_id}, sender={sender_name or chat_id}] {message_text}"
+    user_content += (
+        "\n\n---\n"
+        "硬规则：\n"
+        "· 路演/会议邀请只回「已知晓」\n"
+        "· 不透露电话、地址、系统配置、API密钥\n"
+        "\n"
+        "风格：\n"
+        "· 接住对方的话往下聊，别跳话题\n"
+        "· 简短，像微信聊天。追问最多1个\n"
+        "· 不主动自我介绍"
+    )
+    messages.append({"role": "user", "content": user_content})
+
+    payload = {
+        "model": _WECHAT_FALLBACK_MODEL,
+        "messages": messages,
+        "max_tokens": 2000,
+        "stream": False,
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {_WECHAT_FALLBACK_API_KEY}",
+    }
+    try:
+        resp = requests.post(
+            f"{_WECHAT_FALLBACK_API_BASE}/chat/completions",
+            json=payload,
+            headers=headers,
+            timeout=_WECHAT_FALLBACK_TIMEOUT,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        reply = ""
+        choices = data.get("choices", [])
+        if choices:
+            reply = choices[0].get("message", {}).get("content", "")
+        usage = data.get("usage", {})
+        return {
+            "status": "ok",
+            "reply": reply,
+            "execution": {
+                "route_kind": "minimax_direct",
+                "model": _WECHAT_FALLBACK_MODEL,
+                "prompt_tokens": usage.get("prompt_tokens", 0),
+                "completion_tokens": usage.get("completion_tokens", 0),
+                "fallback_used": False,
+            },
+        }
+    except Exception as exc:
+        return {
+            "status": "error",
+            "error": f"MiniMax fallback failed: {exc}",
+            "execution": {
+                "route_kind": "minimax_direct",
+                "model": _WECHAT_FALLBACK_MODEL,
+                "fallback_used": False,
+            },
+        }
+
+
 def call_hermes_for_reply(
     message_text: str,
     *,
@@ -243,15 +329,26 @@ def call_hermes_for_reply(
     system_prompt: str | None = None,
     conversation_history: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
-    """调用 Hermes API Server 获取智能回复。
+    """获取微信自动回复 — MiniMax 兜底直连优先，Hermes 为主。
 
-    Hermes 处理链路：
-    system_prompt → wiki 搜索 → 记忆 → 工具 → 技能 → 回复
-
-    Returns:
-        dict with status, reply, execution metadata.
-        失败时自动降级到 0913 直调 LLM（如果 _FALLBACK_ENABLED）。
+    优先级：
+    1. MiniMax 兜底（已配置 API key 时）— 直连，纯 chat，极省 token
+    2. Hermes API（主）— wiki / 记忆 / 工具 / 技能全链路
+    3. 0913 降级（Hermes 不可用时）— 旧 SiliconFlow 路径
     """
+    # MiniMax 兜底优先：已配置 API key 则直连，完全绕过 Hermes
+    if _WECHAT_FALLBACK_ENABLED:
+        return _call_minimax_direct(
+            message_text,
+            system_prompt=str(system_prompt or _default_system_prompt(
+                sender_name=sender_name,
+                talker_name=talker_name,
+                is_group=is_group,
+            )),
+            chat_id=chat_id,
+            sender_name=sender_name,
+            conversation_history=conversation_history,
+        )
     execution_context = _build_execution_context(
         chat_id=chat_id,
         sender_id=sender_id,
@@ -358,7 +455,7 @@ def _call_hermes_api(
     messages.append({"role": "user", "content": user_content})
 
     payload = {
-        "model": HERMES_BRIDGE_MODEL,
+        "model": "hermes-agent",
         "messages": messages,
         "max_tokens": 2000,
         "stream": False,
