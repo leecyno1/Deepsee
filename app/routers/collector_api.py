@@ -18,6 +18,13 @@ class AuthorsUpdate(BaseModel):
     authors: list[str]
 
 
+class CollectorRefreshRequest(BaseModel):
+    hot: bool = True
+    search: bool = True
+    authors: bool = True
+    timeout_seconds: int | None = None
+
+
 def _keywords_path() -> Path:
     return (Path(__file__).resolve().parent.parent.parent / "media-collector" / "keywords.json").resolve()
 
@@ -110,7 +117,29 @@ def update_authors(payload: AuthorsUpdate):
 def collector_status():
     """采集器数据状态"""
     from ..services.media_collector_store import get_collector_status
-    return get_collector_status()
+    from ..services.media_collector_runner import get_media_collector_run_state
+
+    status = get_collector_status()
+    run_state = get_media_collector_run_state()
+    return {
+        **status,
+        "running": bool(run_state.get("running")),
+        "last_run": run_state.get("last_run"),
+    }
+
+
+@router.post("/refresh")
+def refresh_collector(payload: CollectorRefreshRequest | None = None):
+    """立即触发轻量自媒体采集。"""
+    from ..services.media_collector_runner import run_media_collector_once
+
+    req = payload or CollectorRefreshRequest()
+    return run_media_collector_once(
+        hot=bool(req.hot),
+        search=bool(req.search),
+        authors=bool(req.authors),
+        timeout_seconds=req.timeout_seconds,
+    )
 
 
 @router.get("/hot")

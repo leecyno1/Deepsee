@@ -58,6 +58,21 @@ def _clean_local_summary(*values: object, max_len: int = 180) -> str:
     return ""
 
 
+def _message_summary(message: Message) -> str:
+    """Return the best available generated summary for a Message row."""
+    derived = message.derived if isinstance(message.derived, dict) else {}
+    meta = message.meta if isinstance(message.meta, dict) else {}
+    meta_derived = meta.get("derived") if isinstance(meta.get("derived"), dict) else {}
+    return _clean_local_summary(
+        derived.get("summary"),
+        derived.get("summary_full"),
+        derived.get("key_info"),
+        meta_derived.get("summary"),
+        meta_derived.get("summary_full"),
+        meta_derived.get("key_info"),
+    )
+
+
 def _list_local_wechat_mp_articles(db, *, limit=100, offset=0, q=None):
     """Query local wechat gateway gh_* messages as 公众号 articles."""
     from sqlalchemy import or_, and_
@@ -93,7 +108,7 @@ def _list_local_wechat_mp_articles(db, *, limit=100, offset=0, q=None):
             existing.get("desc"),
             derived.get("key_info"),
             derived.get("summary"),
-            m.summary,
+            _message_summary(m),
             m.content_text,
         )
         url = appmsg.get("url") or existing.get("url") or ""
@@ -207,7 +222,7 @@ def api_get_article(article_id: str, include_content: bool = False, db: Session 
         appmsg = _extract_appmsg_from_content(msg.content_text)
         existing = meta.get("contents") if isinstance(meta.get("contents"), dict) else {}
         title = appmsg.get("title") or existing.get("title") or str(msg.content_text or "")[:120]
-        summary = _clean_local_summary(appmsg.get("desc"), existing.get("desc"), msg.summary, msg.content_text)
+        summary = _clean_local_summary(appmsg.get("desc"), existing.get("desc"), _message_summary(msg), msg.content_text)
         return {
             "id": article_id,
             "channel_name": str(msg.sender_name or msg.talker_name or "").strip(),

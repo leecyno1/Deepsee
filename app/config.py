@@ -70,5 +70,9 @@ class Settings(BaseSettings):
 
     # Optional: MediaCrawlerPro server base (meeting recorder controls proxy)
     MEDIA_SERVER_BASE: str | None = None
+    MEDIA_COLLECTOR_DAILY_ENABLED: bool = True
+    MEDIA_COLLECTOR_DAILY_HOUR: int = Field(default=5)
+    MEDIA_COLLECTOR_DAILY_MINUTE: int = Field(default=0)
+    MEDIA_COLLECTOR_TIMEOUT_SECONDS: int = Field(default=240)
 
 settings = Settings()

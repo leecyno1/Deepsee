@@ -9589,7 +9589,7 @@
                 <div class="config-group" id="collectorStatus" style="font-size:12px; color:var(--text-muted);">加载中…</div>
                 <div class="config-actions" style="flex-wrap:wrap;">
                     <button class="save-btn" onclick="saveMediaAggAllConfig()">保存自媒体引擎配置</button>
-                    <button class="test-btn" onclick="refreshFolo()">刷新自媒体引擎</button>
+                    <button class="test-btn" id="collectorRefreshBtn" onclick="runManualFoloRefresh()">刷新自媒体引擎</button>
                     <button class="test-btn" onclick="loadCollectorStatus()">刷新采集状态</button>
                     <span style="font-size:12px; color:var(--text-muted); margin-left:10px;">关键词与博主采集分别由 media-collector 的 batch_search / batch_author_search 执行。</span>
                 </div>
@@ -10617,14 +10617,56 @@
                 const searchKws = s.search?.keywords_count || 0;
                 const authorsDay = s.authors?.latest_day || '—';
                 const authorsCount = s.authors?.authors_count || 0;
+                const running = !!s.running;
+                const lastRun = s.last_run && typeof s.last_run === 'object' ? s.last_run : null;
+                const lastOk = lastRun ? !!lastRun.ok : null;
+                const lastAt = lastRun?.finished_at ? new Date(lastRun.finished_at).toLocaleString() : '';
+                const lastText = lastRun
+                    ? `最近采集: ${lastOk ? '成功' : '异常'}${lastAt ? ' · ' + lastAt : ''}`
+                    : '最近采集: 暂无记录';
                 el.innerHTML = `
                     📊 热榜: ${hotDay} (${hotFiles}源) &nbsp;|&nbsp;
                     🔍 搜索: ${searchDay} (${searchKws}关键词) &nbsp;|&nbsp;
                     👤 博主: ${authorsDay} (${authorsCount}人) &nbsp;|&nbsp;
-                    数据目录: <code>${s.data_dir || '—'}</code>
+                    ${running ? '<span style="color:#0a84ff;font-weight:700;">采集中…</span>' : escapeHtml(lastText)} &nbsp;|&nbsp;
+                    数据目录: <code>${escapeHtml(s.data_dir || '—')}</code>
                 `;
             } catch (e) {
                 el.textContent = '状态加载失败: ' + (e?.message || e);
+            }
+        }
+
+        async function runManualFoloRefresh() {
+            const btn = document.getElementById('collectorRefreshBtn');
+            const statusEl = document.getElementById('collectorStatus');
+            try {
+                if (btn) {
+                    btn.disabled = true;
+                    btn.textContent = '采集中…';
+                }
+                if (statusEl) statusEl.textContent = '显示旧内容，正在采集热榜、关键词和博主数据…';
+                setListUpdatingStatus('foloSourceInfo', '显示旧内容，采集完成后自动更新…');
+                const cachedShown = showCachedList('folo-agg', (cached)=>{ foloItems = cached; applyFoloFilters(); });
+                const tbody = document.querySelector('#foloTable tbody');
+                renderLoadingIfNoCached(tbody, cachedShown, 11, '正在首次采集，请稍候…');
+                const result = await requestJson('/api/collector/refresh', {
+                    method: 'POST',
+                    body: JSON.stringify({ hot: true, search: true, authors: true })
+                });
+                if (statusEl) {
+                    const ok = !!result.ok || !!result.running;
+                    statusEl.textContent = result.running ? '采集任务已在运行，稍后会自动读取最新结果' : (ok ? '采集完成，正在刷新列表…' : '采集完成但部分源异常，正在读取可用结果…');
+                }
+                await refreshFolo();
+                await loadCollectorStatus();
+            } catch (e) {
+                if (statusEl) statusEl.textContent = '采集失败: ' + (e?.message || e);
+                setListUpdatingStatus('foloSourceInfo', `采集失败：${e?.message || e}`);
+            } finally {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.textContent = '刷新自媒体引擎';
+                }
             }
         }
 
@@ -19862,9 +19904,10 @@
                         chatlog_sync: '微信本地兜底同步',
                         wechat8061_sync: '微信备用网关同步',
                         email_sync: '邮件同步',
-                        news_refresh: '新闻刷新',
-                        news_snapshot: '新闻情绪快照',
-                        ext_adapter_sync: '自定义引擎同步',
+	                        news_refresh: '新闻刷新',
+	                        news_snapshot: '新闻情绪快照',
+	                        media_collector: '自媒体采集',
+	                        ext_adapter_sync: '自定义引擎同步',
                         aggregation_retention: '数据保留清理',
                     };
                     return map[name] || name;

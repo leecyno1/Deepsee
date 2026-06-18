@@ -13,6 +13,7 @@ from .services.ext_adapter_service import ingest_adapter_logs
 from .services import news_client
 from .services.wechat8061_sync import wechat8061_sync_loop
 from .services.aggregation_retention import prune_aggregation_data
+from .services.media_collector_runner import run_media_collector_once
 
 logger = logging.getLogger(__name__)
 BACKGROUND_RUNTIME: dict[str, dict] = {}
@@ -78,6 +79,7 @@ _BACKGROUND_RUNTIME_NAMES = [
     "ext_adapter_sync",
     "news_refresh",
     "news_snapshot",
+    "media_collector",
     "summary_overlay",
     "aggregation_retention",
 ]
@@ -402,6 +404,39 @@ async def _news_snapshot_loop():
         await asyncio.sleep(max(60, interval))
 
 
+def _seconds_until_daily(hour: int, minute: int) -> int:
+    now = datetime.now()
+    target = now.replace(hour=max(0, min(23, hour)), minute=max(0, min(59, minute)), second=0, microsecond=0)
+    if target <= now:
+        target = target + timedelta(days=1)
+    return max(1, int((target - now).total_seconds()))
+
+
+async def _media_collector_loop():
+    loop_name = "media_collector"
+    enabled = bool(settings.__dict__.get("MEDIA_COLLECTOR_DAILY_ENABLED", True))
+    if not enabled:
+        _bg_mark_enabled(loop_name, False)
+        return
+    _bg_mark_enabled(loop_name, True)
+    while True:
+        hour = int(settings.__dict__.get("MEDIA_COLLECTOR_DAILY_HOUR", 5) or 5)
+        minute = int(settings.__dict__.get("MEDIA_COLLECTOR_DAILY_MINUTE", 0) or 0)
+        await asyncio.sleep(_seconds_until_daily(hour, minute))
+        try:
+            _bg_mark_start(loop_name)
+            result = await asyncio.to_thread(run_media_collector_once, hot=True, search=True, authors=True)
+            if not bool(result.get("ok")) and not bool(result.get("running")):
+                raise RuntimeError("media collector failed")
+            logger.info("media collector refreshed: %s", {
+                "ok": result.get("ok"),
+                "tasks": result.get("tasks"),
+            })
+            _bg_mark_success(loop_name)
+        except Exception as exc:
+            _bg_mark_error(loop_name, exc)
+
+
 async def _aggregation_retention_loop():
     loop_name = "aggregation_retention"
     interval = int(settings.__dict__.get("AGGREGATION_RETENTION_INTERVAL_SECONDS", 86400) or 0)
@@ -467,6 +502,10 @@ async def start_background_loops(app: FastAPI | None = None) -> None:
     _bg_mark_enabled("news_snapshot", bool(snap_interval and snap_interval > 0))
     if snap_interval and snap_interval > 0:
         asyncio.create_task(_news_snapshot_loop())
+    media_collector_enabled = bool(settings.__dict__.get("MEDIA_COLLECTOR_DAILY_ENABLED", True))
+    _bg_mark_enabled("media_collector", media_collector_enabled)
+    if media_collector_enabled:
+        asyncio.create_task(_media_collector_loop())
     summary_interval = int(settings.__dict__.get("SUMMARY_OVERLAY_INTERVAL_SECONDS", 3600) or 0)
     _bg_mark_enabled("summary_overlay", bool(summary_interval and summary_interval > 0))
     if summary_interval and summary_interval > 0:
