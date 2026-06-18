@@ -8636,6 +8636,15 @@
                         <div class="settings-runtime-card"><div class="settings-runtime-name">正在加载运行状态…</div><div class="settings-runtime-meta">进入首页后自动刷新</div></div>
                     </div>
                 </div>
+                <div class="settings-runtime-panel">
+                    <div class="settings-runtime-head">
+                        <div><div class="settings-runtime-title">安装自检</div><div class="settings-runtime-sub">检查数据库、AI、微信本地、自媒体采集与公众号外部源是否可用。</div></div>
+                        <div style="display:flex;align-items:center;gap:8px;"><span id="installReadinessStatus" style="color:var(--text-muted);font-size:12px;"></span><button class="test-btn" onclick="loadInstallReadiness()">立即检测</button></div>
+                    </div>
+                    <div id="installReadinessGrid" class="settings-runtime-grid">
+                        <div class="settings-runtime-card"><div class="settings-runtime-name">等待检测</div><div class="settings-runtime-meta">进入首页后自动检测</div></div>
+                    </div>
+                </div>
                 <div class="settings-home-grid">
                     <div class="settings-home-card" data-open-settings="settings-ai-config" style="--card-color:#0a84ff"><div class="settings-home-card-title">AI设置</div><div class="settings-home-card-desc">模型路由、参数、一页通与通道配置。</div><div class="settings-home-card-action">进入配置 →</div></div>
                     <div class="settings-home-card" data-open-settings="settings-prompts" style="--card-color:#7c3aed"><div class="settings-home-card-title">提示词管理</div><div class="settings-home-card-desc">大模型、小模型、AI回复和一页通提示词。</div><div class="settings-home-card-action">进入配置 →</div></div>
@@ -10636,6 +10645,27 @@
             }
         }
 
+        function waitMs(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+        }
+
+        async function waitForCollectorFinished({ maxWaitMs = 360000, intervalMs = 2500 } = {}) {
+            const started = Date.now();
+            let latest = null;
+            while (Date.now() - started < maxWaitMs) {
+                latest = await requestJson(`/api/collector/status?_ts=${Date.now()}`);
+                const statusEl = document.getElementById('collectorStatus');
+                if (statusEl) {
+                    const current = latest.current_run && typeof latest.current_run === 'object' ? latest.current_run : {};
+                    const tasks = Array.isArray(current.tasks) && current.tasks.length ? current.tasks.join('/') : '热榜/关键词/博主';
+                    statusEl.textContent = latest.running ? `后台采集中：${tasks}，旧内容继续显示…` : '采集完成，正在更新列表…';
+                }
+                if (!latest.running) return latest;
+                await waitMs(intervalMs);
+            }
+            throw new Error('采集仍在后台运行，请稍后刷新列表');
+        }
+
         async function runManualFoloRefresh() {
             const btn = document.getElementById('collectorRefreshBtn');
             const statusEl = document.getElementById('collectorStatus');
@@ -10654,9 +10684,9 @@
                     body: JSON.stringify({ hot: true, search: true, authors: true })
                 });
                 if (statusEl) {
-                    const ok = !!result.ok || !!result.running;
-                    statusEl.textContent = result.running ? '采集任务已在运行，稍后会自动读取最新结果' : (ok ? '采集完成，正在刷新列表…' : '采集完成但部分源异常，正在读取可用结果…');
+                    statusEl.textContent = result.accepted || result.running ? '采集已进入后台，旧内容继续显示…' : '采集启动异常，正在读取可用结果…';
                 }
+                await waitForCollectorFinished();
                 await refreshFolo();
                 await loadCollectorStatus();
             } catch (e) {
@@ -18727,10 +18757,12 @@
                         hydrateMpAggConfigInput();
                         hydrateMinutesAggConfigInput();
                         hydrateExtensionsConfigInput();
-                        try{ loadAiRuntime(); }catch(_){ }
-                        try{ loadBackgroundRuntimeStats(); }catch(_){ }
-                        if (!window.__settingsRuntimeTimer) { window.__settingsRuntimeTimer = setInterval(()=>{ try{ if (document.getElementById('function-settings')?.classList.contains('active')) loadBackgroundRuntimeStats(); }catch(_){} }, 15000); }
-                        if (typeof refreshEmailAccounts === 'function') {
+	                        try{ loadAiRuntime(); }catch(_){ }
+	                        try{ loadBackgroundRuntimeStats(); }catch(_){ }
+	                        try{ loadInstallReadiness(); }catch(_){ }
+	                        if (!window.__settingsRuntimeTimer) { window.__settingsRuntimeTimer = setInterval(()=>{ try{ if (document.getElementById('function-settings')?.classList.contains('active')) loadBackgroundRuntimeStats(); }catch(_){} }, 15000); }
+	                        if (!window.__settingsReadinessTimer) { window.__settingsReadinessTimer = setInterval(()=>{ try{ if (document.getElementById('function-settings')?.classList.contains('active')) loadInstallReadiness(); }catch(_){} }, 60000); }
+	                        if (typeof refreshEmailAccounts === 'function') {
                             refreshEmailAccounts().catch(err => console.warn('刷新邮箱失败', err));
                         }
                         if (typeof loadEmailSyncSchedule === 'function') {
@@ -19900,16 +19932,16 @@
                 const runtime = (payload && payload.runtime && typeof payload.runtime === 'object') ? payload.runtime : {};
                 const rows = Object.entries(runtime).sort((a, b) => String(a[0]).localeCompare(String(b[0])));
                 const renderName = (name) => {
-                    const map = {
-                        chatlog_sync: '微信本地兜底同步',
-                        wechat8061_sync: '微信备用网关同步',
-                        email_sync: '邮件同步',
+	                    const map = {
+	                        chatlog_sync: '微信本地兜底同步',
+	                        wechat8061_sync: '微信备用网关同步',
+	                        email_sync: '邮件同步',
 	                        news_refresh: '新闻刷新',
 	                        news_snapshot: '新闻情绪快照',
 	                        media_collector: '自媒体采集',
 	                        ext_adapter_sync: '自定义引擎同步',
-                        aggregation_retention: '数据保留清理',
-                    };
+	                        aggregation_retention: '数据保留清理',
+	                    };
                     return map[name] || name;
                 };
                 if (grid) {
@@ -19955,6 +19987,45 @@
                 if (grid && !grid.innerHTML.trim()) grid.innerHTML = '<div class="settings-runtime-card is-error"><div class="settings-runtime-name">运行态加载失败</div></div>';
                 if (body && !body.innerHTML.trim()) body.innerHTML = renderCommercialEmptyRow('运行态加载失败', 8, '请查看诊断报告或服务日志');
                 console.warn('load background runtime stats failed', e);
+            }
+        }
+
+        async function loadInstallReadiness(){
+            const grid = document.getElementById('installReadinessGrid');
+            const statusEl = document.getElementById('installReadinessStatus');
+            if (!grid) return;
+            const renderName = (name) => ({
+                database: '数据库',
+                sqlite_fts: '消息检索',
+                disk_space: '磁盘空间',
+                writable_paths: '目录权限',
+                external_config: '模型路由',
+                llm_config: 'AI密钥',
+                chatlog_http: '微信本地兜底',
+                media_collector: '自媒体采集',
+                mp_upstream: '公众号外部源',
+                background_loops: '后台任务',
+                summary_queue: '摘要队列',
+            }[name] || name);
+            try{
+                if (statusEl) statusEl.textContent = '检测中…';
+                const payload = await requestJson(`/api/ready?_ts=${Date.now()}`);
+                const checks = Array.isArray(payload.checks) ? payload.checks : [];
+                grid.innerHTML = checks.map(check => {
+                    const status = String(check.status || '').toLowerCase();
+                    const cls = status === 'ok' ? 'is-ok' : (status === 'running' ? 'is-running' : 'is-error');
+                    const message = String(check.message || check.error_code || '').trim();
+                    return `<div class="settings-runtime-card ${cls}" title="${escapeHtml(message)}">
+                        <div class="settings-runtime-card-head"><span class="settings-runtime-dot"></span><span class="settings-runtime-name">${escapeHtml(renderName(check.name))}</span></div>
+                        <div class="settings-runtime-meta"><span>${status === 'ok' ? '正常' : '需处理'}</span>${check.latency_ms ? `<span>${Number(check.latency_ms)}ms</span>` : ''}</div>
+                        <div class="settings-runtime-meta"><span>${escapeHtml(message || '—')}</span></div>
+                    </div>`;
+                }).join('') || '<div class="settings-runtime-card is-off"><div class="settings-runtime-name">暂无检测项</div></div>';
+                if (statusEl) setCommercialStatus(statusEl, payload.healthy ? '全部可用' : '存在异常', payload.healthy ? 'success' : 'warning');
+            }catch(e){
+                if (statusEl) setCommercialStatus(statusEl, '检测失败', 'error');
+                grid.innerHTML = '<div class="settings-runtime-card is-error"><div class="settings-runtime-name">自检失败</div><div class="settings-runtime-meta">请查看服务日志</div></div>';
+                console.warn('load install readiness failed', e);
             }
         }
 

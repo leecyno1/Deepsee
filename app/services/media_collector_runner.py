@@ -14,6 +14,7 @@ from .media_collector_store import get_collector_status
 
 _RUN_LOCK = threading.Lock()
 _LAST_RUN: dict[str, Any] | None = None
+_CURRENT_RUN: dict[str, Any] | None = None
 
 
 def _project_root() -> Path:
@@ -32,6 +33,10 @@ def _runs_dir() -> Path:
 
 def _last_run_path() -> Path:
     return _runs_dir() / "last.json"
+
+
+def _current_run_path() -> Path:
+    return _runs_dir() / "current.json"
 
 
 def _utc_now() -> str:
@@ -131,10 +136,39 @@ def _load_last_run() -> dict[str, Any] | None:
     return None
 
 
+def _set_current_run(payload: dict[str, Any] | None) -> None:
+    global _CURRENT_RUN
+    _CURRENT_RUN = dict(payload) if isinstance(payload, dict) else None
+    path = _current_run_path()
+    try:
+        if _CURRENT_RUN:
+            path.write_text(json.dumps(_CURRENT_RUN, ensure_ascii=False, indent=2), encoding="utf-8")
+        else:
+            path.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _load_current_run() -> dict[str, Any] | None:
+    if _CURRENT_RUN:
+        return dict(_CURRENT_RUN)
+    path = _current_run_path()
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return dict(data) if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
 def get_media_collector_run_state() -> dict[str, Any]:
     last = _load_last_run()
+    current = _load_current_run()
+    running = _RUN_LOCK.locked() or bool(current and current.get("running"))
     return {
-        "running": _RUN_LOCK.locked(),
+        "running": running,
+        "current_run": current if running else None,
         "last_run": last,
         "status": get_collector_status(),
     }
@@ -169,6 +203,12 @@ def run_media_collector_once(
         if authors:
             tasks.append(("authors", "batch_author_search.sh"))
 
+        _set_current_run({
+            "running": True,
+            "started_at": started_at,
+            "tasks": [name for name, _ in tasks],
+            "message": "自媒体采集中",
+        })
         results = [
             _run_script(name, script, timeout_seconds=timeout, pretty=pretty)
             for name, script in tasks
@@ -185,6 +225,52 @@ def run_media_collector_once(
         }
         _LAST_RUN = payload
         _last_run_path().write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        _set_current_run(None)
         return payload
     finally:
+        _set_current_run(None)
         _RUN_LOCK.release()
+
+
+def start_media_collector_job(
+    *,
+    hot: bool = True,
+    search: bool = True,
+    authors: bool = True,
+    timeout_seconds: int | None = None,
+) -> dict[str, Any]:
+    if bool(get_media_collector_run_state().get("running")):
+        return get_media_collector_run_state() | {
+            "ok": False,
+            "running": True,
+            "accepted": False,
+            "message": "自媒体采集正在运行，请稍后查看结果",
+        }
+
+    started_at = _utc_now()
+    tasks = [name for name, enabled in (("hot", hot), ("search", search), ("authors", authors)) if enabled]
+    _set_current_run({
+        "running": True,
+        "started_at": started_at,
+        "tasks": tasks,
+        "message": "自媒体采集已进入后台",
+    })
+
+    thread = threading.Thread(
+        target=run_media_collector_once,
+        kwargs={
+            "hot": hot,
+            "search": search,
+            "authors": authors,
+            "timeout_seconds": timeout_seconds,
+        },
+        name="media-collector-refresh",
+        daemon=True,
+    )
+    thread.start()
+    return get_media_collector_run_state() | {
+        "ok": True,
+        "running": True,
+        "accepted": True,
+        "message": "自媒体采集已启动，完成后会自动读取最新数据",
+    }

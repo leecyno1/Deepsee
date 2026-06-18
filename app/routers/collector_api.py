@@ -23,6 +23,7 @@ class CollectorRefreshRequest(BaseModel):
     search: bool = True
     authors: bool = True
     timeout_seconds: int | None = None
+    wait: bool = False
 
 
 def _keywords_path() -> Path:
@@ -124,6 +125,7 @@ def collector_status():
     return {
         **status,
         "running": bool(run_state.get("running")),
+        "current_run": run_state.get("current_run"),
         "last_run": run_state.get("last_run"),
     }
 
@@ -131,9 +133,16 @@ def collector_status():
 @router.post("/refresh")
 def refresh_collector(payload: CollectorRefreshRequest | None = None):
     """立即触发轻量自媒体采集。"""
-    from ..services.media_collector_runner import run_media_collector_once
+    from ..services.media_collector_runner import run_media_collector_once, start_media_collector_job
 
     req = payload or CollectorRefreshRequest()
+    if not bool(req.wait):
+        return start_media_collector_job(
+            hot=bool(req.hot),
+            search=bool(req.search),
+            authors=bool(req.authors),
+            timeout_seconds=req.timeout_seconds,
+        )
     return run_media_collector_once(
         hot=bool(req.hot),
         search=bool(req.search),

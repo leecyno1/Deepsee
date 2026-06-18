@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -18,11 +19,14 @@ from ..models import (
     ContactScoreSnapshot,
     ContactValueMetricSnapshot,
     Report,
+    SyncState,
     Task,
 )
 from .aggregation_retention import DEFAULT_RETENTION_DAYS
 from .llm_client import load_ai_config
 from ..background import get_background_runtime_snapshot
+from .media_collector_runner import get_media_collector_run_state
+from .mp_rss_store import DEFAULT_MP_UPSTREAM_URL
 
 
 def _enabled_router_channels(router: dict[str, Any]) -> list[dict[str, Any]]:
@@ -84,6 +88,21 @@ def _aggregation_retention_diagnostics(db: Session | None) -> dict[str, Any]:
     }
 
 
+def _load_sync_json(db: Session | None, key: str) -> dict[str, Any]:
+    if db is None:
+        return {}
+    try:
+        import json as _json
+
+        row = db.get(SyncState, key)
+        if not row or not row.value:
+            return {}
+        data = _json.loads(row.value)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
 def _cloud_agent_runtime_diagnostics() -> dict[str, Any]:
     hermes_home = os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes")
     openclaw_home = (
@@ -127,6 +146,51 @@ def probe_chatlog_http(base_url: str | None = None, timeout: float | None = None
         }
     except Exception as exc:
         return {"ok": False, "url": url, "error": str(exc)}
+
+
+def probe_mp_upstream(db: Session | None = None, timeout: float = 3.0) -> dict[str, Any]:
+    cfg = _load_sync_json(db, "mp_config")
+    base = str(cfg.get("upstream_base_url") or cfg.get("base_url") or DEFAULT_MP_UPSTREAM_URL or "").strip().rstrip("/")
+    if not base:
+        return {"ok": False, "error": "公众号外部源未配置"}
+    if not base.startswith(("http://", "https://")):
+        base = "http://" + base
+    url = f"{base}/api/v1/wx/public/channels"
+    started = time.monotonic()
+    try:
+        resp = requests.get(url, params={"limit": 1, "offset": 0}, timeout=timeout)
+        latency = int((time.monotonic() - started) * 1000)
+        return {
+            "ok": resp.status_code < 500,
+            "status_code": resp.status_code,
+            "url": url,
+            "latency_ms": latency,
+        }
+    except Exception as exc:
+        return {"ok": False, "url": url, "error": str(exc)}
+
+
+def collector_installation_status() -> dict[str, Any]:
+    root = Path.cwd()
+    collector_dir = root / "media-collector"
+    scripts = {
+        "hot": collector_dir / "collect.sh",
+        "search": collector_dir / "batch_search.sh",
+        "authors": collector_dir / "batch_author_search.sh",
+    }
+    script_status = {name: path.exists() for name, path in scripts.items()}
+    run_state = get_media_collector_run_state()
+    status = run_state.get("status") if isinstance(run_state.get("status"), dict) else {}
+    return {
+        "collector_dir": str(collector_dir),
+        "scripts": script_status,
+        "scripts_ready": all(script_status.values()),
+        "running": bool(run_state.get("running")),
+        "last_run": run_state.get("last_run"),
+        "hot_latest_day": (status.get("hot") or {}).get("latest_day") if isinstance(status.get("hot"), dict) else None,
+        "search_latest_day": (status.get("search") or {}).get("latest_day") if isinstance(status.get("search"), dict) else None,
+        "authors_latest_day": (status.get("authors") or {}).get("latest_day") if isinstance(status.get("authors"), dict) else None,
+    }
 
 
 DEFAULT_WRITABLE_PATHS = (
@@ -249,6 +313,30 @@ def build_readiness_checks(db: Session) -> list[ReadinessCheck]:
     except Exception as exc:
         checks.append(ReadinessCheck(name="chatlog_http", status="fail", error_code="CHATLOG-HTTP-001", message=str(exc)))
 
+    # media collector installation
+    try:
+        collector = collector_installation_status()
+        if not collector.get("scripts_ready"):
+            raise RuntimeError(f"missing collector scripts: {collector.get('scripts')}")
+        latest = collector.get("hot_latest_day") or collector.get("search_latest_day") or collector.get("authors_latest_day")
+        checks.append(ReadinessCheck(name="media_collector", status="ok", message=f"latest_day={latest or 'none'}"))
+    except Exception as exc:
+        checks.append(ReadinessCheck(name="media_collector", status="fail", error_code="MEDIA-COLLECTOR-001", message=str(exc)))
+
+    # mp upstream health
+    try:
+        probe = probe_mp_upstream(db)
+        if not probe.get("ok"):
+            raise RuntimeError(str(probe.get("error") or f"http_status={probe.get('status_code')}"))
+        checks.append(ReadinessCheck(
+            name="mp_upstream",
+            status="ok",
+            message=f"status={probe.get('status_code')}",
+            latency_ms=probe.get("latency_ms"),
+        ))
+    except Exception as exc:
+        checks.append(ReadinessCheck(name="mp_upstream", status="fail", error_code="MP-UPSTREAM-001", message=str(exc)))
+
     # background state
     try:
         runtime = get_background_runtime_snapshot()
@@ -287,6 +375,10 @@ def summarize_diagnostics(db: Session | None = None) -> dict[str, Any]:
         "paths": _check_writable_paths(),
         "api_keys": _summarize_ai_config(ai_config),
         "external_services": {"chatlog_http": probe_chatlog_http()},
+        "content_engines": {
+            "media_collector": collector_installation_status(),
+            "mp_upstream": probe_mp_upstream(db),
+        },
         "cloud_agent_runtime": _cloud_agent_runtime_diagnostics(),
         "background_runtime": get_background_runtime_snapshot(),
         "aggregation_retention": _aggregation_retention_diagnostics(db),
