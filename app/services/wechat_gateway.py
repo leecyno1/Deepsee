@@ -652,10 +652,11 @@ def _message_has_at_mention(message_meta: Any) -> bool:
     return False
 
 
-def _pick_trigger_match(text: str, rules: dict[str, Any], message_meta: Any = None) -> tuple[bool, str | None]:
+def _pick_trigger_match(text: str, rules: dict[str, Any], is_group: bool = False, message_meta: Any = None) -> tuple[bool, str | None]:
     prefixes = list(rules.get("prefixes") or [])
     regexp_patterns = list(rules.get("regexp_patterns") or [])
-    at_mention_enabled = bool(rules.get("at_mention_enabled"))
+    # @提及触发只在群中生效；私聊不应因为没 @ 而被拦
+    at_mention_enabled = bool(rules.get("at_mention_enabled")) and is_group
     random_rate = int(rules.get("random_rate") or 0)
     normalized_text = str(text or "").strip()
 
@@ -668,12 +669,13 @@ def _pick_trigger_match(text: str, rules: dict[str, Any], message_meta: Any = No
     if random_rate > 0 and random.random() < (float(random_rate) / 100.0):
         return True, "random"
 
-    if at_mention_enabled:
-        return False, "at_mention_required"
+    # 失败原因按用户明确配置的触发器顺序报告，更直观
     if prefixes:
         return False, "prefix_miss"
     if regexp_patterns:
         return False, "regexp_miss"
+    if at_mention_enabled:
+        return False, "at_mention_required"
     if random_rate > 0:
         return False, "random_miss"
     return True, "always"
@@ -776,7 +778,7 @@ def evaluate_auto_reply_rules(
     if sender_id and rules.get("blacklist_sender_ids_enabled") and sender_id in set(rules.get("blacklist_sender_ids") or []):
         return {"scope": _RULE_SCOPE, "allowed": False, "reason": "sender_blacklisted", "rules": rules}
     normalized_text = str(text or "").strip()
-    matched, match_reason = _pick_trigger_match(normalized_text, rules, message_meta=message_meta)
+    matched, match_reason = _pick_trigger_match(normalized_text, rules, is_group=is_group, message_meta=message_meta)
     if not matched:
         return {"scope": _RULE_SCOPE, "allowed": False, "reason": str(match_reason or "no_trigger_match"), "rules": rules}
     content_text = _strip_matching_prefix(normalized_text, list(rules.get("prefixes") or []))

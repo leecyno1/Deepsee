@@ -45,12 +45,33 @@ def _run_auto_reply_for_message(message_id: int) -> None:
         if not message or message.direction != "in" or str(message.type or "") != "text":
             return
 
+        chat_id = str(message.chat_id or "")
+        sender_id = str(message.sender_id or "") or None
+        is_group = chat_id.endswith("@chatroom")
+        message_time = message.timestamp.isoformat() if message.timestamp else None
+
+        # 1. 先跑规则 + 人类回复抑制等待，确认要回才调用 LLM。
+        #    之前 LLM 先生成、后抑制：切到 Kimi 后生成经常 > human_reply_suppression_seconds(20s)，
+        #    抑制窗口被生成时间吃掉，导致“立即就回”。
+        final_gate = evaluate_auto_reply_rules(
+            db,
+            chat_id=chat_id,
+            sender_id=sender_id,
+            text=str(message.content_text or ""),
+            is_group=is_group,
+            message_time=message_time,
+            wait_for_human_reply_suppression=True,
+            message_meta=message.meta,
+        )
+        if not final_gate.get("allowed"):
+            logger.info("wechat auto reply blocked: message_id=%s reason=%s", message_id, final_gate.get("reason"))
+            return
+
         from ..services.hermes_bridge import call_hermes_for_reply
 
         subsession_id = ((message.meta or {}).get("subsession") or {}).get("id") or "wechat_gateway_default"
         # 查发送者备注（用于销售检测等）
         sender_remark = ""
-        sname = str(message.sender_name or "")
         if message.sender_id:
             contact = db.get(Contact, str(message.sender_id))
             if contact:
@@ -58,29 +79,30 @@ def _run_auto_reply_for_message(message_id: int) -> None:
         generated = call_hermes_for_reply(
             message_text=str(message.content_text or ""),
             subsession_id=subsession_id,
-            chat_id=str(message.chat_id or ""),
+            chat_id=chat_id,
             sender_id=str(message.sender_id or ""),
             sender_name=str(message.sender_name or ""),
             sender_remark=sender_remark,
             talker_name=str(message.talker_name or message.chat_id or ""),
-            is_group=str(message.chat_id or "").endswith("@chatroom"),
+            is_group=is_group,
         )
         if generated.get("status") != "ok":
             logger.info("wechat auto reply skipped: message_id=%s status=%s", message_id, generated.get("status"))
             return
 
-        final_gate = evaluate_auto_reply_rules(
+        # 2. 生成期间如果人类手动回复已经落库，兜底再拦一次。
+        recheck = evaluate_auto_reply_rules(
             db,
-            chat_id=str(message.chat_id or ""),
-            sender_id=str(message.sender_id or "") or None,
+            chat_id=chat_id,
+            sender_id=sender_id,
             text=str(message.content_text or ""),
-            is_group=str(message.chat_id or "").endswith("@chatroom"),
-            message_time=message.timestamp.isoformat() if message.timestamp else None,
-            wait_for_human_reply_suppression=True,
+            is_group=is_group,
+            message_time=message_time,
+            wait_for_human_reply_suppression=False,
             message_meta=message.meta,
         )
-        if not final_gate.get("allowed"):
-            logger.info("wechat auto reply blocked: message_id=%s reason=%s", message_id, final_gate.get("reason"))
+        if not recheck.get("allowed"):
+            logger.info("wechat auto reply blocked before send: message_id=%s reason=%s", message_id, recheck.get("reason"))
             return
 
         cfg = load_config(db)

@@ -1079,34 +1079,10 @@ def test_callback_auto_reply_blocks_when_manual_reply_arrives_within_suppression
 
     import app.services.hermes_bridge as hermes_bridge_service
 
-    def _manual_reply_hermes(message_text: str, **kwargs):
-        import threading
-        import time
-        inbound_message_time = datetime.fromtimestamp(int(time.time()))
-
-        def _writer():
-            time.sleep(0.2)
-            session = Session()
-            try:
-                session.add(
-                    Message(
-                        chat_id="wxid_friend",
-                        sender_id="self_wxid",
-                        sender_name="self_wxid",
-                        talker_name="wxid_friend",
-                        timestamp=inbound_message_time + timedelta(seconds=0.2),
-                        direction="out",
-                        type="text",
-                        content_text="人工接管",
-                        meta={"source": "wechat_gateway", "manual": True},
-                    )
-                )
-                session.commit()
-            finally:
-                session.close()
-
-        threading.Thread(target=_writer, daemon=True).start()
-        return {
+    monkeypatch.setattr(
+        hermes_bridge_service,
+        "call_hermes_for_reply",
+        lambda message_text, **kwargs: {
             "status": "ok",
             "reply": "subsession auto reply",
             "execution": {
@@ -1115,9 +1091,39 @@ def test_callback_auto_reply_blocks_when_manual_reply_arrives_within_suppression
                 "subsession_id": kwargs.get("subsession_id"),
                 "fallback_used": False,
             },
-        }
+        },
+    )
 
-    monkeypatch.setattr(hermes_bridge_service, "call_hermes_for_reply", _manual_reply_hermes)
+    # 在 callback 触发前启动写入线程：人工回复会在抑制窗口内落库，应被前置等待拦住。
+    create_time = int(time.time())
+    inbound_message_time = datetime.fromtimestamp(create_time)
+
+    def _writer():
+        import time as _time
+        _time.sleep(0.2)
+        session = Session()
+        try:
+            session.add(
+                Message(
+                    chat_id="wxid_friend",
+                    sender_id="self_wxid",
+                    sender_name="self_wxid",
+                    talker_name="wxid_friend",
+                    timestamp=inbound_message_time + timedelta(seconds=0.3),
+                    direction="out",
+                    type="text",
+                    content_text="人工接管",
+                    meta={"source": "wechat_gateway", "manual": True},
+                )
+            )
+            session.commit()
+        finally:
+            session.close()
+
+    import threading
+
+    threading.Thread(target=_writer, daemon=True).start()
+
     monkeypatch.setattr(wechat_gateway_router, "WechatApiClient", DummyWechatApiClient, raising=False)
     _force_inline_auto_reply(monkeypatch, Session)
 
@@ -1127,7 +1133,7 @@ def test_callback_auto_reply_blocks_when_manual_reply_arrives_within_suppression
 
     response = client.post(
         "/api/wechat-gateway/callback",
-        json=_private_callback(text="ai 你好", new_msg_id=404, create_time=int(time.time())),
+        json=_private_callback(text="ai 你好", new_msg_id=404, create_time=create_time),
         headers=API_HEADERS,
     )
     assert response.status_code == 200
@@ -1312,7 +1318,8 @@ def test_callback_auto_reply_blocks_without_sending_when_trigger_rules_fail(tmp_
     assert data["stored"] is True
     assert data["auto_reply"]["status"] == "queued"
     assert data["auto_reply"]["message_id"] > 0
-    assert calls["hermes"] == 1
+    # 触发规则未命中已在调用 LLM 前拦截，不应再走 Hermes
+    assert calls["hermes"] == 0
 
     verify = Session()
     try:

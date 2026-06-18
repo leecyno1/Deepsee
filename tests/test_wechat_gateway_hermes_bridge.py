@@ -141,9 +141,10 @@ def test_call_hermes_for_reply_resolves_prompt_from_subsession_and_sets_executio
     assert result["status"] == "ok"
     assert captured["json"]["messages"][0]["role"] == "system"
     assert captured["json"]["messages"][0]["content"] == "你是 subsession 专属助手，只能按 subsession 规则回答。"
-    assert captured["headers"]["X-Hermes-Session-Id"] == "agent:bridge:wechat_gateway:subsession:wechat_gateway_default"
+    expected_session = "agent:bridge:wechat_gateway:subsession:wechat_gateway_default:chat:wxid_friend"
+    assert captured["headers"]["X-Hermes-Session-Id"] == expected_session
     assert result["execution"]["subsession_id"] == "wechat_gateway_default"
-    assert result["execution"]["hermes_session_id"] == "agent:bridge:wechat_gateway:subsession:wechat_gateway_default"
+    assert result["execution"]["hermes_session_id"] == expected_session
     assert result["execution"]["prompt_source"] == "subsession"
     assert result["execution"]["prompt_hash"]
     assert result["execution"]["fallback_used"] is False
@@ -273,6 +274,7 @@ def test_call_hermes_for_reply_fail_closed_without_silent_fallback(monkeypatch):
 
     monkeypatch.setattr(hermes_bridge_service, "_call_hermes_api", _boom)
     monkeypatch.setattr(hermes_bridge_service, "_FALLBACK_ENABLED", False)
+    monkeypatch.setattr(hermes_bridge_service, "_session_freshness_suffix", lambda chat_id: "")
 
     result = hermes_bridge_service.call_hermes_for_reply(
         "ai 你好",
@@ -286,7 +288,7 @@ def test_call_hermes_for_reply_fail_closed_without_silent_fallback(monkeypatch):
     assert result["error"] == "provider timeout"
     assert result["execution"]["route_key"] == "wechat_gateway"
     assert result["execution"]["subsession_id"] == "wechat_gateway_default"
-    assert result["execution"]["hermes_session_id"] == "agent:bridge:wechat_gateway:subsession:wechat_gateway_default"
+    assert result["execution"]["hermes_session_id"] == "agent:bridge:wechat_gateway:subsession:wechat_gateway_default:chat:wxid_friend"
     assert result["execution"]["prompt_source"] == "explicit"
     assert result["execution"]["prompt_hash"]
     assert result["execution"]["fallback_used"] is False
@@ -350,9 +352,10 @@ def test_call_hermes_for_reply_scopes_session_to_subsession_not_contact(tmp_path
 
     assert first["status"] == "ok"
     assert second["status"] == "ok"
+    # 每个联系人拥有独立 session，避免跨联系人上下文污染
     assert session_ids == [
-        "agent:bridge:wechat_gateway:subsession:wechat_gateway_default",
-        "agent:bridge:wechat_gateway:subsession:wechat_gateway_default",
+        "agent:bridge:wechat_gateway:subsession:wechat_gateway_default:chat:wxid_friend_a",
+        "agent:bridge:wechat_gateway:subsession:wechat_gateway_default:chat:wxid_friend_b",
     ]
 
 
