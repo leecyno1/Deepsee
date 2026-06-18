@@ -24,6 +24,13 @@ class _DB:
             return None
         return _Row(v)
 
+    def execute(self, *_args, **_kwargs):
+        class _Result:
+            def scalar(self):
+                return None
+
+        return _Result()
+
 
 def test_classify_sync_error_timeout_retryable():
     import app.services.sync_runtime as sync_runtime
@@ -140,3 +147,53 @@ def test_wechat_dual_track_policy_defaults_and_bounds():
     assert policy["fallback_when_api_unhealthy"] is False
     assert policy["fallback_when_no_new_messages"] is False
     assert policy["chatlog_window_days"] == 90
+
+
+def test_sync_from_chatlog_fails_fast_when_session_times_out(monkeypatch):
+    import app.services.sync_service as sync_service
+
+    calls = {"chatlog": 0}
+
+    class _Client:
+        def get_sessions(self):
+            raise requests.Timeout("session timeout")
+
+        def get_chatlog(self, *args, **kwargs):
+            calls["chatlog"] += 1
+            return []
+
+    monkeypatch.setattr(sync_service, "ChatlogClient", lambda: _Client())
+
+    try:
+        sync_service.sync_from_chatlog(_DB())
+    except requests.Timeout:
+        pass
+    else:
+        raise AssertionError("expected chatlog session timeout to propagate")
+
+    assert calls["chatlog"] == 0
+
+
+def test_sync_full_fails_fast_when_session_times_out(monkeypatch):
+    import app.services.sync_service as sync_service
+
+    calls = {"chatlog": 0}
+
+    class _Client:
+        def get_sessions(self):
+            raise requests.Timeout("session timeout")
+
+        def get_chatlog(self, *args, **kwargs):
+            calls["chatlog"] += 1
+            return []
+
+    monkeypatch.setattr(sync_service, "ChatlogClient", lambda: _Client())
+
+    try:
+        sync_service.sync_full(_DB(), days=3)
+    except requests.Timeout:
+        pass
+    else:
+        raise AssertionError("expected chatlog session timeout to propagate")
+
+    assert calls["chatlog"] == 0

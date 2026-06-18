@@ -19,11 +19,13 @@ data/*
 uvicorn.log
 *.log
 .uvicorn.pid
+.chatlog-gray.pid
 __pycache__/
 *.pyc
 *.pyo
 .venv/
 venv/
+.local/
 
 # Backups
 backups/

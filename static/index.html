@@ -10256,6 +10256,30 @@
         let newsFilteredItems = [];
         let newsPageSize = 40;
         let newsCurrentPage = 1;
+        let newsIsRefreshing = false;
+
+        function newsHasVisibleRows() {
+            const list = document.getElementById('newsItemsList');
+            if (!list) return false;
+            if ((Array.isArray(newsAllItems) && newsAllItems.length) || (Array.isArray(newsFilteredItems) && newsFilteredItems.length)) return true;
+            const text = String(list.textContent || '').trim();
+            return !!text && !/加载内置新闻引擎中|正在刷新内置新闻引擎|暂无新闻|新闻引擎加载失败/.test(text);
+        }
+
+        function setNewsRefreshState(active, text) {
+            newsIsRefreshing = !!active;
+            const status = document.getElementById('newsEngineStatus');
+            const refresh = document.getElementById('newsRefreshBtn');
+            if (status) {
+                const msg = String(text || '').trim();
+                status.textContent = msg || (active ? '雷达扫描中…旧内容继续显示' : status.textContent);
+                status.dataset.refreshing = active ? '1' : '0';
+            }
+            if (refresh) {
+                refresh.disabled = !!active;
+                refresh.textContent = active ? '刷新中…' : '刷新雷达';
+            }
+        }
 
         function updateNewsPagination(){
             const total = newsFilteredItems.length || 0;
@@ -10300,9 +10324,11 @@
             const list = document.getElementById('newsItemsList');
             const status = document.getElementById('newsEngineStatus');
             if (!list) return;
-            if (status) status.textContent = '雷达扫描中…';
-            if (!force) showCachedList('news-agg', renderNewsListItems);
-            if (force) list.innerHTML = '<div class="news-empty">正在刷新内置新闻引擎…</div>';
+            const cachedItems = lazyCacheRead('news-agg') || [];
+            const cachedShown = showCachedList('news-agg', renderNewsListItems);
+            const hasOldContent = newsHasVisibleRows() || cachedShown || cachedItems.length;
+            setNewsRefreshState(true, hasOldContent ? '雷达扫描中…旧内容继续显示' : '雷达扫描中…');
+            if (!hasOldContent) list.innerHTML = '<div class="news-empty">正在加载内置新闻引擎…</div>';
             try{
                 const q = String(document.getElementById('newsSearchInput')?.value || '').trim();
                 const source = String(document.getElementById('newsSourceSelect')?.value || '').trim();
@@ -10344,11 +10370,13 @@
                 } else {
                     renderNewsListItems(items);
                 }
-                if (status) status.textContent = `${payload.engine || 'builtin'} · ${items.length} 条 · 用于 AI 推理/情绪洞察/趋势预测`;
+                setNewsRefreshState(false, `${payload.engine || 'builtin'} · ${items.length} 条 · 用于 AI 推理/情绪洞察/趋势预测`);
             }catch(error){
                 console.warn('load builtin news engine failed', error);
-                list.innerHTML = `<div class="news-empty">新闻引擎加载失败：${escapeHtml(error.message || error)}</div>`;
-                if (status) status.textContent = '加载失败';
+                if (!newsHasVisibleRows()) {
+                    list.innerHTML = `<div class="news-empty">新闻引擎加载失败：${escapeHtml(error.message || error)}</div>`;
+                }
+                setNewsRefreshState(false, newsHasVisibleRows() ? `刷新失败，已保留旧内容：${error.message || error}` : '加载失败');
             }
         }
 

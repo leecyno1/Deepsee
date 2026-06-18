@@ -15,6 +15,7 @@ from .ext_adapter_service import ingest_adapter_logs
 from ..config import settings
 import re
 import os
+import requests
 from urllib.parse import quote
 
 
@@ -538,10 +539,11 @@ def sync_from_chatlog(db: Session, since: Optional[datetime] = None) -> Dict[str
     start_date = since.date()
     end_date = now.date()
 
-    # Try to enumerate talkers for robust coverage
     try:
         session_payload = client.get_sessions()
         talkers = ChatlogClient.extract_talker_ids(session_payload)
+    except requests.RequestException:
+        raise
     except Exception:
         talkers = []
 
@@ -741,11 +743,11 @@ def sync_full(db: Session, days: int = 30) -> Dict[str, Any]:
     start_date = (now - timedelta(days=max(1, days) - 1)).date()
     end_date = now.date()
 
-    # get talkers from session list
-    # Robust session fetch via client helper which already handles plain text/JSON variants
     try:
         session_payload = client.get_sessions()
         talkers = ChatlogClient.extract_talker_ids(session_payload)
+    except requests.RequestException:
+        raise
     except Exception:
         talkers = []
     # Load filters once

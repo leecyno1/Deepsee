@@ -1256,6 +1256,8 @@ def resolve_chat_targets(
     base_api_url = str(conf.get("api_url") or "https://api.siliconflow.cn/v1").strip()
     base_api_key = str(conf.get("api_key") or "").strip()
     default_target = _to_target_dict(base_api_url, base_api_key, default_model, None)
+    fallback_model = str(conf.get("fallback_model") or conf.get("model") or default_model).strip()
+    fallback_target = _to_target_dict(base_api_url, base_api_key, fallback_model, None)
 
     router = conf.get("model_router") if isinstance(conf.get("model_router"), dict) else {}
     # WeChat/message摘要要求“持续刷新”优先于“多路由试错”。
@@ -1306,9 +1308,9 @@ def resolve_chat_targets(
                         continue
                     seen.add(key)
                     stable_targets.append(t)
-                base_key = (None, str(default_target.get("api_url") or ""), str(default_target.get("model") or ""))
+                base_key = (None, str(fallback_target.get("api_url") or ""), str(fallback_target.get("model") or ""))
                 if base_key not in seen:
-                    stable_targets.append(default_target)
+                    stable_targets.append(fallback_target)
                 if stable_targets:
                     return stable_targets
             return [default_target]
@@ -1336,10 +1338,10 @@ def resolve_chat_targets(
         seen.add(key)
         targets.append(t)
 
-    # Always keep base model as final fallback to avoid full outage when all channels fail.
-    base_key = (None, str(default_target.get("api_url") or ""), str(default_target.get("model") or ""))
+    # Always keep base/fallback model as final fallback to avoid full outage when all channels fail.
+    base_key = (None, str(fallback_target.get("api_url") or ""), str(fallback_target.get("model") or ""))
     if base_key not in seen:
-        targets.append(default_target)
+        targets.append(fallback_target)
     return targets
 
 
