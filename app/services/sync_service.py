@@ -17,6 +17,7 @@ import re
 import os
 import requests
 from urllib.parse import quote
+from .wx_cli_client import WxCliClient
 
 
 def _to_local_naive(dt: Optional[datetime]) -> Optional[datetime]:
@@ -186,6 +187,111 @@ def _build_meta_and_media(msg: dict[str, Any]) -> tuple[dict[str, Any], str | No
         meta_payload["contents"] = contents
     media_url = _build_chatlog_media_url(msg.get("type"), contents)
     return meta_payload, media_url
+
+
+def _load_wechat_id_filters(db: Session) -> tuple[set[str], set[str], set[str], set[str], bool]:
+    def _load_list(key: str) -> set[str]:
+        row = db.get(SyncState, key)
+        if not row or not row.value:
+            return set()
+        try:
+            data = json.loads(row.value)
+            if isinstance(data, list):
+                return {str(x) for x in data}
+        except Exception:
+            pass
+        return set()
+
+    bl_send = _load_list("blacklist_senders")
+    bl_talk = _load_list("blacklist_talkers")
+    wl_send = _load_list("whitelist_senders")
+    wl_talk = _load_list("whitelist_talkers")
+    return bl_send, bl_talk, wl_send, wl_talk, bool(wl_send or wl_talk)
+
+
+def _passes_wechat_filters(
+    talker: str | None,
+    sender: str | None,
+    filters: tuple[set[str], set[str], set[str], set[str], bool],
+) -> bool:
+    bl_send, bl_talk, wl_send, wl_talk, has_wl = filters
+    if has_wl and not ((talker and talker in wl_talk) or (sender and sender in wl_send)):
+        return False
+    if (talker and talker in bl_talk) or (sender and sender in bl_send):
+        return False
+    return True
+
+
+def _insert_wechat_local_message(
+    db: Session,
+    *,
+    talker: str | None,
+    talker_name: str | None,
+    sender: str | None,
+    sender_name: str | None,
+    ts: datetime | None,
+    content: str | None,
+    msg_type: Any = None,
+    direction: str | None = "in",
+    is_chatroom: bool = False,
+    media_url: str | None = None,
+    meta: dict[str, Any] | None = None,
+) -> bool:
+    if not talker and not sender:
+        return False
+    if not content and not media_url:
+        return False
+    if ts and talker and content is not None:
+        exists = db.execute(
+            select(Message.id).where(
+                Message.chat_id == talker,
+                Message.sender_id == sender,
+                Message.timestamp == ts,
+                Message.content_text == content,
+            )
+        ).scalar()
+        if exists:
+            return False
+    if talker:
+        chat = db.get(Chat, talker)
+        if not chat:
+            chat = Chat(
+                id=talker,
+                title=talker_name or talker,
+                type="group" if is_chatroom else "single",
+                is_chatroom=is_chatroom,
+            )
+            db.add(chat)
+        elif talker_name and (not chat.title or chat.title == talker):
+            chat.title = talker_name
+            db.add(chat)
+    if sender:
+        contact = db.get(Contact, sender)
+        if not contact:
+            contact = Contact(id=sender, name=sender_name or sender)
+            db.add(contact)
+        elif sender_name and (not contact.name or contact.name == sender):
+            contact.name = sender_name
+            db.add(contact)
+    msg = Message(
+        chat_id=talker,
+        sender_id=sender,
+        sender_name=sender_name,
+        talker_name=talker_name,
+        timestamp=ts,
+        direction=direction,
+        type=str(msg_type) if msg_type is not None else None,
+        content_text=content,
+        media_url=media_url,
+        meta=meta or {},
+    )
+    db.add(msg)
+    if talker and ts:
+        chat = db.get(Chat, talker)
+        if chat and (chat.last_message_at is None or ts > chat.last_message_at):
+            chat.last_message_at = ts
+            db.add(chat)
+    return True
 
 
 # --------- LangBot adapter backup source (optional) ---------
@@ -955,6 +1061,125 @@ def sync_full(db: Session, days: int = 30) -> Dict[str, Any]:
     if unreachable and not talkers:
         res["reason"] = "chatlog_unreachable"
     return res
+
+
+def sync_from_wx_cli(db: Session, days: int = 1) -> Dict[str, Any]:
+    """Sync private/group WeChat messages from jackwener/wx-cli.
+
+    wx-cli reads local WeChat data through its own CLI/daemon. It can be used on Windows or macOS
+    after wx init succeeds; macOS may require extra process-debugging permission during init.
+    Official-account and folded entries are intentionally skipped here so they do not pollute the
+    WeChat message list; those should be routed to the 公众号 engine in a separate pass.
+    """
+    client = WxCliClient()
+    now = datetime.now()
+    requested_days = max(1, min(90, int(days or 1)))
+    start_date = (now - timedelta(days=requested_days - 1)).date()
+    end_date = now.date()
+    filters = _load_wechat_id_filters(db)
+
+    sessions = client.sessions(limit=settings.WX_CLI_SESSION_LIMIT)
+    total_fetched = 0
+    total_inserted = 0
+    skipped_official = 0
+    max_ts: datetime | None = None
+    errors: list[dict[str, str]] = []
+
+    for session in sessions:
+        chat_type = str(session.get("chat_type") or "").strip()
+        if chat_type in {"official_account", "folded"}:
+            skipped_official += 1
+            continue
+        username = str(session.get("username") or session.get("chat") or session.get("name") or "").strip()
+        display = str(session.get("display_name") or session.get("name") or session.get("chat") or username).strip()
+        if not username and not display:
+            continue
+        chat_key = username or display
+        offset = 0
+        while True:
+            try:
+                payload = client.history(
+                    display or chat_key,
+                    since=start_date,
+                    until=end_date,
+                    limit=500,
+                    offset=offset,
+                )
+            except Exception as exc:
+                errors.append({"chat": display or chat_key, "error": str(exc)})
+                break
+            messages = payload.get("messages") or payload.get("results") or []
+            if not isinstance(messages, list) or not messages:
+                break
+            total_fetched += len(messages)
+            resolved_chat = str(payload.get("username") or username or chat_key).strip()
+            resolved_display = str(payload.get("chat") or display or resolved_chat).strip()
+            is_group = bool(payload.get("is_group")) or str(payload.get("chat_type") or chat_type) == "group"
+            for item in messages:
+                if not isinstance(item, dict):
+                    continue
+                ts = WxCliClient.parse_timestamp(item.get("timestamp") or item.get("time"))
+                if ts and (max_ts is None or ts > max_ts):
+                    max_ts = ts
+                if ts and ts.date() < start_date:
+                    continue
+                content = item.get("content")
+                if content is not None:
+                    content = str(content)
+                sender_id = str(item.get("sender_username") or "").strip()
+                sender_name = str(
+                    item.get("sender_group_nickname")
+                    or item.get("sender_contact_display")
+                    or item.get("sender")
+                    or ""
+                ).strip()
+                if not sender_id:
+                    sender_id = resolved_chat if not is_group else sender_name
+                if not sender_name:
+                    sender_name = sender_id
+                if not _passes_wechat_filters(resolved_chat, sender_id, filters):
+                    continue
+                media_url = str(item.get("url") or "").strip() or None
+                meta = {
+                    "source": "wx_cli",
+                    "chat_type": payload.get("chat_type") or chat_type,
+                    "local_id": item.get("local_id"),
+                    "raw": item,
+                }
+                if _insert_wechat_local_message(
+                    db,
+                    talker=resolved_chat,
+                    talker_name=resolved_display,
+                    sender=sender_id,
+                    sender_name=sender_name,
+                    ts=ts,
+                    content=content,
+                    msg_type=item.get("type"),
+                    direction="in",
+                    is_chatroom=is_group,
+                    media_url=media_url,
+                    meta=meta,
+                ):
+                    total_inserted += 1
+            _safe_commit(db)
+            if len(messages) < 500:
+                break
+            offset += 500
+
+    if max_ts:
+        _set_last_sync(db, max_ts)
+        _safe_commit(db)
+    return {
+        "status": "ok" if not errors else "partial",
+        "source": "wx_cli",
+        "fetched": total_fetched,
+        "inserted": total_inserted,
+        "from": start_date.isoformat(),
+        "to": end_date.isoformat(),
+        "sessions": len(sessions),
+        "skipped_official": skipped_official,
+        "errors": errors[:20],
+    }
 
 
 def _normalize_chatlog_record(m: Dict[str, Any]) -> tuple[str | None, str | None, datetime | None, str]:

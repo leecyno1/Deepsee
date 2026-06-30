@@ -1,0 +1,25 @@
+{
+  "chatlog_alpha": {
+    "repo": "teest114514/chatlog_alpha",
+    "release": "latest",
+    "purpose": "本地微信聊天记录 HTTP sidecar，兼容 Deepsee 现有 chatlog HTTP 链路",
+    "assets": {
+      "darwin-amd64": "chatlog-darwin-amd64",
+      "darwin-arm64": "chatlog-darwin-arm64",
+      "windows-amd64": "chatlog-windows-amd64.exe",
+      "windows-arm64": "chatlog-windows-arm64.exe"
+    }
+  },
+  "wx_cli": {
+    "repo": "jackwener/wx-cli",
+    "release": "v0.3.0",
+    "purpose": "Windows 优先的本地微信数据 CLI/daemon，用于 chatlog 不可用时兜底读取消息与公众号文章",
+    "assets": {
+      "darwin-amd64": "wx-macos-x86_64",
+      "darwin-arm64": "wx-macos-arm64",
+      "linux-amd64": "wx-linux-x86_64",
+      "linux-arm64": "wx-linux-arm64",
+      "windows-amd64": "wx-windows-x86_64.exe"
+    }
+  }
+}

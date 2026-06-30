@@ -400,6 +400,7 @@ def test_auto_reply_rules_ignore_auto_reply_and_system_echo_for_human_reply_supp
                 content_text="这是自动回复",
                 meta={
                     "source": "wechat_gateway",
+                    "external_new_msg_id": "9001",
                     "auto_reply": {"trigger_message_id": 1},
                 },
             )
@@ -413,11 +414,13 @@ def test_auto_reply_rules_ignore_auto_reply_and_system_echo_for_human_reply_supp
                 timestamp=now - timedelta(seconds=1),
                 direction="out",
                 type="other",
-                content_text="<msg><op id='1'></op></msg>",
+                content_text='<msg><op id="1"><name>lastMessage</name><arg>{"messageSvrId":"9001"}</arg></op></msg>',
                 meta={
                     "source": "wechat_gateway",
                     "event_type": "AddMsg",
                     "msg_type": 51,
+                    "manual": True,
+                    "human_manual": True,
                 },
             )
         )
@@ -446,6 +449,55 @@ def test_auto_reply_rules_ignore_auto_reply_and_system_echo_for_human_reply_supp
                 meta={
                     "source": "wechat_gateway",
                     "manual": True,
+                },
+            )
+        )
+        db.commit()
+
+        blocked = evaluate_auto_reply_rules(
+            db,
+            chat_id="wxid_friend",
+            sender_id="wxid_friend",
+            text="ai 再问一次",
+            is_group=False,
+        )
+        assert blocked["allowed"] is False
+        assert blocked["reason"] == "human_reply_suppressed"
+    finally:
+        db.close()
+
+def test_auto_reply_rules_unknown_type_51_manual_callback_still_suppresses(tmp_path):
+    Session = _session_factory(tmp_path)
+    db = Session()
+    try:
+        save_trigger_rules(
+            db,
+            {
+                "enabled": True,
+                "smart_reply_enabled": True,
+                "group_enabled": False,
+                "private_enabled": True,
+                "prefixes": ["ai"],
+                "min_text_length": 2,
+                "human_reply_suppression_seconds": 10,
+            },
+        )
+        db.add(
+            Message(
+                chat_id="wxid_friend",
+                sender_id="self_wxid",
+                sender_name="self_wxid",
+                talker_name="wxid_friend",
+                timestamp=datetime.utcnow(),
+                direction="out",
+                type="other",
+                content_text='<msg><op id="1"><name>lastMessage</name><arg>{"messageSvrId":"not_bot"}</arg></op></msg>',
+                meta={
+                    "source": "wechat_gateway",
+                    "event_type": "AddMsg",
+                    "msg_type": 51,
+                    "manual": True,
+                    "human_manual": True,
                 },
             )
         )

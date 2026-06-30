@@ -13,6 +13,11 @@ from ..models import Message, Task, Report, ReportArtifact, SyncState, Contact
 from ..schemas import AIReplyRequest, TaskOut
 from ..services.n8n_client import N8NClient
 from ..services.llm_client import (
+    DASHENG_CLOUD_API_URL,
+    DASHENG_CLOUD_MAIN_MODEL,
+    DASHENG_CLOUD_ONEPAGE_MODEL,
+    DASHENG_CLOUD_PROVIDER_NAME,
+    DASHENG_CLOUD_TOOL_MODEL,
     load_ai_config,
     save_ai_config,
     siliconflow_chat,
@@ -85,6 +90,21 @@ from ..services.quant_analysis import normalize_quant, render_quant_section_mark
 
 
 router = APIRouter(prefix="/api/ai", tags=["ai"]) 
+
+
+def _sanitize_wechatpad_ws_url(value: Any) -> str:
+    url = str(value or "").strip()
+    lowered = url.lower()
+    if (
+        not url
+        or "{wxid}" in lowered
+        or "60.205.58.39:8088" in lowered
+        or "getsyncmsg" in lowered
+        or not lowered.startswith(("ws://", "wss://"))
+    ):
+        return ""
+    return url
+
 
 # 进程内 LRU 缓存：按 (snapshot_id, module, prompt_hash, temperature) 缓存模块产出
 SUMMARY_CACHE_MAX = int(os.getenv("SUMMARY_CACHE_MAX", "64"))
@@ -842,6 +862,13 @@ def get_ai_config():
         "api_url": conf.get("api_url"),
         "model": conf.get("model"),
         "has_key": bool(conf.get("api_key")),
+        "preset_provider": {
+            "name": DASHENG_CLOUD_PROVIDER_NAME,
+            "api_url": DASHENG_CLOUD_API_URL,
+            "main_model": DASHENG_CLOUD_MAIN_MODEL,
+            "tool_model": DASHENG_CLOUD_TOOL_MODEL,
+            "onepage_model": DASHENG_CLOUD_ONEPAGE_MODEL,
+        },
         "tool_model": conf.get("tool_model"),
         "tool_model_messages": conf.get("tool_model_messages") or conf.get("tool_model"),
         "tool_model_emails": conf.get("tool_model_emails") or conf.get("tool_model"),
@@ -850,7 +877,7 @@ def get_ai_config():
         # Send (WeChatPadPro) config surface for UI
         "wechatpad_http_base": conf.get("wechatpad_http_base"),
         "wechatpad_text_path": conf.get("wechatpad_text_path"),
-        "wechatpad_ws_url": conf.get("wechatpad_ws_url"),
+        "wechatpad_ws_url": _sanitize_wechatpad_ws_url(conf.get("wechatpad_ws_url")),
         "wechatpad_wxid": conf.get("wechatpad_wxid"),
         "wechatpad_sync_enabled": bool(conf.get("wechatpad_sync_enabled") or False),
         "wechatpad_sync_poll_seconds": int(conf.get("wechatpad_sync_poll_seconds") or 30),
@@ -927,9 +954,14 @@ def set_ai_config(conf: dict):
         return merged_router
 
     merged = load_ai_config()
-    for key in ("api_key", "api_url", "model", "main_model", "tool_model", "tool_model_messages", "tool_model_emails", "onepage_template_style"):
+    for key in ("api_url", "model", "main_model", "tool_model", "tool_model_messages", "tool_model_emails", "onepage_template_style"):
         if key in conf and conf[key] is not None:
             merged[key] = conf[key]
+    if "api_key" in conf and conf["api_key"] is not None:
+        incoming_key = str(conf.get("api_key") or "").strip()
+        preserve_existing = bool(conf.get("has_key")) and not incoming_key
+        if incoming_key or not preserve_existing:
+            merged["api_key"] = incoming_key
     # Allow frontend to configure WeChatPadPro endpoint without editing .env
     if "wechatpad_http_base" in conf and conf["wechatpad_http_base"] is not None:
         merged["wechatpad_http_base"] = conf["wechatpad_http_base"].strip()
@@ -946,7 +978,7 @@ def set_ai_config(conf: dict):
         p = raw.strip() or "/api/v1/message/sendText"
         merged["wechatpad_text_path"] = p if p.startswith("/") else "/" + p
     if "wechatpad_ws_url" in conf and conf["wechatpad_ws_url"] is not None:
-        merged["wechatpad_ws_url"] = conf["wechatpad_ws_url"].strip()
+        merged["wechatpad_ws_url"] = _sanitize_wechatpad_ws_url(conf["wechatpad_ws_url"])
     if "wechatpad_wxid" in conf and conf["wechatpad_wxid"] is not None:
         merged["wechatpad_wxid"] = str(conf["wechatpad_wxid"]).strip()
     if "wechatpad_sync_enabled" in conf and conf["wechatpad_sync_enabled"] is not None:

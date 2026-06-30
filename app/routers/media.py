@@ -19,6 +19,68 @@ from ..services.media_collector_store import list_all_items as list_collector_it
 
 router = APIRouter(prefix="/api/media", tags=["media"])
 
+MEDIA_KEEP_EVENT_TERMS = (
+    "时政", "政治", "政策", "新政", "监管", "财政", "央行", "国务院", "发改委", "工信部", "商务部", "证监会", "金融监管",
+    "中央", "任命", "人事", "国家行政学院",
+    "外交", "制裁", "关税", "贸易战", "地缘", "冲突", "战争", "军事", "军工", "导弹", "袭击", "停火",
+    "俄乌", "中东", "以色列", "伊朗", "美国", "欧洲", "日本", "韩国", "台海", "大选", "选举", "峰会", "谈判",
+    "通胀", "降息", "加息", "美联储", "汇率", "利率", "国债", "原油", "黄金", "能源", "粮食", "供应链",
+    "投研", "投资", "研报", "策略", "宏观", "行业", "产业", "市场", "资本市场", "金融", "楼市", "房地产", "A股", "港股", "美股",
+    "债券", "固收", "基金", "ETF", "股票", "个股", "上市公司", "财报", "业绩", "估值", "并购", "重组", "回购",
+    "分红", "融资", "IPO", "北向", "资金流", "量化", "期货", "期权", "商品", "半导体", "芯片", "算力", "AI",
+    "机器人", "新能源", "光伏", "储能", "电池", "汽车", "医药", "创新药", "地产", "银行", "券商", "保险",
+)
+MEDIA_NOISE_DROP_TERMS = (
+    "明星", "娱乐", "综艺", "短剧", "电视剧", "电影", "演唱会", "八卦", "粉丝", "网红", "恋情", "离婚", "结婚",
+    "婚礼", "直播间", "带货", "抽奖", "中奖", "福利", "红包", "优惠", "折扣", "秒杀", "团购", "下单", "购买",
+    "购物", "快递", "包裹", "签收", "礼品", "优惠券", "美食", "探店", "餐厅", "菜谱", "旅游", "酒店", "民宿",
+    "机票", "出行", "高铁", "宠物", "萌宠", "穿搭", "护肤", "美妆", "彩妆", "减肥", "瘦身", "养生",
+    "育儿", "亲子", "婚恋", "星座", "情感", "心理学", "家装", "装修", "租房", "招聘", "求职", "二手",
+    "闲置", "游戏", "小说", "校园", "考试", "放假", "节日", "端午", "天气", "奇闻", "搞笑", "段子", "热梗",
+    "吃瓜", "社会新闻", "民生", "小区", "邻里", "物业", "交通事故", "车祸", "走失", "寻人", "纠纷", "投诉",
+    "争议", "施救", "卡喉", "赤裸", "体育", "足球", "比赛", "不赢球", "葡萄牙", "中国队", "劫案", "被抢", "盗窃", "抢劫",
+    "活动报名", "课程报名", "训练营", "招生", "扫码", "二维码", "加微信", "客服",
+)
+MEDIA_HARD_NOISE_TERMS = (
+    "周星驰", "食神大片", "用AI打开端午", "端午的一百种方式", "AI食神", "明星官宣", "恋情", "八卦", "吃瓜",
+)
+
+
+def _media_item_text(item: dict) -> str:
+    return " ".join(
+        str(item.get(key) or "").strip()
+        for key in ("platform", "author", "task_source", "source_keyword", "keyword", "title", "summary", "description", "url")
+        if str(item.get(key) or "").strip()
+    )
+
+
+def _is_high_value_media_event(item: dict) -> bool:
+    text = _media_item_text(item)
+    return any(term in text for term in MEDIA_KEEP_EVENT_TERMS)
+
+
+def _is_low_value_media_noise(item: dict) -> bool:
+    text = _media_item_text(item)
+    if not text:
+        return False
+    if any(term in text for term in MEDIA_HARD_NOISE_TERMS):
+        return True
+    platform = str(item.get("platform") or "").lower()
+    source_type = str(item.get("source_type") or "").lower()
+    title = str(item.get("title") or "").strip()
+    if title and len(title) <= 8 and not _is_high_value_media_event(item):
+        return True
+    if platform in {"baidu", "weibo", "douyin"} and source_type == "hot" and not _is_high_value_media_event(item):
+        return True
+    if any(term in text for term in MEDIA_NOISE_DROP_TERMS):
+        return not _is_high_value_media_event(item)
+    return False
+
+
+def _filter_low_value_media_items(items: list[dict]) -> tuple[list[dict], int]:
+    filtered = [item for item in items if not _is_low_value_media_noise(item)]
+    return filtered, max(0, len(items) - len(filtered))
+
 def get_db():
     db = SessionLocal()
     try:
@@ -68,6 +130,7 @@ def _proxy_media_server(method: str, path: str, *, json: dict | None = None, par
 def api_list_media_items(
     limit: int = Query(200, ge=1, le=500),
     q: str | None = None,
+    filter_noise: bool = Query(True),
     db: Session = Depends(get_db),
 ):
     """自媒体列表数据。
@@ -100,6 +163,10 @@ def api_list_media_items(
                         "collect": extra.get("collect") or extra.get("favorite") or extra.get("favorites") or 0,
                     },
                 })
+            if filter_noise:
+                adapted, removed_count = _filter_low_value_media_items(adapted)
+            else:
+                removed_count = 0
             return {
                 "items": adapted,
                 "total": len(adapted),
@@ -109,6 +176,8 @@ def api_list_media_items(
                     "latest_files": status.get("hot", {}).get("latest_files", []),
                     "project_dir": str(settings.BASE_DIR) if hasattr(settings, "BASE_DIR") else "",
                     "results_dir": str(status.get("data_dir") or ""),
+                    "noise_filtered": removed_count,
+                    "filter_mode": "major_event_keep",
                 },
             }
     except Exception:

@@ -70,7 +70,10 @@ def session_scope():
 
 def init_db():
     from . import models  # noqa
+    from .migrations import run_schema_migrations
+
     Base.metadata.create_all(bind=engine)
+    run_schema_migrations(engine)
     create_fts_objects()
     ensure_email_message_columns()
     ensure_contact_scoring_columns()

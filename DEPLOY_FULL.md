@@ -28,9 +28,17 @@ bash scripts/deploy-0913.sh /opt/0913
 最小上线检查：
 - `curl http://127.0.0.1:8001/api/health`
 - `curl http://127.0.0.1:8642/health`
+- `bash scripts/manage.sh migrate apply`
+- `bash scripts/manage.sh release-check`
 - 配置公网隧道到 8001
 - 绑定 `/api/wechat-gateway/callback`
 - 微信发送 `ai test` 验证自动回复
+
+公网部署建议：
+- `.env` 设置 `APP_ENV=production`
+- `.env` 设置 `API_AUTH_REQUIRED=true` 与强随机 `API_TOKEN`
+- 反向代理只暴露必要路径，并保留 `/api/wechat-gateway/callback` 给 WeChat API 回调
+- 本地微信历史兜底只在用户本机运行 `chatlog_alpha` / `wx-cli`，云服务器默认以 WeChat API 为主链路
 
 ---
 

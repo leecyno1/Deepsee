@@ -40,6 +40,7 @@ def list_contacts(
     limit: int | None = None,
     offset: int = 0,
     include_labels: bool = False,
+    include_score_summary: bool = False,
     response: Response = None,
     db: Session = Depends(get_db),
 ):
@@ -50,7 +51,11 @@ def list_contacts(
     items = db.execute(query).scalars().all()
     if response is not None:
         response.headers["X-Total-Count"] = str(int(total))
-    score_summaries = build_contact_score_summaries(db, [str(item.id) for item in items])
+    score_summaries = (
+        build_contact_score_summaries(db, [str(item.id) for item in items])
+        if include_score_summary
+        else {}
+    )
     out: list[ContactOut] = []
     for i in items:
         stats = resolve_contact_stats(i)

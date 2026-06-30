@@ -453,6 +453,16 @@ class WechatApiClient:
             {"appId": self.app_id, "aeskey": str(aeskey), "fileId": str(file_id), "type": str(img_type)},
         )
 
+    def download_image_by_xml(self, *, xml: str, img_type: int = 2) -> Dict[str, Any]:
+        """Get a temporary URL for an image callback XML.
+
+        img_type: 1=HD, 2=regular, 3=thumbnail.
+        """
+        return self._post(
+            "/message/downloadImage",
+            {"appId": self.app_id, "xml": str(xml or ""), "type": int(img_type or 2)},
+        )
+
     def download_video(self, *, aeskey: str, file_id: str) -> Dict[str, Any]:
         return self._post(
             "/message/downloadVideo",
@@ -463,6 +473,13 @@ class WechatApiClient:
         return self._post(
             "/message/downloadFile",
             {"appId": self.app_id, "aeskey": str(aeskey), "fileId": str(file_id)},
+        )
+
+    def download_file_by_xml(self, *, xml: str) -> Dict[str, Any]:
+        """Get a temporary download URL for a file message XML callback."""
+        return self._post(
+            "/message/downloadFile",
+            {"appId": self.app_id, "xml": str(xml or "")},
         )
 
     def download_voice(self, *, aeskey: str, file_id: str) -> Dict[str, Any]:
@@ -480,8 +497,21 @@ class WechatApiClient:
     def cdn_download(self, *, aeskey: str, file_id: str, file_type: str = "image") -> Dict[str, Any]:
         """Generic CDN download."""
         return self._post(
-            "/api-170454752",
-            {"appId": self.app_id, "aeskey": str(aeskey), "fileId": str(file_id), "type": str(file_type)},
+            "/message/downloadCdn",
+            {"appId": self.app_id, "aesKey": str(aeskey), "fileId": str(file_id), "type": str(file_type), "totalSize": "0", "suffix": ""},
+        )
+
+    def download_cdn_file(self, *, aeskey: str, file_id: str, total_size: str = "0", suffix: str = "") -> Dict[str, Any]:
+        return self._post(
+            "/message/downloadCdn",
+            {
+                "appId": self.app_id,
+                "aesKey": str(aeskey or ""),
+                "fileId": str(file_id or ""),
+                "type": "5",
+                "totalSize": str(total_size or "0"),
+                "suffix": str(suffix or "").lstrip("."),
+            },
         )
 
     # ── Revoke ──

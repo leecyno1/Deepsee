@@ -8,7 +8,31 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 import app.services.llm_client as llm_client
-from app.services.llm_client import _MODEL_ROUTER_COUNTERS, resolve_chat_target, resolve_chat_targets
+from app.services.llm_client import (
+    DASHENG_CLOUD_API_URL,
+    DASHENG_CLOUD_MAIN_MODEL,
+    DASHENG_CLOUD_TOOL_MODEL,
+    _MODEL_ROUTER_COUNTERS,
+    load_ai_config,
+    resolve_chat_target,
+    resolve_chat_targets,
+)
+
+
+def test_empty_config_uses_dasheng_cloud_preset(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data").mkdir()
+
+    conf = load_ai_config()
+
+    assert conf["api_url"] == DASHENG_CLOUD_API_URL
+    assert conf["model"] == DASHENG_CLOUD_MAIN_MODEL
+    assert conf["tool_model"] == DASHENG_CLOUD_TOOL_MODEL
+    router = conf["model_router"]
+    assert router["enabled"] is True
+    assert router["main_module_channels"]["market"] == ["dasheng-main-deepseek-v4-pro"]
+    assert router["main_module_channels"]["onepage"] == ["dasheng-onepage-minimax-m3"]
+    assert router["tool_route_channels"]["messages"] == ["dasheng-tool-minimax-m3"]
 
 
 def test_router_disabled_falls_back_to_default_model():

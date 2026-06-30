@@ -5,9 +5,11 @@
 ## 1) chatlog（微信聊天记录）
 
 - 作用：提供微信聊天记录的 HTTP 访问能力，本项目用于增量拉取并落库
+- 运行方式：Deepsee 只连接 chatlog HTTP 服务；Windows 可用 `scripts\run_chatlog_windows.ps1` 启动本机 sidecar，macOS 可用 `scripts/chatlog_sidecar.sh`
 - 配置项：
   - `CHATLOG_HTTP_BASE`：chatlog HTTP 服务地址
   - `CHATLOG_DIR`：本地聊天目录（可选，用于离线导入/兜底）
+- 详细说明：见 `docs/chatlog-sidecar.md`
 
 ## 2) 邮件（IMAP/SMTP）
 

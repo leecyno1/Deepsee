@@ -7,16 +7,17 @@ import json
 import uuid
 from time import perf_counter
 from ..db import SessionLocal
-from ..services.sync_service import sync_from_chatlog, sync_full, compare_with_chatlog
+from ..services.sync_service import sync_from_chatlog, sync_full, sync_from_wx_cli, compare_with_chatlog
 from ..services.snapshot_service import refresh_default_snapshots
 from ..services import sync_runtime
 from ..models import SyncState
-from ..services.deployment_status import probe_chatlog_http
+from ..services.deployment_status import probe_chatlog_http, probe_wx_cli
 from ..services.wechat_gateway import load_config as load_wechat_gateway_config
 from ..services.wechatapi_client import WechatApiClient
 
 
 router = APIRouter(prefix="/api/sync", tags=["sync"])
+VALID_WECHAT_TRACKS = ("wechatapi", "chatlog", "wx_cli")
 
 
 def get_db():
@@ -96,18 +97,71 @@ def _chatlog_track_state() -> dict:
     return state
 
 
+def _wx_cli_track_state() -> dict:
+    state = {
+        "name": "wx_cli",
+        "role": "本地 CLI 增强兜底",
+        "configured": True,
+        "healthy": False,
+        "status": "unknown",
+        "message": "",
+    }
+    try:
+        probe = probe_wx_cli(timeout=3)
+        ok = bool(probe.get("ok"))
+        state.update(
+            {
+                "healthy": ok,
+                "status": "ok" if ok else "error",
+                "message": "wx-cli 本地服务可用" if ok else str(probe.get("error") or "wx-cli unavailable"),
+                "result": probe,
+            }
+        )
+    except Exception as exc:
+        state.update({"status": "error", "message": str(exc)})
+    return state
+
+
+def _normalize_track_list(value, *, default: list[str]) -> list[str]:
+    if isinstance(value, str):
+        raw_items = [item.strip() for item in value.split(",")]
+    elif isinstance(value, list):
+        raw_items = [str(item or "").strip() for item in value]
+    else:
+        raw_items = []
+    out: list[str] = []
+    for item in raw_items:
+        if item in VALID_WECHAT_TRACKS and item not in out:
+            out.append(item)
+    for item in default:
+        if item in VALID_WECHAT_TRACKS and item not in out:
+            out.append(item)
+    return out
+
+
+def _legacy_dual_track_selection(mode: str) -> tuple[list[str], list[str]]:
+    if mode == "wechatapi_only":
+        return ["wechatapi"], ["wechatapi", "chatlog", "wx_cli"]
+    if mode == "chatlog_only":
+        return ["chatlog", "wx_cli"], ["chatlog", "wx_cli", "wechatapi"]
+    return ["wechatapi", "chatlog", "wx_cli"], ["wechatapi", "chatlog", "wx_cli"]
+
+
 def _dual_track_policy(db: Session) -> dict:
     row = db.get(SyncState, "wechat_dual_track_policy")
+    raw_policy: dict = {}
     policy = {
-        "mode": "wechatapi_primary_chatlog_fallback",
-        "fallback_when_api_unhealthy": True,
-        "fallback_when_no_new_messages": True,
+        "mode": "custom",
+        "enabled_tracks": ["wechatapi", "chatlog", "wx_cli"],
+        "track_order": ["wechatapi", "chatlog", "wx_cli"],
+        "use_multiple_tracks": False,
         "chatlog_window_days": 1,
     }
     if row and row.value:
         try:
             raw = json.loads(row.value)
             if isinstance(raw, dict):
+                raw_policy = raw
                 policy.update(raw)
         except Exception:
             pass
@@ -116,10 +170,21 @@ def _dual_track_policy(db: Session) -> dict:
     except Exception:
         policy["chatlog_window_days"] = 1
     mode = str(policy.get("mode") or "").strip()
-    if mode not in {"wechatapi_primary_chatlog_fallback", "chatlog_only", "wechatapi_only"}:
-        policy["mode"] = "wechatapi_primary_chatlog_fallback"
-    policy["fallback_when_api_unhealthy"] = bool(policy.get("fallback_when_api_unhealthy", True))
-    policy["fallback_when_no_new_messages"] = bool(policy.get("fallback_when_no_new_messages", True))
+    legacy_enabled, legacy_order = _legacy_dual_track_selection(mode)
+    has_new_selection = "enabled_tracks" in raw_policy or "track_order" in raw_policy
+    if not has_new_selection:
+        policy["enabled_tracks"] = legacy_enabled
+        policy["track_order"] = legacy_order
+    policy["track_order"] = _normalize_track_list(policy.get("track_order"), default=list(VALID_WECHAT_TRACKS))
+    enabled = _normalize_track_list(policy.get("enabled_tracks"), default=[])
+    if not enabled:
+        enabled = ["wechatapi"]
+    policy["enabled_tracks"] = [track for track in policy["track_order"] if track in enabled]
+    for track in enabled:
+        if track not in policy["enabled_tracks"]:
+            policy["enabled_tracks"].append(track)
+    policy["use_multiple_tracks"] = bool(policy.get("use_multiple_tracks"))
+    policy["mode"] = "custom"
     return policy
 
 
@@ -128,13 +193,15 @@ def _save_dual_track_policy(db: Session, payload: dict | None) -> dict:
     if isinstance(payload, dict):
         policy.update(payload)
     policy = {
-        "mode": str(policy.get("mode") or "wechatapi_primary_chatlog_fallback"),
-        "fallback_when_api_unhealthy": bool(policy.get("fallback_when_api_unhealthy", True)),
-        "fallback_when_no_new_messages": bool(policy.get("fallback_when_no_new_messages", True)),
+        "mode": "custom",
+        "enabled_tracks": _normalize_track_list(policy.get("enabled_tracks"), default=[]),
+        "track_order": _normalize_track_list(policy.get("track_order"), default=list(VALID_WECHAT_TRACKS)),
+        "use_multiple_tracks": bool(policy.get("use_multiple_tracks")),
         "chatlog_window_days": max(1, min(90, int(policy.get("chatlog_window_days") or 1))),
     }
-    if policy["mode"] not in {"wechatapi_primary_chatlog_fallback", "chatlog_only", "wechatapi_only"}:
-        policy["mode"] = "wechatapi_primary_chatlog_fallback"
+    policy["enabled_tracks"] = [track for track in policy["track_order"] if track in set(policy["enabled_tracks"])]
+    if not policy["enabled_tracks"]:
+        policy["enabled_tracks"] = [policy["track_order"][0] if policy["track_order"] else "wechatapi"]
     row = db.get(SyncState, "wechat_dual_track_policy")
     payload_text = json.dumps(policy, ensure_ascii=False)
     if not row:
@@ -307,24 +374,36 @@ def sync_chatlog_full(days: int = 30, db: Session = Depends(get_db)):
         raise
 
 
+@router.post("/wx-cli/full")
+def sync_wx_cli_full(days: int = 1, db: Session = Depends(get_db)):
+    try:
+        res = sync_from_wx_cli(db, days=days)
+        refresh_default_snapshots(db)
+        db.commit()
+        return res
+    except Exception:
+        db.rollback()
+        raise
+
+
 @router.get("/wechat/dual-track/state")
 def wechat_dual_track_state(db: Session = Depends(get_db)):
     policy = _dual_track_policy(db)
     wechatapi = _wechatapi_track_state(db)
     chatlog = _chatlog_track_state()
-    if policy["mode"] == "chatlog_only":
-        active_track = "chatlog"
-    elif policy["mode"] == "wechatapi_only":
-        active_track = "wechatapi"
-    elif wechatapi.get("healthy"):
-        active_track = "wechatapi"
-    else:
-        active_track = "chatlog" if chatlog.get("healthy") else "none"
+    wx_cli = _wx_cli_track_state()
+    track_states = {"wechatapi": wechatapi, "chatlog": chatlog, "wx_cli": wx_cli}
+    enabled_order = [track for track in policy["track_order"] if track in set(policy["enabled_tracks"])]
+    active_track = enabled_order[0] if enabled_order else "none"
+    healthy_active_track = next((track for track in enabled_order if track_states.get(track, {}).get("healthy")), None)
     return {
         "status": "ok",
         "policy": policy,
         "active_track": active_track,
-        "tracks": {"wechatapi": wechatapi, "chatlog": chatlog},
+        "healthy_active_track": healthy_active_track,
+        "enabled_order": enabled_order,
+        "available_tracks": list(VALID_WECHAT_TRACKS),
+        "tracks": {"wechatapi": wechatapi, "chatlog": chatlog, "wx_cli": wx_cli},
     }
 
 
@@ -344,50 +423,53 @@ def sync_wechat_dual_track(days: int | None = None, db: Session = Depends(get_db
     t0 = perf_counter()
     wechatapi = _wechatapi_track_state(db)
     chatlog = _chatlog_track_state()
+    wx_cli = _wx_cli_track_state()
+    track_states = {"wechatapi": wechatapi, "chatlog": chatlog, "wx_cli": wx_cli}
+    enabled_order = [track for track in policy["track_order"] if track in set(policy["enabled_tracks"])]
+    execution_order = enabled_order if bool(policy.get("use_multiple_tracks")) else enabled_order[:1]
     actions: list[dict] = []
-    fallback_needed = False
-
-    if policy["mode"] == "chatlog_only":
-        fallback_needed = True
-        actions.append({"track": "wechatapi", "status": "skipped", "reason": "chatlog_only"})
-    elif policy["mode"] == "wechatapi_only":
-        actions.append(
-            {
-                "track": "wechatapi",
-                "status": "ok" if wechatapi.get("healthy") else "error",
-                "reason": wechatapi.get("message"),
-            }
-        )
-    else:
-        if wechatapi.get("healthy"):
-            actions.append({"track": "wechatapi", "status": "ok", "reason": "实时回调主轨道可用"})
-            if policy.get("fallback_when_no_new_messages", True):
-                fallback_needed = True
-        else:
-            actions.append({"track": "wechatapi", "status": "error", "reason": wechatapi.get("message")})
-            fallback_needed = bool(policy.get("fallback_when_api_unhealthy", True))
-
     chatlog_result = None
-    if fallback_needed:
-        if not chatlog.get("healthy"):
-            actions.append({"track": "chatlog", "status": "error", "reason": chatlog.get("message")})
-        else:
-            try:
+    wx_cli_result = None
+
+    for track in execution_order:
+        state = track_states.get(track) or {}
+        if track == "wechatapi":
+            actions.append(
+                {
+                    "track": "wechatapi",
+                    "status": "ok" if state.get("healthy") else "error",
+                    "reason": state.get("message") or ("wechatapi 在线" if state.get("healthy") else "wechatapi 不可用"),
+                }
+            )
+            continue
+        if not state.get("healthy"):
+            actions.append({"track": track, "status": "error", "reason": state.get("message") or f"{track} unavailable"})
+            continue
+        try:
+            if track == "chatlog":
                 chatlog_result = sync_full(db, days=requested_days)
-                refresh_default_snapshots(db)
-                db.commit()
-                actions.append(
-                    {
-                        "track": "chatlog",
-                        "status": "ok",
-                        "reason": "已用本地聊天记录补齐窗口数据",
-                        "fetched": int(chatlog_result.get("fetched") or 0),
-                        "inserted": int(chatlog_result.get("inserted") or 0),
-                    }
-                )
-            except Exception as exc:
-                db.rollback()
-                actions.append({"track": "chatlog", "status": "error", "reason": str(exc)})
+                result = chatlog_result
+                reason = "已按优先级使用 chatlog 补齐窗口数据"
+            elif track == "wx_cli":
+                wx_cli_result = sync_from_wx_cli(db, days=requested_days)
+                result = wx_cli_result
+                reason = "已按优先级使用 wx-cli 补齐窗口数据"
+            else:
+                continue
+            refresh_default_snapshots(db)
+            db.commit()
+            actions.append(
+                {
+                    "track": track,
+                    "status": "ok",
+                    "reason": reason,
+                    "fetched": int((result or {}).get("fetched") or 0),
+                    "inserted": int((result or {}).get("inserted") or 0),
+                }
+            )
+        except Exception as exc:
+            db.rollback()
+            actions.append({"track": track, "status": "error", "reason": str(exc)})
 
     ok = any(item.get("status") == "ok" for item in actions)
     payload = {
@@ -398,9 +480,12 @@ def sync_wechat_dual_track(days: int | None = None, db: Session = Depends(get_db
         "duration_ms": int((perf_counter() - t0) * 1000),
         "policy": policy,
         "days": requested_days,
-        "tracks": {"wechatapi": wechatapi, "chatlog": chatlog},
+        "enabled_order": enabled_order,
+        "execution_order": execution_order,
+        "tracks": {"wechatapi": wechatapi, "chatlog": chatlog, "wx_cli": wx_cli},
         "actions": actions,
         "chatlog": chatlog_result,
+        "wx_cli": wx_cli_result,
     }
     try:
         sync_runtime.persist_sync_run(
@@ -415,10 +500,10 @@ def sync_wechat_dual_track(days: int | None = None, db: Session = Depends(get_db
                 "attempts": 1,
                 "error_code": None if ok else "SYNC-WECHAT-DUAL-TRACK-001",
                 "error": None if ok else "; ".join(str(item.get("reason") or "") for item in actions),
-                "fetched": int((chatlog_result or {}).get("fetched") or 0),
-                "inserted": int((chatlog_result or {}).get("inserted") or 0),
-                "since": (chatlog_result or {}).get("since"),
-                "until": (chatlog_result or {}).get("until"),
+                "fetched": int((chatlog_result or wx_cli_result or {}).get("fetched") or 0),
+                "inserted": int((chatlog_result or wx_cli_result or {}).get("inserted") or 0),
+                "since": (chatlog_result or wx_cli_result or {}).get("since") or (chatlog_result or wx_cli_result or {}).get("from"),
+                "until": (chatlog_result or wx_cli_result or {}).get("until") or (chatlog_result or wx_cli_result or {}).get("to"),
             },
         )
         db.commit()

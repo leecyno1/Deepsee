@@ -840,7 +840,13 @@ def test_list_contacts_exposes_compact_score_summary():
             )
             db.commit()
 
-            rows = contacts_router.list_contacts(limit=10, offset=0, include_labels=False, db=db)
+            rows = contacts_router.list_contacts(
+                limit=10,
+                offset=0,
+                include_labels=False,
+                include_score_summary=True,
+                db=db,
+            )
             assert len(rows) == 1
             summary = rows[0].score_summary
             assert summary["total_predictions"] == 3

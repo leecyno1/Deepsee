@@ -805,6 +805,10 @@
             transform: translateY(-1px);
             box-shadow: 0 2px 4px rgba(102, 126, 234, 0.4);
         }
+
+        .content.openable-media-cell {
+            cursor: pointer;
+        }
         
         .card-icon {
             font-size: 11px;
@@ -3499,6 +3503,117 @@
             font-size: 11px;
             line-height: 1.55;
             margin-bottom: 6px;
+        }
+
+        .wechat-track-policy {
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            background: var(--surface);
+            padding: 10px;
+            box-shadow: var(--shadow-sm);
+            width: min(720px, 100%);
+        }
+
+        .wechat-track-policy-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            margin-bottom: 8px;
+        }
+
+        .wechat-track-policy-title {
+            font-size: 13px;
+            font-weight: 800;
+            color: var(--text-primary);
+        }
+
+        .wechat-track-policy-meta {
+            color: var(--text-muted);
+            font-size: 11px;
+        }
+
+        .wechat-track-order {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .wechat-track-row {
+            display: grid;
+            grid-template-columns: 34px minmax(180px, 1fr) 132px;
+            align-items: center;
+            gap: 8px;
+            min-height: 42px;
+            padding: 7px 8px;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            background: var(--surface-elevated);
+        }
+
+        .wechat-track-row[draggable="true"] {
+            cursor: grab;
+        }
+
+        .wechat-track-row.is-disabled {
+            opacity: 0.58;
+        }
+
+        .wechat-track-row.is-dragging {
+            opacity: 0.48;
+        }
+
+        .wechat-track-rank {
+            width: 24px;
+            height: 24px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 999px;
+            background: var(--panel-muted);
+            color: var(--text-muted);
+            font-size: 12px;
+            font-weight: 800;
+        }
+
+        .wechat-track-main {
+            min-width: 0;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .wechat-track-main input {
+            flex: 0 0 auto;
+        }
+
+        .wechat-track-name {
+            font-weight: 800;
+            color: var(--text-primary);
+            font-size: 13px;
+            white-space: nowrap;
+        }
+
+        .wechat-track-kind {
+            display: block;
+            color: var(--text-muted);
+            font-size: 11px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .wechat-track-actions {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 5px;
+        }
+
+        .wechat-track-actions button {
+            min-width: 30px;
+            height: 28px;
+            padding: 0 8px;
         }
 
         .wechat-settings-grid {
@@ -7417,6 +7532,8 @@
                 tdTime.textContent = it.timestamp ? new Date(it.timestamp).toLocaleString() : '';
 
                 const tdContent = buildMediaCell({
+                    id: it.id || it.message_id || '',
+                    message_id: it.id || it.message_id || '',
                     type: it?.meta?.contents?.url ? 'link' : (it.direction === 'out' ? 'text' : (it?.meta?.media_url ? 'image' : 'text')),
                     content: it.content_text || '',
                     contents: it?.meta?.contents || {},
@@ -7830,7 +7947,7 @@
             </div>
 
             <div class="filter-group pull-actions">
-                <button id="manualPullBtn" class="pagination-btn" title="手动从chatlog拉取">手动拉取</button>
+                <button id="manualPullBtn" class="pagination-btn" title="按策略从 WeChat API / 本地兜底拉取">手动拉取</button>
                 <span style="color:var(--text-muted); font-size:10px;">近</span>
                 <input id="manualPullDays" type="number" value="1" min="1" max="90" class="filter-input" style="width:64px;">
                 <span style="color:var(--text-muted); font-size:10px;">天</span>
@@ -7900,10 +8017,10 @@
             <div class="filter-group pagination-group">
                 <label class="filter-label">每页:</label>
                 <select id="pageSizeSelect" class="filter-select">
-                    <option value="1000" selected>1000条</option>
+                    <option value="200" selected>200条</option>
+                    <option value="500">500条</option>
+                    <option value="1000">1000条</option>
                     <option value="5000">5000条</option>
-                    <option value="10000">10000条</option>
-                    <option value="20000">20000条</option>
                 </select>
             </div>
             
@@ -8172,12 +8289,16 @@
 	                            <option value="failed">failed</option>
 	                            <option value="none">none</option>
 	                        </select>
-	                        <select id="foloSortSelect" class="filter-select">
-	                            <option value="like">精华(按赞)</option>
-	                            <option value="time">最新(按时间)</option>
-	                        </select>
-	                        <input type="text" id="foloSearchInput" class="filter-input" placeholder="关键词…">
-	                    </div>
+                        <select id="foloSortSelect" class="filter-select">
+                            <option value="like">精华(按赞)</option>
+                            <option value="time">最新(按时间)</option>
+                        </select>
+                        <label class="filter-label" title="默认隐藏生活、社会、民生、娱乐等低价值噪声；保留时政、政策、战争、金融投研等大事件。">
+                            <input type="checkbox" id="foloNoiseFilterToggle" checked>
+                            过滤生活娱乐
+                        </label>
+                        <input type="text" id="foloSearchInput" class="filter-input" placeholder="关键词…">
+                    </div>
 	                    <div class="filter-group pagination-group">
 	                        <label class="filter-label">每页:</label>
 	                        <select id="foloPageSizeSelect" class="filter-select">
@@ -8225,10 +8346,16 @@
                     <div class="filter-group">
                         <label class="filter-label">公众号:</label>
                         <select id="mpChannelSelect" class="filter-select"><option value="">全部</option></select>
-	                    </div>
-	                    <div class="filter-group pagination-group">
-	                        <button id="mpRefreshBtn" class="pagination-btn">手动刷新</button>
-	                        <span id="mpSourceInfo" class="source-info">自动刷新：每天 05:00</span>
+                    </div>
+                    <div class="filter-group">
+                        <label class="filter-label" title="默认隐藏广告、生活娱乐、营销推广等低价值内容；含投研投资信号的文章会保留。">
+                            <input type="checkbox" id="mpSpamFilterToggle" checked>
+                            过滤广告/生活
+                        </label>
+                    </div>
+                    <div class="filter-group pagination-group">
+                        <button id="mpRefreshBtn" class="pagination-btn">手动刷新</button>
+                        <span id="mpSourceInfo" class="source-info">自动刷新：每天 05:00</span>
 	                        <label class="filter-label">每页:</label>
 	                        <select id="mpPageSizeSelect" class="filter-select">
 	                            <option value="30">30</option>
@@ -8658,7 +8785,7 @@
                     <div class="settings-home-card" data-open-settings="settingsMinutesAgg" style="--card-color:#30b0c7"><div class="settings-home-card-title">会议引擎</div><div class="settings-home-card-desc">纪要导入、会议文本接入与整理参数。</div><div class="settings-home-card-action">进入配置 →</div></div>
                     <div class="settings-home-card" data-open-settings="settings-custom-engine" style="--card-color:#30b0c7"><div class="settings-home-card-title">自定义引擎</div><div class="settings-home-card-desc">暂不启用，预留多平台内容源扩展入口。</div><div class="settings-home-card-action">查看入口 →</div></div>
                     <div class="settings-home-card" data-open-settings="settings-blackwhite" style="--card-color:#ff2d55"><div class="settings-home-card-title">黑白名单</div><div class="settings-home-card-desc">联系人、群聊与过滤名单管理。</div><div class="settings-home-card-action">进入配置 →</div></div>
-                    <div class="settings-home-card" data-open-settings="settings-database-cleanup" style="--card-color:#8e8e93"><div class="settings-home-card-title">数据库清理</div><div class="settings-home-card-desc">按时间和类型清理历史数据。</div><div class="settings-home-card-action">进入配置 →</div></div>
+                    <div class="settings-home-card" data-open-settings="settings-database-cleanup" style="--card-color:#8e8e93"><div class="settings-home-card-title">存储清理</div><div class="settings-home-card-desc">清理过期缓存，必要时再清理历史数据。</div><div class="settings-home-card-action">进入配置 →</div></div>
                 </div>
             </div>
             <div class="settings-section" id="settings-ai-config">
@@ -8669,11 +8796,25 @@
                         <span>参数设置</span>
                         <span class="ai-block-note">Token、温度与一页通模板</span>
                     </div>
-                    <div class="ai-param-grid">
-                        <input type="hidden" id="modelSelect" value="Qwen/Qwen3.5-4B">
-                        <div class="ai-param-row">
-                            <div class="inline-field">
-                                <label>最大Token数:</label>
+	                    <div class="ai-param-grid">
+	                        <input type="hidden" id="modelSelect" value="Qwen/Qwen3.5-4B">
+	                        <div class="ai-param-row">
+	                            <div class="inline-field" style="min-width:320px;">
+	                                <label>大圣 Cloud 统一 Key:</label>
+	                                <input type="password" id="dashengUnifiedApiKey" placeholder="购买大圣 Cloud 会员后填入授权 Key">
+	                            </div>
+	                            <div class="inline-field" style="align-self:end;">
+	                                <label>&nbsp;</label>
+	                                <button type="button" class="test-btn" onclick="applyDashengCloudPreset()">应用大圣 Cloud 预设</button>
+	                            </div>
+	                            <div class="inline-field" style="align-self:end;">
+	                                <label>&nbsp;</label>
+	                                <span id="dashengUnifiedKeyStatus" class="ai-compact-note">未检测</span>
+	                            </div>
+	                        </div>
+	                        <div class="ai-param-row">
+	                            <div class="inline-field">
+	                                <label>最大Token数:</label>
                                 <input type="number" id="maxTokens" value="4000" min="100" max="8000">
                             </div>
                             <div class="inline-field">
@@ -8759,9 +8900,9 @@
                         <button type="button" class="save-btn" onclick="syncRouterJsonFromVisual()">可视化 → JSON</button>
                     </div>
 
-                    <input type="hidden" id="mainModelSelect" value="deepseek-ai/DeepSeek-V4-Flash">
-                    <input type="hidden" id="toolModelMessagesSelect" value="Qwen/Qwen3.5-4B">
-                    <input type="hidden" id="toolModelEmailsSelect" value="Qwen/Qwen3.5-4B">
+	                    <input type="hidden" id="mainModelSelect" value="deepseek-ai/DeepSeek-V4-Pro">
+	                    <input type="hidden" id="toolModelMessagesSelect" value="MiniMax-M3">
+	                    <input type="hidden" id="toolModelEmailsSelect" value="MiniMax-M3">
                     <div class="router-lanes-grid">
                         <div class="router-lane-card" data-router-lane="main">
                             <div class="router-lane-title">大模型（可视化）</div>
@@ -8973,7 +9114,7 @@
                     </div>
                     <div class="config-group">
                         <label>消息 WebSocket:</label>
-                        <input type="text" id="sendWsUrl" placeholder="ws://60.205.58.39:8088/ws/{wxid}">
+                        <input type="text" id="sendWsUrl" placeholder="已废弃：不再自动连接 8061 WebSocket">
                     </div>
                     <div class="config-group">
                         <label>消息同步(备用DB):</label>
@@ -8988,8 +9129,8 @@
                         </div>
                     </div>
                     <div style="margin-top:8px; color:#64748b; font-size:12px;">
-                        浏览器 WS 状态（仅调试）：<span id="wsStatus">未连接</span>
-                        <button class="test-btn" style="padding:2px 6px; font-size:12px" onclick="reconnectWeChatWs()">重连</button>
+                        浏览器 WS 状态（废弃）：<span id="wsStatus">已停用</span>
+                        <button class="test-btn" style="padding:2px 6px; font-size:12px" onclick="reconnectWeChatWs()">检测配置</button>
                     </div>
                 </div>
                 <div style="border:1px dashed var(--border-color); padding:10px; border-radius:8px; background: var(--surface-elevated); margin-top:10px;">
@@ -9000,35 +9141,46 @@
 
             <div class="settings-section" id="settings-wechat-engine" data-nav-title="微信引擎">
                 <h3>微信引擎</h3>
-                <p class="ai-config-hint" style="margin-bottom:10px;">微信引擎采用双轨：wechatapi 负责实时回调与发送，chatlog 读取本地聊天记录作为历史补齐和兜底。</p>
-                <div class="wechat-track-grid" style="display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; margin-bottom:10px;">
+                <p class="ai-config-hint" style="margin-bottom:10px;">微信引擎采用三条可排序链路：WeChat API 用于云端实时消息；chatlog_alpha 与 wx-cli 用于本地历史补齐。手动拉取默认只使用排序第一的启用链路。</p>
+                <div class="wechat-track-grid" style="display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin-bottom:10px;">
                     <div class="wechat-settings-card" style="margin:0;">
-                        <h4 style="margin-bottom:6px;">轨道 A：wechatapi 实时更新</h4>
-                        <div class="wechat-card-desc">主轨道。适合云端部署、实时消息、自动回复和出站发送；需要在“网关配置”中完成 wechatapi Token、AppId 与回调地址配置。</div>
+                        <h4 style="margin-bottom:6px;">轨道 A：WeChat API 云端主链路</h4>
+                        <div class="wechat-card-desc">高级服务优先。适合云端部署、实时消息、自动回复和出站发送；需要在“网关配置”中完成 Token、AppId 与回调地址。</div>
                         <div id="wechatApiTrackStatus" class="source-info">等待检测</div>
                     </div>
                     <div class="wechat-settings-card" style="margin:0;">
-                        <h4 style="margin-bottom:6px;">轨道 B：chatlog 本地兜底</h4>
-                        <div class="wechat-card-desc">兜底轨道。必须在本机已开启微信电脑版，并启动 chatlog 服务后使用；用于读取本地聊天记录，补齐历史消息或网关异常期间的缺口。</div>
+                        <h4 style="margin-bottom:6px;">轨道 B：chatlog_alpha 本地链路</h4>
+                        <div class="wechat-card-desc">本地历史补齐。必须在本机打开微信电脑版，并启动 chatlog HTTP 服务；可作为优先链路读取本地聊天记录。</div>
                         <div id="chatlogTrackStatus" class="source-info">等待检测</div>
                     </div>
+                    <div class="wechat-settings-card" style="margin:0;">
+                        <h4 style="margin-bottom:6px;">轨道 C：wx-cli 本地链路</h4>
+                        <div class="wechat-card-desc">本地 CLI 增强读取。完成 wx init 后可读取私聊/群聊记录；可作为优先链路或多链路补齐来源。</div>
+                        <div id="wxCliTrackStatus" class="source-info">等待检测</div>
+                    </div>
                 </div>
-                <div class="settings-group">
-                    <label>双轨策略:</label>
-                    <select id="wechatDualTrackMode" style="max-width:260px;">
-                        <option value="wechatapi_primary_chatlog_fallback">wechatapi 优先，chatlog 兜底</option>
-                        <option value="chatlog_only">仅 chatlog 本地读取</option>
-                        <option value="wechatapi_only">仅 wechatapi 实时回调</option>
-                    </select>
-                    <label style="display:inline-flex; align-items:center; gap:6px; margin-left:8px;"><input type="checkbox" id="wechatDualFallbackUnhealthy">API 异常时兜底</label>
-                    <label style="display:inline-flex; align-items:center; gap:6px; margin-left:8px;"><input type="checkbox" id="wechatDualFallbackNoNew">手动同步时补齐本地记录</label>
-                    <button id="btnSaveWechatDualPolicy" class="test-btn" style="margin-left:8px">保存策略</button>
+                <div class="settings-group" style="align-items:flex-start;">
+                    <label>链路优先级:</label>
+                    <div class="wechat-track-policy">
+                        <div class="wechat-track-policy-head">
+                            <div>
+                                <div class="wechat-track-policy-title">启用链路与排序</div>
+                                <div class="wechat-track-policy-meta" id="wechatTrackPolicySummary">等待加载</div>
+                            </div>
+                            <button id="btnSaveWechatDualPolicy" class="test-btn">保存策略</button>
+                        </div>
+                        <div id="wechatTrackOrderList" class="wechat-track-order"></div>
+                        <label class="wechat-track-multi" style="display:flex; align-items:center; gap:8px; margin-top:10px; color:var(--text-secondary); font-size:13px;">
+                            <input type="checkbox" id="wechatUseMultipleTracks">
+                            使用多条链路按顺序补齐
+                        </label>
+                    </div>
                 </div>
                 <div class="settings-group">
                     <label>同步管理:</label>
                     <input type="number" id="syncDays" value="7" min="1" max="90" style="width:80px"> 天
-                    <button id="btnSyncFull" class="test-btn" style="margin-left:8px">双轨同步</button>
-                    <button id="btnSyncState" class="test-btn" style="margin-left:8px">查看双轨状态</button>
+                    <button id="btnSyncFull" class="test-btn" style="margin-left:8px">三轨同步</button>
+                    <button id="btnSyncState" class="test-btn" style="margin-left:8px">查看三轨状态</button>
                     <span id="syncStatus" style="margin-left:8px;color:#6b7280"></span>
                 </div>
                 <div class="settings-group">
@@ -9717,7 +9869,22 @@
                 </div>
             </div>
 
-            <div class="settings-section" id="settings-database-cleanup" data-nav-title="数据库清理">
+            <div class="settings-section" id="settings-database-cleanup" data-nav-title="存储清理">
+                <h3>缓存清理</h3>
+                <div class="config-group" style="align-items:flex-start;">
+                    <label>安全清理:</label>
+                    <div style="display:flex; flex-direction:column; gap:10px; width:100%;">
+                        <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+                            <span style="color:var(--text-muted); font-size:12px;">仅清理超过</span>
+                            <input type="number" id="cacheCleanupDays" min="7" value="30" style="width:90px">
+                            <span style="color:var(--text-muted); font-size:12px;">天的摘要/快照缓存与文件缓存，最近缓存会保留。</span>
+                            <button class="test-btn" onclick="runCacheCleanup(true)">预估缓存</button>
+                            <button class="save-btn" onclick="runCacheCleanup(false)">清理过期缓存</button>
+                            <span id="cacheCleanupMsg" style="color:var(--text-muted); font-size:12px;"></span>
+                        </div>
+                        <pre id="cacheCleanupResult" style="display:none; white-space:pre-wrap; max-height:160px; overflow:auto; padding:10px; border:1px solid var(--border-color); border-radius:10px; background:var(--surface-elevated);"></pre>
+                    </div>
+                </div>
                 <h3>🧹 数据库清理（危险）</h3>
                 <div class="config-group">
                     <label>时间范围:</label>
@@ -9884,7 +10051,7 @@
         // 全局状态变量
         let currentPage = 1;
         let totalPages = 1;
-        let pageSize = 1000;
+        let pageSize = 200;
         let filteredMessages = [];
         let allMessages = [];
         let operationMemory = JSON.parse(localStorage.getItem('operationMemory') || '{}');
@@ -10806,12 +10973,121 @@
         let foloFiltered = [];
         let foloPageSize = 100;
         let foloCurrentPage = 1;
+        let foloFilteredNoiseCount = 0;
+
+        const FOLO_KEEP_EVENT_TERMS = [
+            '时政','政治','政策','新政','监管','财政','央行','国务院','发改委','工信部','商务部','证监会','金融监管','中央','任命','人事','国家行政学院','外交','制裁','关税','贸易战','地缘','冲突','战争','军事','军工','导弹','袭击','停火','俄乌','中东','以色列','伊朗','美国','欧洲','日本','韩国','台海','大选','选举','峰会','谈判','通胀','降息','加息','美联储','汇率','利率','国债','原油','黄金','能源','粮食','供应链','投研','投资','研报','策略','宏观','行业','产业','市场','资本市场','金融','楼市','房地产','A股','港股','美股','债券','固收','基金','ETF','股票','个股','上市公司','财报','业绩','估值','并购','重组','回购','分红','融资','IPO','北向','资金流','量化','期货','期权','商品','半导体','芯片','算力','AI','机器人','新能源','光伏','储能','电池','汽车','医药','创新药','地产','银行','券商','保险'
+        ];
+        const FOLO_NOISE_DROP_TERMS = [
+            '明星','娱乐','综艺','短剧','电视剧','电影','演唱会','八卦','粉丝','网红','恋情','离婚','结婚','婚礼','直播间','带货','抽奖','中奖','福利','红包','优惠','折扣','秒杀','团购','下单','购买','购物','快递','包裹','签收','礼品','优惠券','美食','探店','餐厅','菜谱','旅游','酒店','民宿','机票','出行','高铁','宠物','萌宠','穿搭','护肤','美妆','彩妆','减肥','瘦身','养生','育儿','亲子','婚恋','星座','情感','心理学','家装','装修','租房','招聘','求职','二手','闲置','游戏','小说','校园','考试','放假','节日','端午','天气','奇闻','搞笑','段子','热梗','吃瓜','社会新闻','民生','小区','邻里','物业','交通事故','车祸','走失','寻人','纠纷','投诉','争议','施救','卡喉','赤裸','体育','足球','比赛','不赢球','葡萄牙','中国队','劫案','被抢','盗窃','抢劫','活动报名','课程报名','训练营','招生','扫码','二维码','加微信','客服'
+        ];
+        const FOLO_HARD_NOISE_TERMS = ['周星驰','食神大片','用AI打开端午','端午的一百种方式','AI食神','明星官宣','恋情','八卦','吃瓜'];
+        const FOLO_NOISE_PATTERNS = [
+            /扫码.{0,8}(进群|领取|咨询|购买)/,
+            /(点击|点我).{0,8}(购买|领取|报名|优惠)/,
+            /(限时|今日).{0,8}(优惠|福利|折扣|秒杀)/,
+            /(明星|网红).{0,12}(恋情|离婚|结婚|塌房|官宣)/,
+            /(高铁|航班|酒店|景区).{0,12}(注意|攻略|避坑)/,
+            /(球队|足球|体育|葡萄牙|中国队).{0,16}(输|赢|战平|尴尬|爆冷)/,
+            /(劫案|抢劫|盗窃|被抢|纠纷|争议|施救|卡喉)/,
+        ];
+
+        function foloItemText(item) {
+            return [item?.platform, item?.author, item?.task_source, item?.source_keyword, item?.keyword, item?.title, item?.summary, item?.description, item?.url]
+                .map(v => String(v || '').trim())
+                .filter(Boolean)
+                .join(' ');
+        }
+
+        function isHighValueFoloEvent(item) {
+            const text = foloItemText(item);
+            return FOLO_KEEP_EVENT_TERMS.some(term => text.includes(term));
+        }
+
+        function isLowValueFoloNoise(item) {
+            const text = foloItemText(item);
+            if (!text) return false;
+            if (FOLO_HARD_NOISE_TERMS.some(term => text.includes(term))) return true;
+            const platform = String(item?.platform || '').toLowerCase();
+            const sourceType = String(item?.source_type || '').toLowerCase();
+            const title = String(item?.title || '').trim();
+            if (title && title.length <= 8 && !isHighValueFoloEvent(item)) return true;
+            if (['baidu', 'weibo', 'douyin'].includes(platform) && sourceType === 'hot' && !isHighValueFoloEvent(item)) return true;
+            if (FOLO_NOISE_PATTERNS.some(pattern => pattern.test(text))) return true;
+            if (isHighValueFoloEvent(item)) return false;
+            return FOLO_NOISE_DROP_TERMS.some(term => text.includes(term));
+        }
+
+        function shouldFilterFoloNoise() {
+            const toggle = document.getElementById('foloNoiseFilterToggle');
+            return !toggle || !!toggle.checked;
+        }
 
         // ===== MP aggregation pagination state (公众号引擎) =====
         let mpAllItems = [];
         let mpFilteredItems = [];
         let mpPageSize = 100;
         let mpCurrentPage = 1;
+        let mpFilteredSpamCount = 0;
+
+        const MP_INVESTMENT_KEEP_TERMS = [
+            '投研','投资','研究','研报','策略','宏观','行业','产业','市场','资本市场','金融','监管','A股','港股','美股','债券','固收','基金','ETF','股票','个股','标的','公司','上市公司','财报','业绩','估值','盈利','利润','营收','现金流','订单','景气','周期','供需','库存','价格','利率','汇率','通胀','降息','加息','美联储','政策','央行','财政','并购','重组','回购','分红','股权','融资','IPO','龙虎榜','北向','资金流','量化','期货','期权','商品','黄金','原油','铜','煤炭','钢铁','有色','能源','电力','贸易','半导体','芯片','算力','AI','机器人','新能源','光伏','储能','电池','汽车','医药','创新药','消费','地产','银行','券商','保险'
+        ];
+        const MP_SPAM_DROP_TERMS = [
+            '广告','推广','招商','加盟','代理','优惠','福利','领取','限时','秒杀','团购','折扣','满减','红包','抽奖','中奖','免费送','低价','爆款','带货','直播间','下单','购买链接','扫码','二维码','私信','加微信','客服','课程报名','训练营','开课','招生','讲座报名','活动报名','门票','演唱会','旅游','酒店','民宿','机票','签证','美食','餐厅','探店','菜谱','穿搭','护肤','美妆','彩妆','减肥','瘦身','养生','育儿','亲子','婚恋','星座','情感','娱乐','综艺','明星','八卦','宠物','家装','装修','房产中介','租房','招聘','求职','二手','闲置','游戏','小说','电影','电视剧','短剧'
+        ];
+        const MP_SPAM_HARD_DROP_TERMS = ['购买链接','扫码','二维码','加微信','课程报名','训练营','活动报名','招商加盟','直播间','下单','礼品','签收','快递','包裹','收货','发货','优惠券','月度账单','账单提醒','端午','高铁','出行','活动','心理学','性格','幸福人生','和谐关系','开发者','生成APP','开灯'];
+        const MP_SPAM_DROP_PATTERNS = [
+            /扫码.{0,8}(进群|领取|咨询|购买)/,
+            /(点击|点我).{0,8}(购买|领取|报名|查看优惠)/,
+            /(限时|今日).{0,8}(优惠|福利|折扣|秒杀)/,
+            /(加|添加).{0,4}(客服|微信|助理)/,
+            /[0-9]{2,4}元.{0,8}(课程|会员|套餐|优惠)/,
+        ];
+
+        function mpItemText(item) {
+            return [item?.channel_name, item?.title, item?.summary, item?.description, item?.desc, item?.content]
+                .map(v => String(v || '').trim())
+                .filter(Boolean)
+                .join(' ');
+        }
+
+        function isInvestmentMpItem(item) {
+            const text = mpItemText(item);
+            return MP_INVESTMENT_KEEP_TERMS.some(term => text.includes(term));
+        }
+
+        function isSpamLifeMpItem(item) {
+            const text = mpItemText(item);
+            if (!text) return false;
+            const title = String(item?.title || '').trim();
+            if (title && title.length <= 8 && !isInvestmentMpItem(item)) return true;
+            if (MP_SPAM_HARD_DROP_TERMS.some(term => text.includes(term))) return true;
+            if (MP_SPAM_DROP_PATTERNS.some(pattern => pattern.test(text))) return true;
+            if (isInvestmentMpItem(item)) return false;
+            if (MP_SPAM_DROP_TERMS.some(term => text.includes(term))) return true;
+            return false;
+        }
+
+        function shouldFilterMpSpam() {
+            const toggle = document.getElementById('mpSpamFilterToggle');
+            return !toggle || !!toggle.checked;
+        }
+
+        function applyMpListFilters(items) {
+            const channelFilter = (document.getElementById('mpChannelSelect')?.value || '').trim();
+            let filtered = (Array.isArray(items) ? items : []).filter(it => {
+                if (!channelFilter) return true;
+                return String(it.channel_name||'').trim() === channelFilter;
+            });
+            mpFilteredSpamCount = 0;
+            if (shouldFilterMpSpam()) {
+                const beforeSpam = filtered.length;
+                filtered = filtered.filter(it => !isSpamLifeMpItem(it));
+                mpFilteredSpamCount = Math.max(0, beforeSpam - filtered.length);
+            }
+            return filtered;
+        }
 
         function updateMpPagination(){
             const total = (mpFilteredItems.length || 0);
@@ -10820,7 +11096,7 @@
             const info = document.getElementById('mpPaginationInfo');
             const prev = document.getElementById('mpPrevPage');
             const next = document.getElementById('mpNextPage');
-            if (info) info.textContent = `第${mpCurrentPage}页/共${totalPages}页 · ${total}条`;
+            if (info) info.textContent = `第${mpCurrentPage}页/共${totalPages}页 · ${total}条${mpFilteredSpamCount ? ` · 已滤${mpFilteredSpamCount}条` : ''}`;
             if (prev) prev.disabled = mpCurrentPage <= 1;
             if (next) next.disabled = mpCurrentPage >= totalPages;
         }
@@ -10935,7 +11211,8 @@
 	            const ts = (document.getElementById('foloTranscriptSelect')?.value || '').trim();
 	            const sortMode = (document.getElementById('foloSortSelect')?.value || 'like').trim() || 'like';
 
-            const filtered = (Array.isArray(foloItems) ? foloItems : []).filter(it => {
+            foloFilteredNoiseCount = 0;
+            let filtered = (Array.isArray(foloItems) ? foloItems : []).filter(it => {
                 const itPlatform = String(it.platform || '');
                 if (cfgPlatforms && !cfgPlatforms.has(itPlatform)) return false;
                 if (platform && itPlatform !== platform) return false;
@@ -10951,6 +11228,11 @@
                 if (cfgMinLike > 0 && likeN < cfgMinLike) return false;
                 return true;
             });
+            if (shouldFilterFoloNoise()) {
+                const beforeNoise = filtered.length;
+                filtered = filtered.filter(it => !isLowValueFoloNoise(it));
+                foloFilteredNoiseCount = Math.max(0, beforeNoise - filtered.length);
+            }
 	            // 排序：精华(按赞) / 最新(按时间)
 	            const parseLike = (it)=>{
 	                const s = (it && typeof it.stats==='object' && it.stats) ? it.stats : {};
@@ -10986,7 +11268,7 @@
             const info = document.getElementById('foloPaginationInfo');
             const prev = document.getElementById('foloPrevPage');
             const next = document.getElementById('foloNextPage');
-            if (info) info.textContent = `第${foloCurrentPage}页/共${totalPages}页 · ${total}条`;
+            if (info) info.textContent = `第${foloCurrentPage}页/共${totalPages}页 · ${total}条${foloFilteredNoiseCount ? ` · 已滤${foloFilteredNoiseCount}条` : ''}`;
             if (prev) prev.disabled = foloCurrentPage <= 1;
             if (next) next.disabled = foloCurrentPage >= totalPages;
         }
@@ -11108,7 +11390,8 @@
 	                const maxItems = _clampInt(cfg.max_items, 300, 1, 2000);
 	                // backend /api/media/items limit: <= 500；尽量拉满，筛选和分页在前端完成。
 	                const fetchLimit = Math.max(300, Math.min(500, Math.max(maxItems, foloPageSize) * 5));
-	                const data = await requestJson(`/api/media/items?limit=${encodeURIComponent(String(fetchLimit))}&_ts=${Date.now()}`);
+	                const filterNoise = shouldFilterFoloNoise();
+	                const data = await requestJson(`/api/media/items?limit=${encodeURIComponent(String(fetchLimit))}&filter_noise=${filterNoise ? 'true' : 'false'}&_ts=${Date.now()}`);
 	                try{
 	                    const si = document.getElementById('foloSourceInfo');
 	                    if (si) {
@@ -11120,7 +11403,8 @@
 	                        const kind = src.kind ? String(src.kind) : '';
 	                        const latestDay = src.latest_day ? String(src.latest_day) : '';
 	                        if (kind === 'media-collector') {
-	                            si.textContent = `采集器:${latestDay || '最新'} · 热榜/关键词搜索`;
+	                            const filteredCount = Number(src.noise_filtered || 0);
+	                            si.textContent = `采集器:${latestDay || '最新'} · 热榜/关键词搜索${filteredCount ? ` · 已滤${filteredCount}条` : ''}`;
 	                        }
 	                        const pd = src.project_dir ? String(src.project_dir) : '';
 	                        const rd = src.results_dir ? String(src.results_dir) : '';
@@ -11146,7 +11430,7 @@
             if (!tbody) return;
             const renderMpCached = (cached)=>{
                 mpAllItems = cached;
-                mpFilteredItems = cached;
+                mpFilteredItems = applyMpListFilters(cached);
                 mpCurrentPage = 1;
                 try{ renderMpCurrentPage(); updateMpPagination(); }catch(_){ }
             };
@@ -11216,11 +11500,7 @@
                         if (uniq.includes(cur)) sel.value = cur;
                     }
                 }catch(_){}
-                const channelFilter = (document.getElementById('mpChannelSelect')?.value || '').trim();
-                let filtered = items.filter(it => {
-                    if (!channelFilter) return true;
-                    return String(it.channel_name||'').trim() === channelFilter;
-                });
+                let filtered = applyMpListFilters(items);
 
                 // 尝试按“高赞”筛选/排序（如果数据源未提供赞数，则回退到发布时间）
                 const getLike = (it)=>{
@@ -11256,7 +11536,7 @@
 
                 renderMpCurrentPage();
                 try{ updateMpPagination(); }catch(_){}
-                setListUpdatingStatus('mpSourceInfo', '已更新为最新内容');
+                setListUpdatingStatus('mpSourceInfo', mpFilteredSpamCount ? `已更新 · 自动过滤${mpFilteredSpamCount}条广告/生活内容` : '已更新为最新内容');
                 try{ applyNoSpamDefault('all'); }catch(_){ }
                 return;
 
@@ -11372,6 +11652,10 @@
             } catch(_) {
                 return String(v);
             }
+        }
+
+        function fmtTime(v){
+            return _fmtTime(v);
         }
 
         function _stripAiPrefix(t){
@@ -12232,7 +12516,7 @@
                 if (spam && Array.from(spam.options || []).some(o => String(o.value) === 'false')) {
                     spam.value = 'false';
                 }
-                const pageSize = document.getElementById('pageSizeSelect'); if (pageSize){ pageSize.value='1000'; }
+                const pageSize = document.getElementById('pageSizeSelect'); if (pageSize){ pageSize.value='200'; }
                 applyFilters();
             }catch(_){ }
         }
@@ -13724,7 +14008,7 @@
                 const pending = rows.filter(tr => (tr.dataset.summaryOrigin || '') !== 'tool');
                 if (!pending.length) return;
                 // 收集可用的数据库ID；没有则使用 messageId
-                const ids = pending.map(tr => tr.dataset.dbId || tr.dataset.messageId).filter(Boolean).slice(0, 1000);
+                const ids = pending.map(tr => tr.dataset.dbId || tr.dataset.messageId).filter(Boolean).slice(0, 80);
                 if (!ids.length) return;
                 const progressKey = `overlay-${Date.now()}`;
                 const r = await fetch(`/api/messages/derive?progress_key=${encodeURIComponent(progressKey)}`, {
@@ -18592,6 +18876,11 @@
 	                foloSortSelect.addEventListener('change', applyFoloFilters);
 	                foloSortSelect._bind = true;
 	            }
+	            const foloNoiseFilterToggle = document.getElementById('foloNoiseFilterToggle');
+	            if (foloNoiseFilterToggle && !foloNoiseFilterToggle._bind) {
+	                foloNoiseFilterToggle.addEventListener('change', applyFoloFilters);
+	                foloNoiseFilterToggle._bind = true;
+	            }
 	            const foloSearchInput = document.getElementById('foloSearchInput');
 	            if (foloSearchInput && !foloSearchInput._bind) {
 	                foloSearchInput.addEventListener('input', () => {
@@ -18657,6 +18946,11 @@
             if (mpChannelSelect && !mpChannelSelect._bind) {
                 mpChannelSelect.addEventListener('change', () => refreshMpAgg());
                 mpChannelSelect._bind = true;
+            }
+            const mpSpamFilterToggle = document.getElementById('mpSpamFilterToggle');
+            if (mpSpamFilterToggle && !mpSpamFilterToggle._bind) {
+                mpSpamFilterToggle.addEventListener('change', () => refreshMpAgg());
+                mpSpamFilterToggle._bind = true;
             }
             const mpPageSizeSelect = document.getElementById('mpPageSizeSelect');
             if (mpPageSizeSelect && !mpPageSizeSelect._bind) {
@@ -19057,7 +19351,7 @@
                 ['settings-blackwhite', '黑白名单'],
                 ['settings-system', '基础设置'],
                 ['settings-market-data', '市场数据'],
-                ['settings-database-cleanup', '数据库清理'],
+                ['settings-database-cleanup', '存储清理'],
             ];
             REQUIRED_LABELS.forEach(([id, title])=>{
                 const entry = byId.get(id);
@@ -19172,9 +19466,13 @@
                 throw new Error(`${id} JSON格式错误: ${e.message || e}`);
             }
         }
-        const AI_FALLBACK_DEFAULT_MODEL = 'Qwen/Qwen3.5-4B';
-        const AI_MAIN_DEFAULT_MODEL = 'deepseek-ai/DeepSeek-V4-Flash';
-        const AI_TOOL_DEFAULT_MODEL = 'Qwen/Qwen3.5-4B';
+        const DASHENG_CLOUD_API_URL = 'https://df.dawnloadai.com:9888/v1';
+        const DASHENG_CLOUD_MAIN_MODEL = 'deepseek-ai/DeepSeek-V4-Pro';
+        const DASHENG_CLOUD_TOOL_MODEL = 'MiniMax-M3';
+        const DASHENG_CLOUD_ONEPAGE_MODEL = 'MiniMax-M3';
+        const AI_FALLBACK_DEFAULT_MODEL = DASHENG_CLOUD_MAIN_MODEL;
+        const AI_MAIN_DEFAULT_MODEL = DASHENG_CLOUD_MAIN_MODEL;
+        const AI_TOOL_DEFAULT_MODEL = DASHENG_CLOUD_TOOL_MODEL;
         const ROUTER_MAIN_MODULE_KEYS = ['default','onepage','market','meetings','counter','contacts','newswatch','socialwatch','mediawatch','mpwatch','minuteswatch'];
         const ROUTER_TOOL_ROUTE_KEYS = ['default','messages','emails','minutes','reply'];
         const ROUTER_LANES = {
@@ -19496,9 +19794,9 @@
             });
             return out;
         }
-        function validateRouterChannels(channels, laneLabel){
-            const ids = new Set();
-            const dup = new Set();
+	        function validateRouterChannels(channels, laneLabel){
+	            const ids = new Set();
+	            const dup = new Set();
             const missing = [];
             (Array.isArray(channels) ? channels : []).forEach((ch)=>{
                 const id = String(ch?.id || '').trim();
@@ -19511,25 +19809,115 @@
             });
             const errors = [];
             if (dup.size) errors.push(`${laneLabel} 存在重复通道ID: ${Array.from(dup).join(', ')}`);
-            if (missing.length) errors.push(`${laneLabel} 存在缺少ID或模型的行`);
-            return errors;
-        }
-        function routerDefaultChannel(lane){
-            const now = Date.now().toString().slice(-5);
-            const isMain = lane === 'main';
-            const idPrefix = isMain ? 'main-siliconflow' : (lane === 'mid' ? 'mid-siliconflow' : 'tool-siliconflow');
-            const id = `${idPrefix}-${now}`;
-            return {
-                id,
-                name: id,
-                model: isMain ? 'deepseek-ai/DeepSeek-V4-Flash' : 'Qwen/Qwen3.5-4B',
-                weight: 1,
-                max_inflight: 4,
-                enabled: true,
-                api_url: 'https://api.siliconflow.cn/v1',
-                api_key: '',
-                has_api_key: false,
-            };
+	            if (missing.length) errors.push(`${laneLabel} 存在缺少ID或模型的行`);
+	            return errors;
+	        }
+	        function buildDashengCloudPresetRouter(){
+	            const mainId = 'dasheng-main-deepseek-v4-pro';
+	            const onepageId = 'dasheng-onepage-minimax-m3';
+	            const toolId = 'dasheng-tool-minimax-m3';
+	            const emailId = 'dasheng-email-minimax-m3';
+	            const mainChannels = [
+	                {
+	                    id: mainId,
+	                    name: '大圣Cloud 主模型 DeepSeek V4 Pro',
+	                    model: DASHENG_CLOUD_MAIN_MODEL,
+	                    weight: 8,
+	                    max_inflight: 4,
+	                    enabled: true,
+	                    api_url: DASHENG_CLOUD_API_URL,
+	                    api_key: '',
+	                    has_api_key: false,
+	                },
+	                {
+	                    id: onepageId,
+	                    name: '大圣Cloud 一页通 MiniMax M3',
+	                    model: DASHENG_CLOUD_ONEPAGE_MODEL,
+	                    weight: 4,
+	                    max_inflight: 4,
+	                    enabled: true,
+	                    api_url: DASHENG_CLOUD_API_URL,
+	                    api_key: '',
+	                    has_api_key: false,
+	                },
+	            ];
+	            const toolChannels = [
+	                {
+	                    id: toolId,
+	                    name: '大圣Cloud 小模型 MiniMax M3',
+	                    model: DASHENG_CLOUD_TOOL_MODEL,
+	                    weight: 8,
+	                    max_inflight: 8,
+	                    enabled: true,
+	                    api_url: DASHENG_CLOUD_API_URL,
+	                    api_key: '',
+	                    has_api_key: false,
+	                },
+	                {
+	                    id: emailId,
+	                    name: '大圣Cloud 邮件 MiniMax M3',
+	                    model: DASHENG_CLOUD_TOOL_MODEL,
+	                    weight: 4,
+	                    max_inflight: 8,
+	                    enabled: true,
+	                    api_url: DASHENG_CLOUD_API_URL,
+	                    api_key: '',
+	                    has_api_key: false,
+	                },
+	            ];
+	            const mainRoutes = {};
+	            ROUTER_MAIN_MODULE_KEYS.forEach((key)=>{
+	                mainRoutes[key] = key === 'onepage' ? [onepageId] : [mainId];
+	            });
+	            const toolRoutes = {};
+	            ROUTER_TOOL_ROUTE_KEYS.forEach((key)=>{
+	                toolRoutes[key] = key === 'emails' ? [emailId] : [toolId];
+	            });
+	            return { mainChannels, toolChannels, mainRoutes, toolRoutes };
+	        }
+	        function applyDashengCloudPreset(){
+	            const preset = buildDashengCloudPresetRouter();
+	            const routerEnabled = document.getElementById('routerEnabled');
+	            const routerPrefer = document.getElementById('routerPreferRouter');
+	            const routerDynamic = document.getElementById('routerDynamicWeighting');
+	            if (routerEnabled) routerEnabled.checked = true;
+	            if (routerPrefer) routerPrefer.checked = true;
+	            if (routerDynamic) routerDynamic.checked = true;
+	            const modelSelect = document.getElementById('modelSelect');
+	            const mainModelSelect = document.getElementById('mainModelSelect');
+	            const toolMsg = document.getElementById('toolModelMessagesSelect');
+	            const toolEmail = document.getElementById('toolModelEmailsSelect');
+	            if (modelSelect) modelSelect.value = DASHENG_CLOUD_MAIN_MODEL;
+	            if (mainModelSelect) mainModelSelect.value = DASHENG_CLOUD_MAIN_MODEL;
+	            if (toolMsg) toolMsg.value = DASHENG_CLOUD_TOOL_MODEL;
+	            if (toolEmail) toolEmail.value = DASHENG_CLOUD_TOOL_MODEL;
+	            const mainChannels = document.getElementById('routerMainChannels');
+	            const mainMap = document.getElementById('routerMainModuleChannels');
+	            const toolChannels = document.getElementById('routerToolChannels');
+	            const toolMap = document.getElementById('routerToolRouteChannels');
+	            if (mainChannels) mainChannels.value = stringifyJsonForTextarea(preset.mainChannels, []);
+	            if (mainMap) mainMap.value = stringifyJsonForTextarea(preset.mainRoutes, {});
+	            if (toolChannels) toolChannels.value = stringifyJsonForTextarea(preset.toolChannels, []);
+	            if (toolMap) toolMap.value = stringifyJsonForTextarea(preset.toolRoutes, {});
+	            syncRouterVisualFromJson();
+	            updateAiConfigModeHint();
+	        }
+	        function routerDefaultChannel(lane){
+	            const now = Date.now().toString().slice(-5);
+	            const isMain = lane === 'main';
+	            const idPrefix = isMain ? 'main-dasheng' : (lane === 'mid' ? 'mid-dasheng' : 'tool-dasheng');
+	            const id = `${idPrefix}-${now}`;
+	            return {
+	                id,
+	                name: id,
+	                model: isMain ? DASHENG_CLOUD_MAIN_MODEL : DASHENG_CLOUD_TOOL_MODEL,
+	                weight: 1,
+	                max_inflight: 4,
+	                enabled: true,
+	                api_url: DASHENG_CLOUD_API_URL,
+	                api_key: '',
+	                has_api_key: false,
+	            };
         }
         function routerAddChannel(lane){
             const cfg = laneCfg(lane);
@@ -19708,16 +20096,27 @@
             try{
                 const r = await fetch('/api/ai/config');
                 if (!r.ok) throw new Error(`HTTP ${r.status}`);
-                const j = await r.json();
-                document.getElementById('modelSelect').value = j.model || AI_FALLBACK_DEFAULT_MODEL;
+	                const j = await r.json();
+	                window.currentAiConfigApiUrl = String(j.api_url || '').trim();
+	                document.getElementById('modelSelect').value = j.model || AI_FALLBACK_DEFAULT_MODEL;
                 const router = (j.model_router && typeof j.model_router === 'object') ? j.model_router : {};
                 const routerChannels = []
                     .concat(Array.isArray(router.main_channels) ? router.main_channels : [])
                     .concat(Array.isArray(router.mid_channels) ? router.mid_channels : [])
                     .concat(Array.isArray(router.tool_channels) ? router.tool_channels : []);
-                aiSummaryRouterConfigured = routerChannels.some(ch => ch && ch.enabled !== false && ch.has_api_key === true);
-                siliconflowKeyConfigured = Boolean(j.has_key);
-                siliconflowToolModel = j.tool_model || j.tool_model_messages || AI_TOOL_DEFAULT_MODEL;
+	                aiSummaryRouterConfigured = routerChannels.some(ch => ch && ch.enabled !== false && ch.has_api_key === true);
+	                siliconflowKeyConfigured = Boolean(j.has_key);
+	                const unifiedKeyInput = document.getElementById('dashengUnifiedApiKey');
+	                const unifiedKeyStatus = document.getElementById('dashengUnifiedKeyStatus');
+	                const isDashengProvider = String(j.api_url || '').trim() === DASHENG_CLOUD_API_URL;
+	                if (unifiedKeyInput) {
+	                    unifiedKeyInput.value = '';
+	                    unifiedKeyInput.placeholder = siliconflowKeyConfigured && isDashengProvider ? '已保存授权 Key；留空表示继续使用' : '购买大圣 Cloud 会员后填入授权 Key';
+	                }
+	                if (unifiedKeyStatus) {
+	                    unifiedKeyStatus.textContent = siliconflowKeyConfigured && isDashengProvider ? '已配置大圣 Cloud Key' : (siliconflowKeyConfigured ? '已配置自定义供应商 Key' : '未配置统一 Key');
+	                }
+	                siliconflowToolModel = j.tool_model || j.tool_model_messages || AI_TOOL_DEFAULT_MODEL;
                 const toolMsgInput = document.getElementById('toolModelMessagesSelect');
                 const toolEmailInput = document.getElementById('toolModelEmailsSelect');
                 const toolModelValue = j.tool_model_messages || j.tool_model || AI_TOOL_DEFAULT_MODEL;
@@ -19745,11 +20144,13 @@
                     const mainMap = document.getElementById('routerMainModuleChannels');
                     const toolChannels = document.getElementById('routerToolChannels');
                     const toolMap = document.getElementById('routerToolRouteChannels');
-                    if (mainChannels) mainChannels.value = stringifyJsonForTextarea(router.main_channels, []);
-                    if (mainMap) mainMap.value = stringifyJsonForTextarea(router.main_module_channels, {});
-                    if (toolChannels) toolChannels.value = stringifyJsonForTextarea(router.tool_channels, []);
-                    if (toolMap) toolMap.value = stringifyJsonForTextarea(router.tool_route_channels, {});
-                    const mainModelInput = document.getElementById('mainModelSelect');
+	                    const hasAnyPresetRouter = (Array.isArray(router.main_channels) && router.main_channels.length) || (Array.isArray(router.tool_channels) && router.tool_channels.length);
+	                    if (mainChannels) mainChannels.value = stringifyJsonForTextarea(router.main_channels, []);
+	                    if (mainMap) mainMap.value = stringifyJsonForTextarea(router.main_module_channels, {});
+	                    if (toolChannels) toolChannels.value = stringifyJsonForTextarea(router.tool_channels, []);
+	                    if (toolMap) toolMap.value = stringifyJsonForTextarea(router.tool_route_channels, {});
+	                    if (!hasAnyPresetRouter) applyDashengCloudPreset();
+	                    const mainModelInput = document.getElementById('mainModelSelect');
                     if (mainModelInput) {
                         const firstMainModel = Array.isArray(router.main_channels)
                             ? String((router.main_channels.find(ch => ch && ch.model)?.model) || '').trim()
@@ -19824,8 +20225,8 @@
                     sendPath.value = (!pv || /docs|swagger|http/i.test(pv)) ? '/api/Msg/SendTxt' : pv;
                 }
                 if (sendWs) {
-                    const wv = String(j.wechatpad_ws_url || '').trim();
-                    sendWs.value = (!wv || /GetSyncMsg/i.test(wv)) ? 'ws://60.205.58.39:8088/ws/{wxid}' : wv;
+	                    const wv = String(j.wechatpad_ws_url || '').trim();
+	                    sendWs.value = (!wv || /GetSyncMsg|\\{wxid\\}|60\\.205\\.58\\.39:8088/i.test(wv)) ? '' : wv;
                 }
                 // sync controls
                 try{
@@ -19939,9 +20340,11 @@
 	                        news_refresh: '新闻刷新',
 	                        news_snapshot: '新闻情绪快照',
 	                        media_collector: '自媒体采集',
-	                        ext_adapter_sync: '自定义引擎同步',
-	                        aggregation_retention: '数据保留清理',
-	                    };
+		                        ext_adapter_sync: '自定义引擎同步',
+		                        aggregation_retention: '数据保留清理',
+		                        media_cache_cleanup: '媒体缓存清理',
+		                        summary_overlay: '摘要自动生成',
+		                    };
                     return map[name] || name;
                 };
                 if (grid) {
@@ -20000,9 +20403,10 @@
                 disk_space: '磁盘空间',
                 writable_paths: '目录权限',
                 external_config: '模型路由',
-                llm_config: 'AI密钥',
-                chatlog_http: '微信本地兜底',
-                media_collector: '自媒体采集',
+	                llm_config: 'AI密钥',
+	                chatlog_http: '微信本地兜底',
+	                wx_cli: '本地 wx-cli 兜底',
+	                media_collector: '自媒体采集',
                 mp_upstream: '公众号外部源',
                 background_loops: '后台任务',
                 summary_queue: '摘要队列',
@@ -20013,11 +20417,11 @@
                 const checks = Array.isArray(payload.checks) ? payload.checks : [];
                 grid.innerHTML = checks.map(check => {
                     const status = String(check.status || '').toLowerCase();
-                    const cls = status === 'ok' ? 'is-ok' : (status === 'running' ? 'is-running' : 'is-error');
+	                    const cls = status === 'ok' ? 'is-ok' : (status === 'warn' ? 'is-waiting' : (status === 'running' ? 'is-running' : 'is-error'));
                     const message = String(check.message || check.error_code || '').trim();
                     return `<div class="settings-runtime-card ${cls}" title="${escapeHtml(message)}">
                         <div class="settings-runtime-card-head"><span class="settings-runtime-dot"></span><span class="settings-runtime-name">${escapeHtml(renderName(check.name))}</span></div>
-                        <div class="settings-runtime-meta"><span>${status === 'ok' ? '正常' : '需处理'}</span>${check.latency_ms ? `<span>${Number(check.latency_ms)}ms</span>` : ''}</div>
+	                        <div class="settings-runtime-meta"><span>${status === 'ok' ? '正常' : (status === 'warn' ? '可选提示' : '需处理')}</span>${check.latency_ms ? `<span>${Number(check.latency_ms)}ms</span>` : ''}</div>
                         <div class="settings-runtime-meta"><span>${escapeHtml(message || '—')}</span></div>
                     </div>`;
                 }).join('') || '<div class="settings-runtime-card is-off"><div class="settings-runtime-name">暂无检测项</div></div>';
@@ -20080,6 +20484,49 @@
             }catch(e){
                 if (out) out.textContent = `保存失败`;
                 console.warn('save sync policy failed', e);
+            }
+        }
+
+        function formatCleanupBytes(value){
+            const n = Number(value || 0);
+            if (!Number.isFinite(n) || n <= 0) return '0B';
+            const units = ['B','KB','MB','GB'];
+            let size = n;
+            let unit = 0;
+            while (size >= 1024 && unit < units.length - 1) { size /= 1024; unit += 1; }
+            return `${size.toFixed(unit ? 1 : 0)}${units[unit]}`;
+        }
+
+        async function runCacheCleanup(dryRun){
+            const msg = document.getElementById('cacheCleanupMsg');
+            const out = document.getElementById('cacheCleanupResult');
+            const days = Math.max(7, Number(document.getElementById('cacheCleanupDays')?.value || 30));
+            const payload = { dry_run: !!dryRun, ttl_hours: Math.round(days * 24) };
+            if (msg) msg.textContent = dryRun ? '预估中…' : '清理中…';
+            if (out) { out.style.display = 'none'; out.textContent = ''; }
+            try{
+                const res = await requestJson('/api/admin/cache-cleanup', {
+                    method:'POST',
+                    headers:{'Content-Type':'application/json'},
+                    body: JSON.stringify(payload),
+                });
+                const files = res?.files || {};
+                const state = res?.state || {};
+                const matched = Number(res?.matched_items || 0);
+                const deleted = Number(res?.deleted_items || 0);
+                const line = dryRun
+                    ? `可清理 ${matched} 项：文件 ${Number(files.deleted || 0)} 个 / ${formatCleanupBytes(files.bytes_deleted)}，缓存记录 ${Number(state.matched || 0)} 条`
+                    : `已清理 ${deleted} 项：文件 ${Number(files.deleted || 0)} 个 / ${formatCleanupBytes(files.bytes_deleted)}，缓存记录 ${Number(state.deleted || 0)} 条`;
+                if (msg) msg.textContent = line;
+                if (out) {
+                    out.style.display = 'block';
+                    out.textContent = JSON.stringify(res, null, 2);
+                }
+                try{ loadBackgroundRuntimeStats(); }catch(_){}
+            }catch(e){
+                console.warn('cache cleanup failed', e);
+                if (out) { out.style.display = 'block'; out.textContent = String(e?.message || e); }
+                if (msg) msg.textContent = '缓存清理失败';
             }
         }
 
@@ -20165,26 +20612,33 @@
                         return next;
                     });
                 };
-                const modelRouter = {
-                    enabled: !!document.getElementById('routerEnabled')?.checked,
+	                const modelRouter = {
+	                    enabled: !!document.getElementById('routerEnabled')?.checked,
                     strategy: 'mixed',
                     prefer_router: !!document.getElementById('routerPreferRouter')?.checked,
                     dynamic_weighting: !!document.getElementById('routerDynamicWeighting')?.checked,
                     breaker_failures: Math.max(2, Math.min(10, parseInt(document.getElementById('routerBreakerFailures')?.value || '3', 10) || 3)),
                     cooldown_seconds: Math.max(5, Math.min(600, parseInt(document.getElementById('routerCooldownSeconds')?.value || '45', 10) || 45)),
                     latency_ref_ms: Math.max(300, Math.min(20000, parseInt(document.getElementById('routerLatencyRefMs')?.value || '3000', 10) || 3000)),
-                    main_channels: normalizeRouterChannelNames(ensureChannelModel(parseJsonFromTextarea('routerMainChannels', []), mainModel, ['main-1'])),
+	                    main_channels: normalizeRouterChannelNames(ensureChannelModel(parseJsonFromTextarea('routerMainChannels', []), mainModel, ['main-1'])),
                     mid_channels: [],
                     main_module_channels: parseJsonFromTextarea('routerMainModuleChannels', {}),
                     mid_route_channels: {},
-                    tool_channels: normalizeRouterChannelNames(ensureChannelModel(parseJsonFromTextarea('routerToolChannels', []), toolModel, ['tool-msg','tool-email','tool-1'])),
-                    tool_route_channels: parseJsonFromTextarea('routerToolRouteChannels', {}),
-                };
-                const emailToolInput = document.getElementById('toolModelEmailsSelect');
-                if (emailToolInput && !String(emailToolInput.value || '').trim()) emailToolInput.value = toolModel;
-                const body = {
-                    model: fallbackModel,
-                    main_model: mainModel,
+	                    tool_channels: normalizeRouterChannelNames(ensureChannelModel(parseJsonFromTextarea('routerToolChannels', []), toolModel, ['tool-msg','tool-email','tool-1'])),
+	                    tool_route_channels: parseJsonFromTextarea('routerToolRouteChannels', {}),
+	                };
+	                const emailToolInput = document.getElementById('toolModelEmailsSelect');
+	                if (emailToolInput && !String(emailToolInput.value || '').trim()) emailToolInput.value = toolModel;
+	                const unifiedKey = String(document.getElementById('dashengUnifiedApiKey')?.value || '').trim();
+	                const preserveDashengKey = siliconflowKeyConfigured
+	                    && !unifiedKey
+	                    && String(window.currentAiConfigApiUrl || '').trim() === DASHENG_CLOUD_API_URL;
+	                const body = {
+	                    api_url: DASHENG_CLOUD_API_URL,
+	                    api_key: unifiedKey,
+	                    has_key: preserveDashengKey,
+	                    model: fallbackModel,
+	                    main_model: mainModel,
                     max_tokens: parseInt(document.getElementById('maxTokens').value||'4000', 10) || 4000,
                     model_temperature: parseFloat(document.getElementById('temperature').value||'0.6') || 0.6,
                     tool_model: toolModel,
@@ -20228,7 +20682,7 @@
             const lines = [];
             lines.push(`<div>当前通道：<b>${escapeHtml(String(cur.provider || '-'))}</b> / 已配置：<b>${escapeHtml(fmtBool(!!cur.configured))}</b></div>`);
             lines.push(`<div>支持类型：文本 ${escapeHtml(fmtBool(!!cur.supports_text))} · 链接 ${escapeHtml(fmtBool(!!cur.supports_link))} · 图片 ${escapeHtml(fmtBool(!!cur.supports_image))} · 文件 ${escapeHtml(fmtBool(!!cur.supports_file))}</div>`);
-            lines.push(`<div>降级策略：<b>${escapeHtml(!!cur.fallback_text_for_media ? '图片/文件自动转文字说明+URL' : '不降级')}</b> · 上传上限：<b>${escapeHtml(formatBytes(cur.upload_max_bytes || 0))}</b></div>`);
+	            lines.push(`<div>降级策略：<b>${escapeHtml(!!cur.fallback_text_for_media ? '图片/文件自动转文字说明+URL' : '不降级')}</b> · 上传上限：<b>${escapeHtml(formatCleanupBytes(cur.upload_max_bytes || 0))}</b></div>`);
             if (Array.isArray(cur.notes) && cur.notes.length){
                 lines.push(`<div>说明：${cur.notes.map(x=>escapeHtml(String(x || ''))).join(' / ')}</div>`);
             }
@@ -20547,23 +21001,164 @@
                 if (msg) msg.textContent = '绑定失败：' + String(e?.message || e);
             }
         }
+        const WECHAT_TRACK_DEFS = [
+            { key: 'wechatapi', label: 'WeChat API', kind: '云端实时回调' },
+            { key: 'chatlog', label: 'chatlog_alpha', kind: '本地历史补齐' },
+            { key: 'wx_cli', label: 'wx-cli', kind: '本地 CLI 读取' },
+        ];
+        let wechatTrackOrder = WECHAT_TRACK_DEFS.map(item => item.key);
+        let wechatEnabledTracks = new Set(wechatTrackOrder);
+        let wechatUseMultipleTracks = false;
+
+        function normalizeWechatTrackPolicy(policy = {}) {
+            const valid = WECHAT_TRACK_DEFS.map(item => item.key);
+            const legacyMode = String(policy.mode || '').trim();
+            let order = Array.isArray(policy.track_order) ? policy.track_order.map(String) : [];
+            let enabled = Array.isArray(policy.enabled_tracks) ? policy.enabled_tracks.map(String) : [];
+            const useMultiple = !!policy.use_multiple_tracks;
+            if (!order.length && legacyMode === 'chatlog_only') order = ['chatlog', 'wx_cli', 'wechatapi'];
+            if (!enabled.length && legacyMode === 'chatlog_only') enabled = ['chatlog', 'wx_cli'];
+            if (!order.length && legacyMode === 'wechatapi_only') order = ['wechatapi', 'chatlog', 'wx_cli'];
+            if (!enabled.length && legacyMode === 'wechatapi_only') enabled = ['wechatapi'];
+            if (!order.length) order = ['wechatapi', 'chatlog', 'wx_cli'];
+            if (!enabled.length) enabled = ['wechatapi', 'chatlog', 'wx_cli'];
+            order = order.filter((item, idx) => valid.includes(item) && order.indexOf(item) === idx);
+            valid.forEach(item => { if (!order.includes(item)) order.push(item); });
+            enabled = enabled.filter((item, idx) => valid.includes(item) && enabled.indexOf(item) === idx);
+            if (!enabled.length) enabled = [order[0] || 'wechatapi'];
+            return { order, enabled, useMultiple };
+        }
+
+        function renderWechatTrackOrder(policy = {}) {
+            const list = document.getElementById('wechatTrackOrderList');
+            if (!list) return;
+            const normalized = normalizeWechatTrackPolicy(policy);
+            wechatTrackOrder = normalized.order;
+            wechatEnabledTracks = new Set(normalized.enabled);
+            wechatUseMultipleTracks = !!normalized.useMultiple;
+            const multi = document.getElementById('wechatUseMultipleTracks');
+            if (multi) multi.checked = wechatUseMultipleTracks;
+            list.innerHTML = '';
+            wechatTrackOrder.forEach((track, idx) => {
+                const def = WECHAT_TRACK_DEFS.find(item => item.key === track) || { key: track, label: track, kind: '' };
+                const enabled = wechatEnabledTracks.has(track);
+                const row = document.createElement('div');
+                row.className = `wechat-track-row${enabled ? '' : ' is-disabled'}`;
+                row.dataset.track = track;
+                row.draggable = true;
+                row.innerHTML = `
+                    <div class="wechat-track-rank">${idx + 1}</div>
+                    <label class="wechat-track-main">
+                        <input type="checkbox" data-wechat-track-enabled="${track}" ${enabled ? 'checked' : ''}>
+                        <span style="min-width:0;">
+                            <span class="wechat-track-name">${escapeHtml(def.label)}</span>
+                            <span class="wechat-track-kind">${escapeHtml(def.kind)}</span>
+                        </span>
+                    </label>
+                    <div class="wechat-track-actions">
+                        <button type="button" class="test-btn" data-track-move="${track}" data-delta="-1" title="上移">↑</button>
+                        <button type="button" class="test-btn" data-track-move="${track}" data-delta="1" title="下移">↓</button>
+                    </div>`;
+                row.addEventListener('dragstart', (ev) => {
+                    row.classList.add('is-dragging');
+                    ev.dataTransfer?.setData('text/plain', track);
+                });
+                row.addEventListener('dragend', () => row.classList.remove('is-dragging'));
+                row.addEventListener('dragover', (ev) => ev.preventDefault());
+                row.addEventListener('drop', (ev) => {
+                    ev.preventDefault();
+                    const fromTrack = ev.dataTransfer?.getData('text/plain') || '';
+                    moveWechatTrackBefore(fromTrack, track);
+                });
+                list.appendChild(row);
+            });
+            list.querySelectorAll('[data-wechat-track-enabled]').forEach(input => {
+                input.addEventListener('change', () => {
+                    const checked = Array.from(list.querySelectorAll('[data-wechat-track-enabled]')).filter(el => el.checked);
+                    if (!checked.length) input.checked = true;
+                    updateWechatTrackPolicySummary();
+                    renderWechatTrackOrder(collectWechatTrackPolicy());
+                });
+            });
+            list.querySelectorAll('[data-track-move]').forEach(btn => {
+                btn.addEventListener('click', () => moveWechatTrack(btn.dataset.track, parseInt(btn.dataset.delta || '0', 10)));
+            });
+            if (multi && !multi.dataset.boundWechatMulti) {
+                multi.dataset.boundWechatMulti = '1';
+                multi.addEventListener('change', updateWechatTrackPolicySummary);
+            }
+            updateWechatTrackPolicySummary();
+        }
+
+        function collectWechatTrackPolicy() {
+            const list = document.getElementById('wechatTrackOrderList');
+            const order = Array.from(list?.querySelectorAll('.wechat-track-row') || [])
+                .map(row => row.dataset.track)
+                .filter(Boolean);
+            let enabled = Array.from(list?.querySelectorAll('[data-wechat-track-enabled]') || [])
+                .filter(input => input.checked)
+                .map(input => input.dataset.wechatTrackEnabled)
+                .filter(Boolean);
+            if (!enabled.length && order.length) enabled = [order[0]];
+            return {
+                track_order: order.length ? order : [...wechatTrackOrder],
+                enabled_tracks: enabled,
+                use_multiple_tracks: !!document.getElementById('wechatUseMultipleTracks')?.checked,
+            };
+        }
+
+        function updateWechatTrackPolicySummary() {
+            const el = document.getElementById('wechatTrackPolicySummary');
+            if (!el) return;
+            const policy = collectWechatTrackPolicy();
+            const labels = policy.track_order
+                .filter(track => policy.enabled_tracks.includes(track))
+                .map(track => (WECHAT_TRACK_DEFS.find(item => item.key === track) || {}).label || track);
+            if (!labels.length) {
+                el.textContent = '未启用链路';
+            } else if (policy.use_multiple_tracks && labels.length > 1) {
+                el.textContent = `多链路补齐：${labels.join(' → ')}`;
+            } else {
+                el.textContent = `当前手动拉取链路：${labels[0]}`;
+            }
+        }
+
+        function moveWechatTrack(track, delta) {
+            const policy = collectWechatTrackPolicy();
+            const order = policy.track_order;
+            const from = order.indexOf(track);
+            const to = from + Number(delta || 0);
+            if (from < 0 || to < 0 || to >= order.length) return;
+            order.splice(from, 1);
+            order.splice(to, 0, track);
+            renderWechatTrackOrder({ track_order: order, enabled_tracks: policy.enabled_tracks });
+        }
+
+        function moveWechatTrackBefore(fromTrack, toTrack) {
+            if (!fromTrack || !toTrack || fromTrack === toTrack) return;
+            const policy = collectWechatTrackPolicy();
+            const order = policy.track_order.filter(track => track !== fromTrack);
+            const to = order.indexOf(toTrack);
+            if (to < 0) return;
+            order.splice(to, 0, fromTrack);
+            renderWechatTrackOrder({ track_order: order, enabled_tracks: policy.enabled_tracks });
+        }
+
         function renderWechatDualTrackState(data){
             const policy = data?.policy || {};
             const tracks = data?.tracks || {};
             const api = tracks.wechatapi || {};
             const chatlog = tracks.chatlog || {};
+            const wxCli = tracks.wx_cli || {};
             const apiEl = document.getElementById('wechatApiTrackStatus');
             const chatlogEl = document.getElementById('chatlogTrackStatus');
+            const wxCliEl = document.getElementById('wxCliTrackStatus');
             const syncEl = document.getElementById('syncStatus');
-            const modeEl = document.getElementById('wechatDualTrackMode');
-            const fallbackUnhealthy = document.getElementById('wechatDualFallbackUnhealthy');
-            const fallbackNoNew = document.getElementById('wechatDualFallbackNoNew');
-            if (modeEl) modeEl.value = policy.mode || 'wechatapi_primary_chatlog_fallback';
-            if (fallbackUnhealthy) fallbackUnhealthy.checked = policy.fallback_when_api_unhealthy !== false;
-            if (fallbackNoNew) fallbackNoNew.checked = policy.fallback_when_no_new_messages !== false;
+            renderWechatTrackOrder(policy);
             const badge = (ok)=> ok ? '🟢' : '🔴';
             if (apiEl) apiEl.textContent = `${badge(api.healthy)} ${api.message || (api.configured ? '已配置' : '未配置')}`;
             if (chatlogEl) chatlogEl.textContent = `${badge(chatlog.healthy)} ${chatlog.message || '未检测'}`;
+            if (wxCliEl) wxCliEl.textContent = `${badge(wxCli.healthy)} ${wxCli.message || '未检测'}`;
             if (syncEl && data?.active_track) syncEl.textContent = `当前轨道：${data.active_track}`;
         }
         async function loadWechatDualTrackState(silent = false){
@@ -20574,7 +21169,7 @@
             }catch(e){
                 if (!silent) {
                     const syncEl = document.getElementById('syncStatus');
-                    if (syncEl) syncEl.textContent = `双轨状态读取失败：${e?.message || e}`;
+                    if (syncEl) syncEl.textContent = `三轨状态读取失败：${e?.message || e}`;
                 }
                 throw e;
             }
@@ -20582,20 +21177,22 @@
         async function saveWechatDualTrackPolicy(){
             const syncEl = document.getElementById('syncStatus');
             const days = parseInt(document.getElementById('syncDays')?.value || '1', 10) || 1;
+            const selection = collectWechatTrackPolicy();
             const payload = {
-                mode: document.getElementById('wechatDualTrackMode')?.value || 'wechatapi_primary_chatlog_fallback',
-                fallback_when_api_unhealthy: !!document.getElementById('wechatDualFallbackUnhealthy')?.checked,
-                fallback_when_no_new_messages: !!document.getElementById('wechatDualFallbackNoNew')?.checked,
+                mode: 'custom',
+                enabled_tracks: selection.enabled_tracks,
+                track_order: selection.track_order,
+                use_multiple_tracks: !!selection.use_multiple_tracks,
                 chatlog_window_days: Math.max(1, Math.min(90, days)),
             };
             try{
-                if (syncEl) syncEl.textContent = '保存双轨策略…';
+                if (syncEl) syncEl.textContent = '保存三轨策略…';
                 const res = await requestJson('/api/sync/wechat/dual-track/policy', {
                     method:'POST',
                     headers:{'Content-Type':'application/json'},
                     body: JSON.stringify(payload),
                 });
-                if (syncEl) syncEl.textContent = '双轨策略已保存';
+                if (syncEl) syncEl.textContent = '三轨策略已保存';
                 await loadWechatDualTrackState(true);
                 return res.policy || payload;
             }catch(e){
@@ -20606,27 +21203,27 @@
         async function runWechatDualTrackSync(days){
             const syncEl = document.getElementById('syncStatus');
             const n = Math.max(1, Math.min(90, parseInt(days || document.getElementById('syncDays')?.value || '1', 10) || 1));
-            const op = ensurePullOperation(null, `微信双轨同步近${n}天...`);
+            const op = ensurePullOperation(null, `微信三轨同步近${n}天...`);
             if (!op) { if (syncEl) syncEl.textContent = '有任务正在执行'; return; }
             try{
-                if (syncEl) syncEl.textContent = '双轨同步中…';
+                if (syncEl) syncEl.textContent = '三轨同步中…';
                 await saveWechatDualTrackPolicy();
                 const res = await fetchWithPullControl(`/api/sync/wechat/dual-track?days=${n}`, { method:'POST' }, op, 90000);
                 const data = await res.json();
                 renderWechatDualTrackState(data);
                 const actions = Array.isArray(data.actions) ? data.actions : [];
-                const chatlogAction = actions.find(item => item.track === 'chatlog') || {};
-                const inserted = Number(chatlogAction.inserted || data?.chatlog?.inserted || 0);
-                const fetched = Number(chatlogAction.fetched || data?.chatlog?.fetched || 0);
+                const fetched = actions.reduce((sum, item) => sum + Number(item.fetched || 0), 0);
+                const inserted = actions.reduce((sum, item) => sum + Number(item.inserted || 0), 0);
+                const okTracks = actions.filter(item => item.status === 'ok').map(item => item.track).join(' → ');
                 if (syncEl) syncEl.textContent = data.status === 'ok'
-                    ? `双轨完成：fetched=${fetched}, inserted=${inserted}`
-                    : `双轨异常：${actions.map(x=>x.reason).filter(Boolean).join('；') || '请检查配置'}`;
+                    ? `同步完成：${okTracks || '已检查'}，fetched=${fetched}, inserted=${inserted}`
+                    : `三轨异常：${actions.map(x=>x.reason).filter(Boolean).join('；') || '请检查配置'}`;
                 try{ await loadRecentMessagesFromBackend(n, false, op); }catch(_){ }
             }catch(e){
                 if (isPullAbortError(e)) {
                     if (syncEl) syncEl.textContent = '已取消';
                 } else if (syncEl) {
-                    syncEl.textContent = `双轨同步失败：${e?.message || e}`;
+                    syncEl.textContent = `三轨同步失败：${e?.message || e}`;
                 }
             } finally {
                 finishPullOperation(op);
@@ -20734,7 +21331,7 @@
 	                    // WeChatPad direct (backup)
 	                    wechatpad_http_base: document.getElementById('sendBase')?.value || '',
 	                    wechatpad_text_path: document.getElementById('sendTextPath')?.value || '',
-	                    wechatpad_ws_url: document.getElementById('sendWsUrl')?.value || '',
+		                    wechatpad_ws_url: sanitizeWechatWsUrl(document.getElementById('sendWsUrl')?.value || ''),
 	                    wechatpad_wxid: document.getElementById('sendWxid')?.value || '',
 	                    wechatpad_sync_enabled: !!document.getElementById('sendSyncEnabled')?.checked,
 	                    wechatpad_sync_poll_seconds: parseInt(document.getElementById('sendSyncPollSeconds')?.value || '30', 10) || 30,
@@ -20887,21 +21484,36 @@
             }catch(e){ alert('群发测试失败:'+e); }
         }
 
-        // ========== WeChatPad WS 连接 & 状态 ==========
-        let wechatWs = null;
-        let wechatWsTimer = null;
-        function setWsStatus(text, ok){ const el=document.getElementById('wsStatus'); if(el){ el.textContent=text; el.style.color = ok? '#10b981':'#ef4444'; } }
-        function initWeChatWs(){
-            let url = document.getElementById('sendWsUrl')?.value || '';
-            const wxid = (document.getElementById('sendWxid')?.value || '').trim();
-            if (wxid) {
-                if (url.includes('{wxid}')) url = url.replaceAll('{wxid}', wxid);
-                const stripped = url.replace(/\/+$/, '');
-                if (stripped.endsWith('/ws')) url = stripped + '/' + wxid;
-                if (url.endsWith('/ws/')) url = url + wxid;
-            }
-            if (!url) { setWsStatus('未配置', false); return; }
-            try{ if (wechatWs) { try{ wechatWs.close(); }catch(_){ } wechatWs=null; } }catch(_){ }
+	        // ========== WeChatPad WS 连接 & 状态 ==========
+	        let wechatWs = null;
+	        let wechatWsTimer = null;
+	        function setWsStatus(text, ok){ const el=document.getElementById('wsStatus'); if(el){ el.textContent=text; el.style.color = ok? '#10b981':'#ef4444'; } }
+	        function sanitizeWechatWsUrl(raw){
+	            const url = String(raw || '').trim();
+	            if (!url) return '';
+	            if (/\{wxid\}|60\.205\.58\.39:8088|GetSyncMsg/i.test(url)) return '';
+	            if (!/^wss?:\/\//i.test(url)) return '';
+	            return url;
+	        }
+	        function initWeChatWs(){
+	            let url = sanitizeWechatWsUrl(document.getElementById('sendWsUrl')?.value || '');
+	            const wxid = (document.getElementById('sendWxid')?.value || '').trim();
+	            if (!url) {
+	                setWsStatus('已停用', false);
+	                try{ if (wechatWs) { wechatWs.close(); wechatWs = null; } }catch(_){ }
+	                if (wechatWsTimer) { clearInterval(wechatWsTimer); wechatWsTimer = null; }
+	                return;
+	            }
+	            if (url.includes('{wxid}') || /\/ws\/?$/.test(url)) {
+	                if (!wxid) { setWsStatus('缺少 wxid，未连接', false); return; }
+	            }
+	            if (wxid) {
+	                if (url.includes('{wxid}')) url = url.replaceAll('{wxid}', wxid);
+	                const stripped = url.replace(/\/+$/, '');
+	                if (stripped.endsWith('/ws')) url = stripped + '/' + wxid;
+	                if (url.endsWith('/ws/')) url = url + wxid;
+	            }
+	            try{ if (wechatWs) { try{ wechatWs.close(); }catch(_){ } wechatWs=null; } }catch(_){ }
             try{
                 wechatWs = new WebSocket(url);
                 wechatWs.onopen = ()=> setWsStatus('已连接', true);
@@ -21527,6 +22139,56 @@
             return '中性';
         }
 
+        function parseAppMsgXml(xmlText) {
+            const raw = String(xmlText || '').trim();
+            if (!raw) return {};
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(raw, 'text/xml');
+            const textOf = (...selectors) => {
+                for (const selector of selectors) {
+                    const el = doc.querySelector(selector);
+                    const value = String(el?.textContent || '').trim();
+                    if (value) return value;
+                }
+                return '';
+            };
+            const out = {
+                appmsg_type: textOf('appmsg > type', 'type'),
+                title: textOf('appmsg > title', 'title'),
+                desc: textOf('appmsg > des', 'appmsg > description', 'des'),
+                url: textOf('appmsg > url', 'url'),
+                icon: textOf('appmsg > thumburl', 'thumburl', 'weappinfo > weappiconurl'),
+                attachid: textOf('appmsg > appattach > attachid', 'appattach > attachid'),
+                cdnattachurl: textOf('appmsg > appattach > cdnattachurl', 'appattach > cdnattachurl'),
+                aeskey: textOf('appmsg > appattach > aeskey', 'appattach > aeskey'),
+                fileext: textOf('appmsg > appattach > fileext', 'appattach > fileext'),
+                totallen: textOf('appmsg > appattach > totallen', 'appattach > totallen'),
+                md5: textOf('appmsg > md5', 'md5'),
+            };
+            const recordRaw = textOf('appmsg > recorditem', 'recorditem');
+            if (recordRaw) {
+                try {
+                    const recordDoc = parser.parseFromString(recordRaw, 'text/xml');
+                    const recordTextOf = (...selectors) => {
+                        for (const selector of selectors) {
+                            const el = recordDoc.querySelector(selector);
+                            const value = String(el?.textContent || '').trim();
+                            if (value) return value;
+                        }
+                        return '';
+                    };
+                    out.cdn_dataurl = recordTextOf('dataitem > cdn_dataurl', 'dataitem > cdndataurl');
+                    out.cdndataurl = recordTextOf('dataitem > cdndataurl', 'dataitem > cdn_dataurl');
+                    out.cdndatakey = recordTextOf('dataitem > cdn_datakey', 'dataitem > cdndatakey');
+                    out.datatitle = recordTextOf('dataitem > datatitle');
+                    out.datadesc = recordTextOf('dataitem > datadesc');
+                    out.datafmt = recordTextOf('dataitem > datafmt');
+                    out.datasize = recordTextOf('dataitem > datasize', 'dataitem > fullsize');
+                } catch (_) {}
+            }
+            return out;
+        }
+
         function normalizeWechatGatewayMedia(m) {
             const raw = (m && typeof m === 'object') ? m : {};
             const meta = (raw.meta && typeof raw.meta === 'object') ? raw.meta : {};
@@ -21546,21 +22208,25 @@
                         const xml = new DOMParser().parseFromString(rawContent, 'text/xml');
                         const img = xml.querySelector('img');
                         if (img) {
-                            ['cdnthumburl', 'md5', 'aeskey', 'cdnmidimgurl'].forEach((key) => {
+                            ['cdnthumburl', 'md5', 'aeskey', 'cdnmidimgurl', 'cdnbigimgurl'].forEach((key) => {
                                 const val = String(img.getAttribute(key) || '').trim();
                                 if (val) contents[key] = val;
                             });
+                            contents.path = contents.path || contents.cdnmidimgurl || contents.cdnbigimgurl || contents.cdnthumburl || '';
                             type = 'image';
-                            mediaUrl = mediaUrl || contents.cdnthumburl || contents.cdnmidimgurl || '';
+                            mediaUrl = mediaUrl || contents.cdnmidimgurl || contents.cdnbigimgurl || contents.cdnthumburl || '';
                         }
                     } catch (_) {}
                     if (/<appmsg[\s\S]*?>/i.test(rawContent)) {
                         try {
                             const info = parseAppMsgXml(rawContent);
-                            if (info.title) contents.title = contents.title || info.title;
-                            if (info.url) contents.url = contents.url || info.url;
+                            Object.entries(info || {}).forEach(([key, value]) => {
+                                if (value && !contents[key]) contents[key] = value;
+                            });
                             if (info.icon) contents.thumburl = contents.thumburl || info.icon;
-                            type = '链接';
+                            const isFile = String(info.appmsg_type || '').trim() === '6'
+                                || (String(info.appmsg_type || '').trim() === '24' && (info.cdn_dataurl || info.cdndataurl || info.datatitle || info.datafmt));
+                            type = isFile ? 'file' : '链接';
                         } catch (_) {}
                     }
                 }
@@ -21863,6 +22529,7 @@
                 importance_score: importance,
                 is_spam: Boolean(m.is_spam),
                 direction: m.direction || '',
+                sender_id: m.sender_id || m.sender || '',
                 chat_id: m.chat_id || m.talker || '',
                 derived,
                 key_info: derived.key_info || summaryText,
@@ -22322,6 +22989,8 @@
                 // 原文列：使用可点击小徽标（链接/图片/视频等）
                 // Always pass a normalized payload so buildMediaCell sees content text
                 const tdContent = buildMediaCell({
+                    id: dbId || msg.id || '',
+                    message_id: dbId || msg.id || '',
                     type: msg.message_type,
                     content: contentText,
                     contents: (msg.raw && (((msg.raw.meta||{}).contents) || msg.raw.contents)) || {},
@@ -22411,8 +23080,8 @@
                     dataEl.textContent = '[]';
                 }
             }
-            // 拉取完后触发派生并覆盖摘要
-            try { deriveAndOverlayForLoadedRows(); } catch(_){ }
+            // 拉取完成后再轻量触发派生，避免首屏渲染被大批量 AI 请求拖住。
+            try { setTimeout(() => deriveAndOverlayForLoadedRows(), 1200); } catch(_){ }
 
             if (typeof initMessageData === 'function') {
                 initMessageData();
@@ -22530,7 +23199,7 @@
                 const statusEl = document.getElementById('loadingStatus');
                 let cachedShown = false;
                 const renderCachedMessages = (cached)=>{
-                    const normalizedCached = cached.map(mapBackendMessage);
+                    const normalizedCached = cached.slice(0, 200).map(mapBackendMessage);
                     const incomingCached = filterIncomingMessages(normalizedCached);
                     if (incomingCached.length) {
                         populateMessageTable(incomingCached);
@@ -22546,8 +23215,8 @@
                 const lookbackDays = Math.max(days || 7, 1);
                 const since = new Date(now.getTime() - lookbackDays * 24 * 60 * 60 * 1000);
                 const fetchWindowItems = async () => {
-                    const pageFetchSize = 1000;
-                    const maxFetchPages = 20; // 单次最多拉取 2 万条，避免卡死
+                    const pageFetchSize = 200;
+                    const maxFetchPages = 3; // 首屏最多 600 条，避免浏览器假死；历史列表依靠缓存与分页继续保留。
                     let page = 1;
                     let merged = [];
                     const seen = new Set();
@@ -22561,7 +23230,7 @@
                         params.set('direction', 'in');
                         // Reduce payload/DB load: skip total-count and prune heavy meta/content on backend.
                         params.set('fast', '1');
-                        params.set('content_max_chars', '4000');
+                        params.set('content_max_chars', '1200');
                         const resp = await fetchWithPullControl(`/api/messages?${params.toString()}`, {}, op, 15000);
                         if (!resp.ok) {
                             throw new Error(`HTTP ${resp.status}`);
@@ -22583,65 +23252,33 @@
                 };
                 const items = await fetchWindowItems();
                 const mergedItems = lazyCacheWrite('message-list', lazyMergeItems(lazyCacheRead('message-list') || [], items));
-                const normalized = mergedItems.map(mapBackendMessage);
+                const normalized = mergedItems.slice(0, 600).map(mapBackendMessage);
                 const incoming = filterIncomingMessages(normalized);
                 if (incoming.length === 0) {
                     throwIfPullAborted(op);
                     if (allowSync) {
-                        console.info('后端暂无消息，尝试触发全量同步近', lookbackDays, '天聊天记录');
-                        // Quick probe: if chatlog service is not responsive, don't block the UI on long timeouts.
-                        let chatlogOk = false;
-                        try {
-                            const r0 = await fetchWithPullControl('http://127.0.0.1:5030/api/v1/session', {}, op, 2000);
-                            chatlogOk = !!(r0 && r0.ok);
-                        } catch (e) {
-                            if (isPullAbortError(e)) throw e;
-                            chatlogOk = false;
-                        }
-                        if (!chatlogOk) {
-                            showMessageTableError('chatlog(5030) 无响应：无法同步近3天聊天记录（请先启动 chatlog 服务）。');
-                            return;
-                        }
+                        console.info('后端暂无消息，触发微信三轨同步近', lookbackDays, '天聊天记录');
                         try {
                             throwIfPullAborted(op);
-                            const syncResp = await fetchWithPullControl(`/api/sync/chatlog/full?days=${lookbackDays}`, { method: 'POST' }, op, 60000);
+                            const syncResp = await fetchWithPullControl(`/api/sync/wechat/dual-track?days=${lookbackDays}`, { method: 'POST' }, op, 90000);
                             if (syncResp.ok) {
-                                console.info('同步完成，重新加载消息');
+                                const syncData = await syncResp.json().catch(() => ({}));
+                                const actions = Array.isArray(syncData.actions) ? syncData.actions : [];
+                                const okAction = actions.find(item => item.status === 'ok');
+                                console.info('微信三轨同步完成:', syncData);
                                 await loadRecentMessagesFromBackend(lookbackDays, false, op);
+                                if (!okAction) {
+                                    showMessageTableError(actions.map(x => x.reason).filter(Boolean).join('；') || '微信同步未获取到新内容，请检查 WeChat API 或本地兜底服务。');
+                                }
                                 return;
                             }
-                            console.warn('同步接口返回非 200 状态:', syncResp.status);
+                            console.warn('微信三轨同步接口返回非 200 状态:', syncResp.status);
                         } catch (syncErr) {
                             if (isPullAbortError(syncErr)) throw syncErr;
-                            console.error('触发同步失败:', syncErr);
+                            console.error('触发微信三轨同步失败:', syncErr);
                         }
                     }
-                    // Only fallback to direct chatlog pull when 5030 is responsive; otherwise the browser can hang for a long time.
-                    let chatlogOk = false;
-                    try {
-                        const r = await fetchWithPullControl('http://127.0.0.1:5030/api/v1/session', {}, op, 3000);
-                        chatlogOk = !!(r && r.ok);
-                    } catch (e) {
-                        if (isPullAbortError(e)) throw e;
-                        chatlogOk = false;
-                    }
-                    if (!chatlogOk) {
-                        console.warn('chatlog(5030) 无响应，跳过前端直连拉取。请先启动 chatlog 服务。');
-                        showMessageTableError('chatlog(5030) 无响应：请先启动聊天记录服务，再重试“拉取3天”。');
-                        return;
-                    }
-                    console.info('同步后仍无数据，回退到直接从 chatlog 服务抓取');
-                    await pullFromChatlogDays(lookbackDays, op);
-                    try {
-                        const dataEl = document.getElementById('messagesDataJson');
-                        const fallbackRaw = dataEl ? JSON.parse(dataEl.textContent || '[]') : [];
-                    const fallback = filterSummarizableMessages(fallbackRaw);
-                    if (typeof updateInfoStatistics === 'function') {
-                        updateInfoStatistics(fallback);
-                    }
-                    } catch (parseErr) {
-                        console.warn('解析 fallback 消息失败', parseErr);
-                    }
+                    showMessageTableError('暂无微信消息。云端请检查 WeChat API；本地版请启动 chatlog_alpha 或 wx-cli 后重试。');
                     return;
                 }
                 // 不再自动派生/自动二次刷新，由用户手动触发。
@@ -22658,24 +23295,16 @@
                 console.error('加载最近消息失败:', error);
                 try {
                     if (allowSync) {
-                        const syncResp = await fetchWithPullControl(`/api/sync/chatlog/full?days=${days || 7}`, { method: 'POST' }, op, 60000);
+                        const syncResp = await fetchWithPullControl(`/api/sync/wechat/dual-track?days=${days || 7}`, { method: 'POST' }, op, 90000);
                         if (syncResp.ok) {
                             console.info('同步成功，重试加载消息');
                             await loadRecentMessagesFromBackend(days || 7, false, op);
                             return;
                         }
                     }
-                    await pullFromChatlogDays(days || 7, op);
-                    const dataEl = document.getElementById('messagesDataJson');
-                    const fallbackRaw = dataEl ? JSON.parse(dataEl.textContent || '[]') : [];
-                    const fallback = filterSummarizableMessages(fallbackRaw);
-                    if (typeof updateInfoStatistics === 'function') {
-                        updateInfoStatistics(fallback);
-                    }
-                    // 关闭自动AI分析
                 } catch (fallbackError) {
                     if (isPullAbortError(fallbackError)) throw fallbackError;
-                    console.error('fallback 拉取 chatlog 失败:', fallbackError);
+                    console.error('消息更新失败:', fallbackError);
                     if (cachedShown) {
                         if (statusEl) statusEl.textContent = '后台更新失败，继续显示上次消息';
                     } else {
@@ -22690,222 +23319,54 @@
             }
         }
 
-        // 主动触发一次后端增量同步，然后刷新最近消息
+        // 主动触发后端微信同步，然后刷新最近消息。
+        // 后端严格使用已保存的链路排序：默认只用第一优先链路，开启多链路后才按顺序补齐。
         async function syncIncrementalAndReload(days = 7, pullOp = null) {
             const ownOp = !pullOp;
             const fullDays = Math.max(1, days || 7);
-            const op = ensurePullOperation(pullOp, `拉取近${fullDays}天（全量校准）...`);
+            const op = ensurePullOperation(pullOp, `微信同步近${fullDays}天...`);
             if (!op) return;
             try {
                 throwIfPullAborted(op);
                 const statusEl = document.getElementById('loadingStatus');
-                if (statusEl) statusEl.textContent = `拉取近${fullDays}天（全量校准）...`;
-                // If chatlog service is unresponsive, fail fast instead of waiting on long HTTP timeouts.
-                try {
-                    const ping = await fetchWithPullControl('http://127.0.0.1:5030/api/v1/session', {}, op, 2000);
-                    if (!ping.ok) throw new Error('chatlog not ok');
-                } catch (e) {
-                    if (isPullAbortError(e)) throw e;
-                    showMessageTableError('chatlog(5030) 无响应：无法拉取聊天记录（请先启动 chatlog 服务）。');
-                    return;
+                if (statusEl) statusEl.textContent = `微信同步近${fullDays}天...`;
+                const resp = await fetchWithPullControl(`/api/sync/wechat/dual-track?days=${fullDays}`, { method: 'POST' }, op, 120000);
+                const data = await resp.json().catch(() => ({}));
+                if (!resp.ok || data.status === 'error') {
+                    const actions = Array.isArray(data.actions) ? data.actions : [];
+                    const reason = actions.map(x => x.reason).filter(Boolean).join('；') || `HTTP ${resp.status}`;
+                    throw new Error(reason);
                 }
-                // 手动“拉取今日/3天/1周”：先做全量校准，保证该窗口内的历史消息完整；
-                // 然后做一次小范围增量（last_sync - 5min）兜底，以覆盖刚到达的新消息。
+                try { if (typeof renderWechatDualTrackState === 'function') renderWechatDualTrackState(data); } catch (_) {}
+                const actions = Array.isArray(data.actions) ? data.actions : [];
+                const okAction = actions.find(item => item.status === 'ok') || {};
+                if (statusEl) statusEl.textContent = `${okAction.track || '微信'}同步完成，刷新列表...`;
+                await loadRecentMessagesFromBackend(fullDays, false, op);
+                try { if (typeof renderDashboard === 'function') renderDashboard(); } catch (_) {}
                 try {
-                    throwIfPullAborted(op);
-                    const full = await fetchWithPullControl(`/api/sync/chatlog/full?days=${fullDays}`, { method: 'POST' }, op, 90000);
-                    if (!full.ok) console.warn('全量校准失败:', full.status);
+                    const now2 = new Date();
+                    const since2 = new Date(now2.getTime() - fullDays * 24 * 60 * 60 * 1000).toISOString();
+                    await runAutoDeriveForWindow(since2, now2.toISOString(), op);
+                    await loadRecentMessagesFromBackend(fullDays, false, op);
                 } catch (e) {
-                    if (isPullAbortError(e)) throw e;
-                    console.warn('全量校准异常:', e);
+                    if (!isPullAbortError(e)) console.warn('自动派生失败:', e);
                 }
-
-                if (statusEl) statusEl.textContent = '增量同步中...';
-                let sinceISO;
-                try {
-                    throwIfPullAborted(op);
-                    const st = await fetchWithPullControl('/api/sync/state', {}, op, 15000);
-                    if (st.ok) {
-                        const js = await st.json();
-                        if (js && js.last_sync) {
-                            const last = new Date(js.last_sync);
-                            sinceISO = new Date(last.getTime() - 5 * 60 * 1000).toISOString();
-                        }
-                    }
-                } catch (e) {
-                    if (isPullAbortError(e)) throw e;
-                }
-                if (!sinceISO) {
-                    const now = new Date();
-                    sinceISO = new Date(now.getTime() - fullDays * 24 * 60 * 60 * 1000).toISOString();
-                }
-                try {
-                    throwIfPullAborted(op);
-                    const resp = await fetchWithPullControl(`/api/sync/chatlog?since=${encodeURIComponent(sinceISO)}`, { method: 'POST' }, op, 90000);
-                    if (!resp.ok) console.warn('增量同步接口返回非200:', resp.status);
-                } catch (e) {
-                    if (isPullAbortError(e)) throw e;
-                    console.warn('增量同步异常:', e);
+                try { resetMessageFiltersToDefault(); } catch (_) {}
+                try { applyNoSpamDefault('all'); } catch (_) {}
+                if (statusEl) {
+                    statusEl.textContent = '完成';
+                    setTimeout(() => { const ss = document.getElementById('loadingStatus'); if (ss) ss.textContent = ''; }, 1500);
                 }
             } catch (e) {
                 if (isPullAbortError(e)) {
                     try { const s = document.getElementById('loadingStatus'); if (s) s.textContent = '已取消'; } catch (_) {}
                     return;
                 }
-                console.error('增量同步失败:', e);
+                console.error('微信三轨同步失败:', e);
+                showMessageTableError(`微信同步失败：${e?.message || e}。云端请检查 WeChat API；本地版请启动 chatlog_alpha 或 wx-cli。`);
             } finally {
-                const isAborted = () => !!(op && op.controller && op.controller.signal.aborted);
-                if (!isAborted()) {
-                    // 无论同步是否成功，都尝试刷新视图；失败时 loadRecentMessagesFromBackend 内部会回退
-                    await loadRecentMessagesFromBackend(days || 7, false, op);
-                    try { const s = document.getElementById('loadingStatus'); if (s) s.textContent = '已更新，开始 tool 覆盖…'; } catch (_) {}
-                    try { if (typeof renderDashboard === 'function') renderDashboard(); } catch (_) {}
-                    // 拉取完成后自动触发一次派生，更新 分类/情绪/关键信息
-                    try {
-                        const now2 = new Date();
-                        const since2 = new Date(now2.getTime() - Math.max(1, days || 7) * 24 * 60 * 60 * 1000).toISOString();
-                        await runAutoDeriveForWindow(since2, now2.toISOString(), op);
-                        // 再次按原选择的时间范围刷新，确保三天/一周结果都带上小模型派生
-                        await loadRecentMessagesFromBackend(days || 7, false, op);
-                    } catch (e) {
-                        if (!isPullAbortError(e)) console.warn('自动派生失败:', e);
-                    } finally {
-                        if (!isAborted()) {
-                            try { const s = document.getElementById('loadingStatus'); if (s) s.textContent = '完成'; setTimeout(() => { const ss = document.getElementById('loadingStatus'); if (ss) ss.textContent = ''; }, 1500); } catch (_) {}
-                        } else {
-                            try { const s = document.getElementById('loadingStatus'); if (s) s.textContent = '已取消'; } catch (_) {}
-                        }
-                        try { if (typeof renderDashboard === 'function') renderDashboard(); } catch (_) {}
-                    }
-                    if (!isAborted()) {
-                        try { resetMessageFiltersToDefault(); } catch (_) {}
-                        try { applyNoSpamDefault('all'); } catch (_) {}
-                    }
-                }
                 if (ownOp) finishPullOperation(op);
             }
-        }
-
-        // 按时间窗口派生：只对新拉取消息的ID做派生，避免 period/时区偏差导致漏派生
-        async function runAutoDeriveForWindow(sinceISO, untilISO, pullOp = null){
-            if (pullOp) throwIfPullAborted(pullOp);
-            const progressKey = `auto-derive-${Date.now()}`;
-            const bar = document.getElementById('globalProgressBar');
-            if (bar) { bar.style.width='1%'; }
-            // 收集该时间窗内的消息ID（入站优先），支持分页扫描，避免只扫第一页导致漏更新
-            const PAGE_SIZE = 1000;
-            const MAX_SCAN_PAGES = 8; // 最多扫描 8000 条候选，超出则退化为 period 全量派生
-            let ids = [];
-            let maybeMore = false;
-            const extractCandidateText = (msg) => {
-                try {
-                    let text = String(msg?.content_text || msg?.content || msg?.text || '').trim();
-                    if (text) return text;
-                    const contents = msg?.meta?.contents;
-                    if (contents && typeof contents === 'object') {
-                        const parts = ['content', 'desc', 'title', 'url']
-                            .map((k) => String(contents?.[k] || '').trim())
-                            .filter(Boolean);
-                        if (parts.length) return parts.join(' \n');
-                    }
-                } catch (_) {}
-                return '';
-            };
-            try{
-                for (let p = 1; p <= MAX_SCAN_PAGES; p += 1) {
-                    if (pullOp) throwIfPullAborted(pullOp);
-                    const params = new URLSearchParams();
-                    params.set('size', String(PAGE_SIZE));
-                    params.set('page', String(p));
-                    params.set('time_from', sinceISO);
-                    params.set('time_to', untilISO);
-                    params.set('direction', 'in');
-                    // Need meta for fallback text extraction from meta.contents
-                    params.set('fast', '1');
-                    params.set('include_meta', '1');
-                    params.set('content_max_chars', '4000');
-                    const resp = await fetchWithPullControl(`/api/messages?${params.toString()}`, {}, pullOp, 15000);
-                    if (!resp.ok) break;
-                    const j = await resp.json();
-                    const items = (j && Array.isArray(j.items)) ? j.items : [];
-                    if (!items.length) break;
-                    const eligible = items.filter(x => {
-                        const d = (x?.derived && typeof x.derived === 'object') ? x.derived : {};
-                        const origin = String(d.summary_origin || d.key_info_origin || '').toLowerCase();
-                        const hasAiSummary = typeof d.summary === 'string' && /^\s*ai:\s*/i.test(d.summary);
-                        if (origin === 'tool' || hasAiSummary) return false;
-                        const body = extractCandidateText(x);
-                        const len = summaryCharLen(body);
-                        return len >= AI_MIN_CHARS;
-                    });
-                    ids.push(...eligible.map(x => x.id).filter(Boolean));
-                    if (items.length < PAGE_SIZE) break;
-                    if (p === MAX_SCAN_PAGES) {
-                        maybeMore = true;
-                    }
-                }
-            }catch(_){ }
-            ids = Array.from(new Set(ids));
-            // 如果为空，退化为 period 触发（至少保持进度条提示）
-            let payload;
-            if (ids.length && !maybeMore) {
-                payload = { message_ids: ids };
-            } else {
-                const diffMs = (new Date(untilISO).getTime() - new Date(sinceISO).getTime());
-                const days = Math.max(1, Math.ceil(diffMs / (24*60*60*1000)));
-                const keyMap = {1:'1day',2:'1day',3:'3days',7:'1week',30:'1month'};
-                const period = keyMap[days] || '1week';
-                // 扫描分页上限触发/候选为空时，用 period + force 兜底，防止漏派生
-                payload = { period, force: true };
-            }
-            if (pullOp) throwIfPullAborted(pullOp);
-            const r = await fetchWithPullControl(`/api/messages/derive?progress_key=${encodeURIComponent(progressKey)}`, {
-                method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
-            }, pullOp, 60000);
-            if (!r.ok) throw new Error(`derive HTTP ${r.status}`);
-            try { pollDeriveProgress(progressKey); } catch(_){ }
-            // 等待派生完成
-            const waitDone = async () => {
-                for(let i=0;i<240;i++){ // 最多等 ~192秒
-                    try{
-                        if (pullOp) throwIfPullAborted(pullOp);
-                        const rr = await fetchWithPullControl(`/api/messages/derive/progress?key=${encodeURIComponent(progressKey)}`, {}, pullOp, 8000);
-                        const jj = await rr.json();
-                        if ((jj.status||'')==='done') return true;
-                    }catch(e){
-                        if (isPullAbortError(e)) throw e;
-                    }
-                    await new Promise(res=>setTimeout(res,800));
-                }
-                return false;
-            };
-            await waitDone();
-            // 重新加载并应用
-            await loadRecentMessagesFromBackend(1, false, pullOp); // 快速刷新最新
-            if (typeof applyDerivedToRows === 'function') applyDerivedToRows();
-            try{ if (typeof renderDashboard === 'function') renderDashboard(); }catch(_){ }
-        }
-
-        function fmtTime(iso) {
-            if (!iso) return '';
-            const d = new Date(iso);
-            const mm = String(d.getMonth()+1).padStart(2,'0');
-            const dd = String(d.getDate()).padStart(2,'0');
-            const hh = String(d.getHours()).padStart(2,'0');
-            const mi = String(d.getMinutes()).padStart(2,'0');
-            return `${mm}-${dd} ${hh}:${mi}`;
-        }
-
-        function parseAppMsgXml(xmlStr){
-            try{
-                const parser=new DOMParser();
-                const doc=parser.parseFromString(xmlStr,'text/xml');
-                const url=doc.querySelector('appmsg > url')?.textContent||'';
-                const icon=doc.querySelector('weappinfo > weappiconurl')?.textContent||'';
-                const raw=doc.querySelector('weappinfo > weapppagethumbrawurl')?.textContent||'';
-                const title=doc.querySelector('appmsg > title')?.textContent||'';
-                return {url,icon,raw,title};
-            }catch(e){return {url:'',icon:'',raw:'',title:''};}
         }
 
         function buildMediaCell(m, host) {
@@ -22923,11 +23384,11 @@
             let content = m.content || m.content_text || '';
             const c = m.contents || (m.meta && m.meta.contents) || {};
             const directMediaUrl = String((m && (m.media_url || m.mediaUrl)) || (c && c.media_url) || '').trim();
-            let base = host || c.host || 'http://127.0.0.1:5030';
-            if (!/^https?:\/\//i.test(base)) {
+            let base = host || c.host || '';
+            if (base && !/^https?:\/\//i.test(base)) {
                 base = 'http://' + base;
             }
-            base = base.replace(/\/$/, '');
+            base = base ? base.replace(/\/$/, '') : '';
 
             const encodeRelativePath = (value) => {
                 if (!value) return '';
@@ -22951,20 +23412,20 @@
                 const encodedRel = encodeRelativePath(rel);
                 if (kind === 'voice') {
                     const voiceId = (c.voice || c.voiceId || c.id || c.mediaId || '').toString().trim();
-                    return voiceId ? `${base}/voice/${encodeURIComponent(voiceId)}` : '';
+                    return (base && voiceId) ? `${base}/voice/${encodeURIComponent(voiceId)}` : '';
                 }
                 if (kind === 'file') {
-                    if (md5) return `${base}/file/${encodeURIComponent(md5)}`;
-                    if (encodedRel) return `${base}/data/${encodedRel}`;
+                    if (base && md5) return `${base}/file/${encodeURIComponent(md5)}`;
+                    if (base && encodedRel) return `${base}/data/${encodedRel}`;
                     return '';
                 }
                 if (kind === 'image' || kind === 'video') {
-                    if (md5 && encodedRel) return `${base}/${kind}/${encodeURIComponent(md5)},${encodedRel}`;
-                    if (md5) return `${base}/${kind}/${encodeURIComponent(md5)}`;
-                    if (encodedRel) return `${base}/data/${encodedRel}`;
+                    if (base && md5 && encodedRel) return `${base}/${kind}/${encodeURIComponent(md5)},${encodedRel}`;
+                    if (base && md5) return `${base}/${kind}/${encodeURIComponent(md5)}`;
+                    if (base && encodedRel) return `${base}/data/${encodedRel}`;
                     return '';
                 }
-                if (encodedRel) return `${base}/data/${encodedRel}`;
+                if (base && encodedRel) return `${base}/data/${encodedRel}`;
                 return '';
             };
 
@@ -22988,11 +23449,23 @@
                 cell.onclick = function(){ showFullContent(cell); };
             };
 
+            const makeWholeCellOpenUrl = (url, fallbackText = '') => {
+                const targetUrl = String(url || '').trim();
+                if (!targetUrl) return;
+                cell.classList.add('openable-media-cell');
+                cell.dataset.fullContent = String(fallbackText || targetUrl || '');
+                cell.onclick = function(ev) {
+                    if (ev && ev.target && ev.target.closest && ev.target.closest('a,button')) return;
+                    window.open(targetUrl, '_blank', 'noopener');
+                };
+            };
+
             if (typeLabel === '图片') {
                 const md5 = (c.md5 || c.imageId || c.image_id || c.mediaId || c.id || '').toString().trim();
-                const relPathRaw = (c.path || c.data || c.relative || c.image_path || c.localPath || '').toString().trim();
+                const relPathRaw = (c.path || c.data || c.relative || c.image_path || c.localPath || c.cdnmidimgurl || c.cdnbigimgurl || c.cdnthumburl || '').toString().trim();
+                const messageId = (m && (m.message_id || m.id || m.db_id)) || '';
                 const resolverUrl = (md5 || relPathRaw || directMediaUrl)
-                    ? `/api/messages/media/image?md5=${encodeURIComponent(md5)}&path=${encodeURIComponent(relPathRaw)}&host=${encodeURIComponent(base)}&url=${encodeURIComponent(directMediaUrl || '')}`
+                    ? `/api/messages/media/image?message_id=${encodeURIComponent(messageId || '')}&md5=${encodeURIComponent(md5)}&path=${encodeURIComponent(relPathRaw)}&host=${encodeURIComponent(base)}&url=${encodeURIComponent(directMediaUrl || '')}`
                     : '';
                 const url = resolverUrl || pickUrl('image');
                 const a = document.createElement('a');
@@ -23003,20 +23476,37 @@
                 a.innerHTML = `<div class="media-card image-card"><span class="card-icon">🖼️</span><span class="card-text">图片预览</span></div>`;
                 cell.appendChild(a);
                 attachTailText(content || c.desc || c.title || '', url);
+                makeWholeCellOpenUrl(url, content || c.desc || c.title || url);
                 return cell;
             }
-            const fileLikeLink = (typeLabel === '链接' && c && c.md5 && !c.url);
+            const fileLikeLink = (
+                typeLabel === '链接'
+                && c
+                && (
+                    String(c.appmsg_type || '').trim() === '6'
+                    || (
+                        String(c.appmsg_type || '').trim() === '24'
+                        && (c.cdn_dataurl || c.cdndataurl || c.datatitle || c.datafmt)
+                    )
+                )
+            );
             if (typeLabel === '文件' || fileLikeLink) {
-                const url = pickUrl('file');
-                const title = (c.title || c.desc || '文件下载').toString();
+                const directUrl = pickUrl('file');
+                const md5 = (c.md5 || c.fullmd5 || c.id || c.mediaId || '').toString().trim();
+                const relPathRaw = (c.path || c.data || c.relative || c.localPath || '').toString().trim();
+                const messageId = (m && (m.message_id || m.id || m.db_id)) || '';
+                const title = (c.title || c.datatitle || c.desc || c.datadesc || content || '文件浏览').toString();
+                const resolverUrl = `/api/messages/media/file?message_id=${encodeURIComponent(messageId || '')}&md5=${encodeURIComponent(md5)}&path=${encodeURIComponent(relPathRaw)}&host=${encodeURIComponent(base)}&url=${encodeURIComponent(directUrl || '')}&name=${encodeURIComponent(title)}`;
+                const url = resolverUrl;
                 const a = document.createElement('a');
                 a.href = url || '#';
                 a.target = '_blank';
                 a.rel = 'noopener';
                 a.addEventListener('click', (e)=> e.stopPropagation());
-                a.innerHTML = `<div class="media-card link-card"><span class="card-icon">📎</span><span class="card-text">${title}</span></div>`;
+                a.innerHTML = `<div class="media-card link-card"><span class="card-icon">📎</span><span class="card-text">${escapeHtml(title)}</span></div>`;
                 cell.appendChild(a);
                 attachTailText(content || title, url);
+                makeWholeCellOpenUrl(url, content || title || url);
                 return cell;
             }
             if (typeLabel === '语音') {
@@ -23029,6 +23519,7 @@
                 a.innerHTML = `<div class="media-card link-card"><span class="card-icon">🎧</span><span class="card-text">语音播放/下载</span></div>`;
                 cell.appendChild(a);
                 attachTailText(content || c.desc || c.title || '', url);
+                makeWholeCellOpenUrl(url, content || c.desc || c.title || url);
                 return cell;
             }
             if (typeLabel === '视频') {
@@ -23040,6 +23531,7 @@
                     a.innerHTML = `<div class="media-card video-card"><span class="card-icon">🎞️</span><span class="card-text">${(c.title||'视频链接')}</span></div>`;
                     cell.appendChild(a);
                     attachTailText(content || c.desc || c.title || '', url);
+                    makeWholeCellOpenUrl(url, content || c.desc || c.title || url);
                     return cell;
                 }
             }
@@ -23052,6 +23544,7 @@
                     a.innerHTML = `<div class="media-card link-card"><span class="card-icon">🔗</span><span class="card-text">${(c.title||url||'链接')}</span></div>`;
                     cell.appendChild(a);
                     cell.dataset.fullContent = (content && content.trim()) ? content : (c.title||url);
+                    makeWholeCellOpenUrl(url, (content && content.trim()) ? content : (c.title||url));
                 }
                 let snippet = (content||c.desc||c.title||'').toString().replace(/\s+/g,' ').slice(0,100);
                 if (!snippet && url){
@@ -23085,7 +23578,7 @@
                     cell.appendChild(a);
                     cell.title = info.title||'';
                     cell.dataset.fullContent = content || info.url || '';
-                    cell.onclick = function(){ showFullContent(cell); };
+                    makeWholeCellOpenUrl(info.url, content || info.title || info.url || '');
                     return cell;
                 }
             }
@@ -23115,239 +23608,8 @@
         }
 
         async function pullFromChatlogDays(days, pullOp = null) {
-            const ownOp = !pullOp;
-            const op = ensurePullOperation(pullOp, `从chatlog拉取近${days}天…`);
-            if (!op) return;
-            try {
-                throwIfPullAborted(op);
-                window.pulledRows = [];
-                try{ const s=document.getElementById('loadingStatus'); if (s) s.textContent=`从chatlog拉取近${days}天…`; }catch(_){ }
-                const sess = await fetchWithPullControl('http://127.0.0.1:5030/api/v1/session', {}, op, 5000);
-                if (!sess.ok) throw new Error(`chatlog session HTTP ${sess.status}`);
-                const text = await sess.text();
-                const talkers = Array.from(new Set(Array.from(text.matchAll(/\(([^)]+)\)/g)).map(m => m[1])));
-                const today = new Date();
-                const tbody = document.querySelector('#messageTable tbody');
-                if (tbody) tbody.innerHTML = '';
-                const frag = document.createDocumentFragment();
-                const senders = new Set();
-                const pulled = [];
-                const uniq = new Set();
-                for (let d = 0; d < days; d++) {
-                    throwIfPullAborted(op);
-                    const day = new Date(today.getTime() - d*24*60*60*1000).toISOString().slice(0,10);
-                    for (const t of talkers) {
-                        throwIfPullAborted(op);
-                        try {
-                            let offset = 0; const limit = 500;
-                            while (true) {
-                                throwIfPullAborted(op);
-                                const url = `http://127.0.0.1:5030/api/v1/chatlog?talker=${encodeURIComponent(t)}&time=${day}&format=json&limit=${limit}&offset=${offset}`;
-                                const res = await fetchWithPullControl(url, {}, op, 8000);
-                                if (!res.ok) break;
-                                const arr = await res.json();
-                                if (!Array.isArray(arr) || arr.length === 0) break;
-                                for (const m of arr) {
-                                    const key = String(m.seq||'') + '|' + (m.time||'') + '|' + (m.sender||'') + '|' + (m.content||'');
-                                    if (uniq.has(key)) continue;
-                                    uniq.add(key);
-                                    const typeLabel = mapMsgTypeCode(m.type);
-                                    const sender = m.senderName || m.sender || '';
-                                    const talkerName = m.talkerName || m.talker || '';
-                                    const rawDirection = typeof m.direction === 'string' ? m.direction :
-                                        (typeof m.isSelf === 'boolean' ? (m.isSelf ? 'out' : 'in') :
-                                            (typeof m.is_self === 'boolean' ? (m.is_self ? 'out' : 'in') :
-                                                (typeof m.is_sender_self === 'boolean' ? (m.is_sender_self ? 'out' : 'in') : '')));
-                                    if (String(rawDirection).toLowerCase() === 'out') {
-                                        continue;
-                                    }
-                                    if (sender) {
-                                        senders.add(sender);
-                                    }
-                    const tr = document.createElement('tr');
-                    tr.id = 'message-' + (m.seq || m.time || pulled.length);
-                    tr.dataset.messageType = typeLabel;
-                    tr.dataset.isSpam = 'false';
-                    tr.dataset.sender = sender;
-                    tr.dataset.senderId = m.sender || sender || '';
-                    tr.dataset.talkerName = talkerName || m.talker || '';
-                    tr.dataset.importance = '50';
-                    tr.dataset.chatId = m.talker;
-                    tr.dataset.isoTime = m.time || '';
-                    tr.dataset.direction = rawDirection || '';
-                    const summaryFallback = extractKeyInfo(m.content || '') || '';
-                    tr.dataset.category = classifyContentType(m.content || '');
-                    tr.dataset.tone = normalizeToneValue(analyzeSentiment(m.content || '') || 'neutral');
-                    const detected = detectMeetingInfo(m.content || '');
-                    tr.dataset.meetingNumber = detected.number || '';
-                    tr.dataset.meetingPlatform = detected.platform || '';
-                    tr.dataset.meeting = tr.dataset.meetingNumber ? `${tr.dataset.meetingPlatform || '会议'} ${tr.dataset.meetingNumber}`.trim() : (tr.dataset.meetingPlatform || '');
-                    tr.dataset.summary = summaryFallback;
-                    tr.dataset.keyInfo = summaryFallback;
-                    // cells
-                    const tdSender = document.createElement('td'); tdSender.className = 'sender'; tdSender.textContent = sender;
-                    const tdTime = document.createElement('td'); tdTime.className = 'time'; tdTime.textContent = fmtTime(m.time);
-                    const tdTalker = document.createElement('td'); tdTalker.className = 'talker';
-                    const talkerDisplay = m.isChatRoom ? (talkerName||'') : (m.talker||m.sender||'');
-                    tdTalker.textContent = talkerDisplay;
-                    const tdType = document.createElement('td'); tdType.className = 'msg-type'; tdType.dataset.type = typeLabel; tdType.textContent = typeLabel;
-                    const tdCtype = document.createElement('td'); tdCtype.className = 'content-type'; tdCtype.textContent = tr.dataset.category || '';
-                    const tdToneCell = document.createElement('td'); tdToneCell.className = 'tone'; tdToneCell.dataset.tone = tr.dataset.tone; tdToneCell.textContent = formatToneLabel(tr.dataset.tone);
-                    const tdSummaryCell = document.createElement('td'); tdSummaryCell.className = 'summary-col'; tdSummaryCell.title='点击展开/折叠，回车查看详情'; tdSummaryCell.addEventListener('click', (e)=>{ e.stopPropagation(); tdSummaryCell.classList.toggle('expanded'); });
-                    const tdContent = buildMediaCell(m, (m.contents||{}).host);
-                    const tdOps = document.createElement('td'); tdOps.className = 'operations';
-                    tdOps.appendChild(buildMessageOperationButtons({ messageKey: String(m.seq || m.time || ''), dbId: String(m.id || ''), senderName: sender }));
-                    tr.appendChild(tdSender); tr.appendChild(tdTime); tr.appendChild(tdTalker); tr.appendChild(tdType);
-                    // 先关键信息，再原文
-                    tr.appendChild(tdCtype); tr.appendChild(tdToneCell); tr.appendChild(tdSummaryCell);
-                    tr.appendChild(tdContent); tr.appendChild(tdOps);
-                    // 前端本地提取属于 fallback，明确标记来源，渲染为灰色，待后端派生完成后会被覆盖
-                    tr.dataset.summaryOrigin = 'fallback';
-                    updateSummaryCell(tr, summaryFallback, tr.dataset.meeting, {
-                        meeting_number: tr.dataset.meetingNumber,
-                        meeting_platform: tr.dataset.meetingPlatform,
-                        sender_name: sender,
-                        talker_name: talkerName,
-                        time: m.time,
-                        summary_origin: 'fallback'
-                    });
-                    const fullContent = tdContent.dataset.fullContent || tdContent.textContent || '';
-                    const shortSpam = isShortMessageText(fullContent);
-                    pulled.push({
-                        sender_name: sender,
-                        talker_name: talkerName,
-                        time: m.time,
-                        content: fullContent,
-                        message_type: typeLabel,
-                        category: tr.dataset.category,
-                        tone: tr.dataset.tone,
-                        meeting_label: tr.dataset.meeting,
-                        meeting_number: tr.dataset.meetingNumber,
-                        meeting_platform: tr.dataset.meetingPlatform,
-                        summary: summaryFallback,
-                        importance_score: 50,
-                        is_spam: shortSpam,
-                        chat_id: m.talker || '',
-                        direction: rawDirection,
-                        key_info: summaryFallback,
-                    });
-                    if (!window.pulledRows) window.pulledRows = [];
-                    window.pulledRows.push({ tr, time: m.time });
-                                }
-                                if (arr.length < limit) break;
-                                offset += limit;
-                            }
-                        } catch (innerErr) {
-                            if (isPullAbortError(innerErr)) throw innerErr;
-                            /* ignore one talker error */
-                        }
-                    }
-                }
-                // sort by time desc and render
-                pulled.sort((a,b) => new Date(b.time||0) - new Date(a.time||0));
-                const sortedRows = document.createDocumentFragment();
-                for (const p of pulled) {
-                    // rows already built; we re-render from pulled to ensure time排序一致
-                    const tr = document.createElement('tr');
-                    tr.id = 'message-' + (p.id || p.time || pulled.indexOf(p));
-                    tr.dataset.messageType = p.message_type;
-                    tr.dataset.category = p.category || '';
-                    tr.dataset.tone = normalizeToneValue(p.tone || 'neutral');
-                    tr.dataset.meeting = p.meeting_label || '';
-                    tr.dataset.meetingNumber = p.meeting_number || '';
-                    tr.dataset.meetingPlatform = p.meeting_platform || '';
-                    // Keep summary and keyInfo distinct so the UI can prefer key_info for the "关键信息" column
-                    tr.dataset.summary = p.summary || '';
-                    tr.dataset.keyInfo = p.key_info || tr.dataset.summary;
-                    tr.dataset.isSpam = String(p.is_spam);
-                    tr.dataset.sender = p.sender_name || '';
-                    tr.dataset.senderId = p.sender_id || p.sender_name || '';
-                    tr.dataset.talkerName = p.talker_name || p.chat_id || p.sender_name || '';
-                    tr.dataset.importance = String(p.importance_score||50);
-                    tr.dataset.isoTime = p.time || '';
-                    tr.dataset.chatId = p.chat_id || '';
-                    tr.dataset.direction = p.direction || '';
-                    tr.innerHTML = `
-                        <td class="sender">${p.sender_name||''}</td>
-                        <td class="time">${fmtTime(p.time)}</td>
-                        <td class="talker">${p.sender_name||''}</td>
-                        <td class="msg-type" data-type="${p.message_type}">${p.message_type}</td>
-                        <td class="content-type">${p.category||''}</td>
-                        <td class="tone" data-tone="${tr.dataset.tone}">${formatToneLabel(tr.dataset.tone)}</td>
-                        <td class="summary-col"></td>
-                        <td class="content" title="${(p.content||'').replace(/"/g,'&quot;')}">${(p.content||'').slice(0,100)}</td>
-                        <td class="operations"><div class="op-buttons op-checks"></div></td>`;
-                    const summaryCell = tr.querySelector('.summary-col');
-                    if (summaryCell) {
-                        // Display should prefer key_info when available
-                        updateSummaryCell(tr, (tr.dataset.keyInfo || tr.dataset.summary || ''), tr.dataset.meeting, {
-                            meeting_number: tr.dataset.meetingNumber,
-                            meeting_platform: tr.dataset.meetingPlatform,
-                            sender_name: p.sender_name,
-                            talker_name: p.talker_name || p.sender_name,
-                            time: p.time,
-                        });
-                    }
-                    const opsCell = tr.querySelector('.operations');
-                    if (opsCell) {
-                        opsCell.textContent = '';
-                        opsCell.appendChild(buildMessageOperationButtons({ messageKey: String(p.time || ''), dbId: String(p.id || ''), senderName: p.sender_name || '' }));
-                    }
-                    sortedRows.appendChild(tr);
-                }
-                if (tbody) tbody.appendChild(sortedRows);
-                // 重新用原 tr 排序渲染，保留点击/卡片行为
-                if (window.pulledRows && window.pulledRows.length) {
-                    window.pulledRows.sort((a,b)=> new Date(b.time||0) - new Date(a.time||0));
-                    const frag2 = document.createDocumentFragment();
-                    window.pulledRows.forEach(r=> frag2.appendChild(r.tr));
-                    tbody.innerHTML = '';
-                    tbody.appendChild(frag2);
-                }
-                // 填充发送人筛选
-                const senderFilter = document.getElementById('senderFilter');
-                if (senderFilter) {
-                    const previous = senderFilter.value;
-                    senderFilter.innerHTML = '<option value="">全部发送人</option>';
-                    const senderList = [...senders]
-                        .filter(Boolean)
-                        .sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
-                    senderList.forEach(s => {
-                        const opt = document.createElement('option');
-                        opt.value = s;
-                        opt.textContent = s;
-                        senderFilter.appendChild(opt);
-                    });
-                    if (previous && senderList.includes(previous)) {
-                        senderFilter.value = previous;
-                    }
-                }
-                // 覆盖 messagesDataJson 以便AI分析页使用
-                const dataEl = document.getElementById('messagesDataJson');
-                if (dataEl) {
-                    const filteredPulled = filterSummarizableMessages(pulled);
-                    dataEl.textContent = JSON.stringify(filteredPulled);
-                }
-                try{ const s=document.getElementById('loadingStatus'); if (s) s.textContent='已从chatlog拉取'; }catch(_){ }
-                // 重新初始化筛选与分页
-                if (typeof initMessageData === 'function') initMessageData();
-                if (typeof initFilters === 'function') initFilters();
-                if (typeof initPagination === 'function') initPagination();
-                if (typeof updateDisplay === 'function') updateDisplay();
-                if (typeof updatePagination === 'function') updatePagination();
-                // 应用分类/垃圾/关键信息/重要度
-                applyDerivedToRows();
-                // 备用库自动合并和去重，不再需要用户手动点击
-                try{ if (typeof syncLangbotBackup === 'function') await syncLangbotBackup(); }catch(e){ console.warn('备用库自动合并失败', e); }
-            } catch (e) {
-                if (isPullAbortError(e)) {
-                    try{ const s=document.getElementById('loadingStatus'); if (s) s.textContent='已取消'; }catch(_){ }
-                    return;
-                }
-                console.error('拉取chatlog失败:', e); try{ const s=document.getElementById('loadingStatus'); if (s) s.textContent='从chatlog拉取失败'; }catch(_){ }
-            } finally {
-                if (ownOp) finishPullOperation(op);
-            }
+            // 兼容旧调用名：实际不再由浏览器直连 chatlog，而是统一交给后端三轨策略。
+            return syncIncrementalAndReload(days, pullOp);
         }
 
         function initMessageListButtons(){
@@ -23367,7 +23629,7 @@
                 const n = Math.max(1, parseInt(document.getElementById('compareDays')?.value||'1',10));
                 if (el) el.textContent = fix? `对照并修复近${n}天…` : `对照近${n}天…`;
                 try{
-                    if (fix) await fetch(`/api/sync/chatlog/full?days=${n}`, { method: 'POST' });
+                    if (fix) await fetch(`/api/sync/wechat/dual-track?days=${n}`, { method: 'POST' });
                     const r = await fetch(`/api/sync/compare?days=${n}`);
                     if (!r.ok) throw new Error(`HTTP ${r.status}`);
                     const j = await r.json();

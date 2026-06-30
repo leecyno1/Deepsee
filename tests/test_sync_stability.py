@@ -124,18 +124,20 @@ def test_wechat_dual_track_policy_defaults_and_bounds():
 
     db = _DB()
     policy = sync_router._dual_track_policy(db)
-    assert policy["mode"] == "wechatapi_primary_chatlog_fallback"
-    assert policy["fallback_when_api_unhealthy"] is True
-    assert policy["fallback_when_no_new_messages"] is True
+    assert policy["mode"] == "custom"
+    assert policy["enabled_tracks"] == ["wechatapi", "chatlog", "wx_cli"]
+    assert policy["track_order"] == ["wechatapi", "chatlog", "wx_cli"]
+    assert policy["use_multiple_tracks"] is False
     assert policy["chatlog_window_days"] == 1
 
     db = _DB(
         {
             "wechat_dual_track_policy": json.dumps(
                 {
-                    "mode": "bad-mode",
-                    "fallback_when_api_unhealthy": False,
-                    "fallback_when_no_new_messages": False,
+                    "mode": "custom",
+                    "enabled_tracks": ["chatlog", "bad"],
+                    "track_order": ["wx_cli", "chatlog", "wechatapi"],
+                    "use_multiple_tracks": True,
                     "chatlog_window_days": 999,
                 },
                 ensure_ascii=False,
@@ -143,10 +145,95 @@ def test_wechat_dual_track_policy_defaults_and_bounds():
         }
     )
     policy = sync_router._dual_track_policy(db)
-    assert policy["mode"] == "wechatapi_primary_chatlog_fallback"
-    assert policy["fallback_when_api_unhealthy"] is False
-    assert policy["fallback_when_no_new_messages"] is False
+    assert policy["mode"] == "custom"
+    assert policy["enabled_tracks"] == ["chatlog"]
+    assert policy["track_order"] == ["wx_cli", "chatlog", "wechatapi"]
+    assert policy["use_multiple_tracks"] is True
     assert policy["chatlog_window_days"] == 90
+
+
+def test_wechat_dual_track_sync_uses_only_first_track_by_default(monkeypatch):
+    import app.routers.sync as sync_router
+
+    calls = {"chatlog": 0, "wx_cli": 0}
+
+    class _DBWithWrites(_DB):
+        def commit(self):
+            pass
+
+        def rollback(self):
+            pass
+
+    monkeypatch.setattr(
+        sync_router,
+        "_dual_track_policy",
+        lambda _db: {
+            "mode": "custom",
+            "enabled_tracks": ["chatlog", "wx_cli"],
+            "track_order": ["chatlog", "wx_cli", "wechatapi"],
+            "use_multiple_tracks": False,
+            "chatlog_window_days": 1,
+        },
+    )
+    monkeypatch.setattr(sync_router, "_wechatapi_track_state", lambda _db: {"healthy": True, "message": "ok"})
+    monkeypatch.setattr(sync_router, "_chatlog_track_state", lambda: {"healthy": True, "message": "ok"})
+    monkeypatch.setattr(sync_router, "_wx_cli_track_state", lambda: {"healthy": True, "message": "ok"})
+    monkeypatch.setattr(sync_router, "refresh_default_snapshots", lambda _db: None)
+    monkeypatch.setattr(sync_router.sync_runtime, "persist_sync_run", lambda *_args, **_kwargs: None)
+
+    def fake_chatlog(_db, days):
+        calls["chatlog"] += 1
+        return {"fetched": 2, "inserted": 1}
+
+    def fake_wx_cli(_db, days):
+        calls["wx_cli"] += 1
+        return {"fetched": 99, "inserted": 99}
+
+    monkeypatch.setattr(sync_router, "sync_full", fake_chatlog)
+    monkeypatch.setattr(sync_router, "sync_from_wx_cli", fake_wx_cli)
+
+    payload = sync_router.sync_wechat_dual_track(days=1, db=_DBWithWrites())
+
+    assert payload["execution_order"] == ["chatlog"]
+    assert calls == {"chatlog": 1, "wx_cli": 0}
+    assert payload["actions"][0]["track"] == "chatlog"
+
+
+def test_wechat_dual_track_sync_uses_multiple_tracks_when_enabled(monkeypatch):
+    import app.routers.sync as sync_router
+
+    calls = {"chatlog": 0, "wx_cli": 0}
+
+    class _DBWithWrites(_DB):
+        def commit(self):
+            pass
+
+        def rollback(self):
+            pass
+
+    monkeypatch.setattr(
+        sync_router,
+        "_dual_track_policy",
+        lambda _db: {
+            "mode": "custom",
+            "enabled_tracks": ["chatlog", "wx_cli"],
+            "track_order": ["chatlog", "wx_cli", "wechatapi"],
+            "use_multiple_tracks": True,
+            "chatlog_window_days": 1,
+        },
+    )
+    monkeypatch.setattr(sync_router, "_wechatapi_track_state", lambda _db: {"healthy": True, "message": "ok"})
+    monkeypatch.setattr(sync_router, "_chatlog_track_state", lambda: {"healthy": True, "message": "ok"})
+    monkeypatch.setattr(sync_router, "_wx_cli_track_state", lambda: {"healthy": True, "message": "ok"})
+    monkeypatch.setattr(sync_router, "refresh_default_snapshots", lambda _db: None)
+    monkeypatch.setattr(sync_router.sync_runtime, "persist_sync_run", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sync_router, "sync_full", lambda _db, days: calls.__setitem__("chatlog", calls["chatlog"] + 1) or {"fetched": 1, "inserted": 1})
+    monkeypatch.setattr(sync_router, "sync_from_wx_cli", lambda _db, days: calls.__setitem__("wx_cli", calls["wx_cli"] + 1) or {"fetched": 1, "inserted": 1})
+
+    payload = sync_router.sync_wechat_dual_track(days=1, db=_DBWithWrites())
+
+    assert payload["execution_order"] == ["chatlog", "wx_cli"]
+    assert calls == {"chatlog": 1, "wx_cli": 1}
 
 
 def test_sync_from_chatlog_fails_fast_when_session_times_out(monkeypatch):

@@ -1,10 +1,11 @@
 {
-  "api_key": "sk-your-siliconflow-key",
-  "api_url": "https://api.siliconflow.cn/v1",
-  "model": "Qwen/Qwen3-30B-A3B",
-  "tool_model": "Qwen/Qwen3-8B",
-  "tool_model_messages": "Qwen/Qwen3-8B",
-  "tool_model_emails": "Qwen/Qwen3-8B",
+  "api_key": "",
+  "api_url": "https://df.dawnloadai.com:9888/v1",
+  "model": "deepseek-ai/DeepSeek-V4-Pro",
+  "main_model": "deepseek-ai/DeepSeek-V4-Pro",
+  "tool_model": "MiniMax-M3",
+  "tool_model_messages": "MiniMax-M3",
+  "tool_model_emails": "MiniMax-M3",
   "max_tokens": 4096,
   "model_temperature": 0.7,
   "message_filters": {"external_only": true, "exclude_short": true, "exclude_system": true},
@@ -17,17 +18,32 @@
     "cooldown_seconds": 45,
     "latency_ref_ms": 3000,
     "main_channels": [
-      {"id": "main-1", "name": "\u4e3b\u901a\u9053-1", "model": "Qwen/Qwen3-30B-A3B", "weight": 1, "enabled": true, "api_url": "", "api_key": ""}
+      {"id": "dasheng-main-deepseek-v4-pro", "name": "\u5927\u5723Cloud \u4e3b\u6a21\u578b DeepSeek V4 Pro", "model": "deepseek-ai/DeepSeek-V4-Pro", "weight": 8, "enabled": true, "api_url": "https://df.dawnloadai.com:9888/v1", "api_key": "", "max_inflight": 4},
+      {"id": "dasheng-onepage-minimax-m3", "name": "\u5927\u5723Cloud \u4e00\u9875\u901a MiniMax M3", "model": "MiniMax-M3", "weight": 4, "enabled": true, "api_url": "https://df.dawnloadai.com:9888/v1", "api_key": "", "max_inflight": 4}
     ],
     "tool_channels": [
-      {"id": "tool-minimax-cn-m27", "name": "\u5c0f\u6a21\u578b/\u56de\u590d MiniMax.CN M2.7", "model": "MiniMax-M2.7", "weight": 1, "enabled": true, "api_url": "https://api.minimaxi.com/v1", "api_key": "your-minimax-api-key"},
-      {"id": "tool-sf-qwen8b", "name": "\u5c0f\u6a21\u578b/\u7845\u57fa Qwen3-8B", "model": "Qwen/Qwen3-8B", "weight": 1, "enabled": true, "api_url": "", "api_key": ""}
+      {"id": "dasheng-tool-minimax-m3", "name": "\u5927\u5723Cloud \u5c0f\u6a21\u578b MiniMax M3", "model": "MiniMax-M3", "weight": 8, "enabled": true, "api_url": "https://df.dawnloadai.com:9888/v1", "api_key": "", "max_inflight": 8},
+      {"id": "dasheng-email-minimax-m3", "name": "\u5927\u5723Cloud \u90ae\u4ef6 MiniMax M3", "model": "MiniMax-M3", "weight": 4, "enabled": true, "api_url": "https://df.dawnloadai.com:9888/v1", "api_key": "", "max_inflight": 8}
     ],
+    "main_module_channels": {
+      "default": ["dasheng-main-deepseek-v4-pro"],
+      "onepage": ["dasheng-onepage-minimax-m3"],
+      "market": ["dasheng-main-deepseek-v4-pro"],
+      "meetings": ["dasheng-main-deepseek-v4-pro"],
+      "counter": ["dasheng-main-deepseek-v4-pro"],
+      "contacts": ["dasheng-main-deepseek-v4-pro"],
+      "newswatch": ["dasheng-main-deepseek-v4-pro"],
+      "socialwatch": ["dasheng-main-deepseek-v4-pro"],
+      "mediawatch": ["dasheng-main-deepseek-v4-pro"],
+      "mpwatch": ["dasheng-main-deepseek-v4-pro"],
+      "minuteswatch": ["dasheng-main-deepseek-v4-pro"]
+    },
     "tool_route_channels": {
-      "default": ["tool-sf-qwen8b"],
-      "messages": ["tool-sf-qwen8b"],
-      "emails": ["tool-sf-qwen8b"],
-      "reply": ["tool-minimax-cn-m27"]
+      "default": ["dasheng-tool-minimax-m3"],
+      "messages": ["dasheng-tool-minimax-m3"],
+      "emails": ["dasheng-email-minimax-m3"],
+      "minutes": ["dasheng-tool-minimax-m3"],
+      "reply": ["dasheng-tool-minimax-m3"]
     }
   }
 }

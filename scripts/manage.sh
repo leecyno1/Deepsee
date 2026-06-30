@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd -P)"
 VENV_DIR="$ROOT_DIR/.venv"
 REQ_FILE="$ROOT_DIR/requirements.txt"
 ENV_FILE="$ROOT_DIR/.env"
@@ -12,6 +12,7 @@ BACKUP_DIR="$ROOT_DIR/backups"
 PROD_LITE_ENV_FILE="$ROOT_DIR/.env.production-lite.example"
 
 APP_IMPORT="app.main:app"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 color() { printf "\033[%sm%s\033[0m\n" "$1" "$2"; }
 info() { color "36" "$1"; }
@@ -245,6 +246,19 @@ pid_on_port() {
   lsof -nPiTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -n1 || true
 }
 
+pid_cwd() {
+  local pid=${1:-}
+  [[ -n "$pid" ]] || return 1
+  lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n1
+}
+
+pid_belongs_to_root() {
+  local pid=${1:-}
+  local cwd
+  cwd=$(pid_cwd "$pid")
+  [[ -n "$cwd" && "$cwd" == "$ROOT_DIR" ]]
+}
+
 health_ok() {
   local host=${1:-127.0.0.1}
   local port=${2:-8001}
@@ -257,6 +271,10 @@ is_running() {
   local pid
   pid=$(read_pid)
   if [[ -n "${pid}" ]] && ps -p "$pid" >/dev/null 2>&1; then
+    if ! pid_belongs_to_root "$pid"; then
+      rm -f "$PID_FILE"
+      return 1
+    fi
     local bound_pid
     bound_pid=$(pid_on_port "$port")
     if [[ -n "$bound_pid" ]] && [[ "$bound_pid" == "$pid" ]]; then
@@ -266,8 +284,10 @@ is_running() {
   local pid2
   pid2=$(pid_on_port "$port")
   if [[ -n "$pid2" ]] && ps -p "$pid2" >/dev/null 2>&1; then
-    echo "$pid2" > "$PID_FILE"
-    return 0
+    if pid_belongs_to_root "$pid2"; then
+      echo "$pid2" > "$PID_FILE"
+      return 0
+    fi
   fi
   return 1
 }
@@ -388,6 +408,8 @@ start_fg() {
 }
 
 stop_svc() {
+  ensure_env
+  export_env
   local host port
   host=${HOST:-127.0.0.1}
   port=${PORT:-8001}
@@ -409,7 +431,12 @@ stop_svc() {
   local pid2
   pid2=$(lsof -nPiTCP:$port -sTCP:LISTEN -t 2>/dev/null || true)
   if [[ -n "$pid2" ]]; then
-    warn "发现占用端口 $port 的进程 (PID: $pid2)，尝试结束"
+    if ! pid_belongs_to_root "$pid2"; then
+      warn "端口 $port 被其他目录的进程占用 (PID: $pid2)，不会自动结束"
+      warn "如需处理，请到对应项目目录执行停止命令"
+      return 1
+    fi
+    warn "发现占用端口 $port 的本项目进程 (PID: $pid2)，尝试结束"
     kill "$pid2" || true
     sleep 1
     if ps -p "$pid2" >/dev/null 2>&1; then
@@ -423,6 +450,8 @@ stop_svc() {
 }
 
 status_svc() {
+  ensure_env
+  export_env
   local host port pid
   host=${HOST:-127.0.0.1}
   port=${PORT:-8001}
@@ -468,9 +497,15 @@ sync_full() {
   local port days
   port=${PORT:-8001}
   days=${1:-30}
-  info "触发全量近${days}天: /api/sync/chatlog/full"
-  curl -fsS -X POST "http://127.0.0.1:$port/api/sync/chatlog/full?days=$days" || true
+  info "触发微信三轨同步近${days}天: /api/sync/wechat/dual-track"
+  curl -fsS -X POST "http://127.0.0.1:$port/api/sync/wechat/dual-track?days=$days" || true
   echo
+}
+
+migrate_svc() {
+  local action
+  action=${1:-status}
+  "$PYTHON_BIN" "$ROOT_DIR/scripts/migrate_db.py" "$action"
 }
 
 launchd_svc() {
@@ -502,6 +537,8 @@ usage() {
   printf '%s\n' '  diagnose       输出客户机完整诊断报告'
   printf '%s\n' '  backup         备份 .env、数据库和 AI 配置'
   printf '%s\n' '  restore <dir>  恢复备份（需 CONFIRM_RESTORE=RESTORE）'
+  printf '%s\n' '  migrate [status|apply|plan]  查看或执行数据库迁移'
+  printf '%s\n' '  release-check  运行发布前静态检查与关键测试'
   printf '%s\n' '  launchd <install|restart|status|logs|health|uninstall>  管理 macOS 开机自启'
   printf '%s\n' '  logs [-f]      查看日志（-f 持续跟随）'
   printf '%s\n' '  sync           触发一次从 chatlog 拉取增量'
@@ -520,6 +557,8 @@ usage() {
 }
 
 doctor_svc() {
+  ensure_env
+  export_env
   local host port pid pid_on_port
   host=${HOST:-127.0.0.1}
   port=${PORT:-8001}
@@ -556,6 +595,8 @@ case "$cmd" in
   diagnose) diagnose_svc ;;
   backup) backup_svc ;;
   restore) shift || true; restore_svc "${1:-}" ;;
+  migrate) shift || true; export_env || true; migrate_svc "${1:-status}" ;;
+  release-check) bash "$ROOT_DIR/scripts/release_check.sh" ;;
   launchd) shift || true; launchd_svc "${1:-status}" ;;
   logs) shift || true; logs_svc "${1:-}" ;;
   restart) stop_svc; start_bg ;;

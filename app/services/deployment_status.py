@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import platform
 import shutil
 import time
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ from .llm_client import load_ai_config
 from ..background import get_background_runtime_snapshot
 from .media_collector_runner import get_media_collector_run_state
 from .mp_rss_store import DEFAULT_MP_UPSTREAM_URL
+from .wx_cli_client import WxCliClient
 
 
 def _enabled_router_channels(router: dict[str, Any]) -> list[dict[str, Any]]:
@@ -134,18 +136,70 @@ def _cloud_agent_runtime_diagnostics() -> dict[str, Any]:
 def probe_chatlog_http(base_url: str | None = None, timeout: float | None = None) -> dict[str, Any]:
     base = str(base_url or settings.CHATLOG_HTTP_BASE or "").strip().rstrip("/")
     if not base:
-        return {"ok": False, "error": "CHATLOG_HTTP_BASE empty"}
+        return {
+            "ok": False,
+            "error": "CHATLOG_HTTP_BASE empty",
+            "hint": "请在 .env 配置 chatlog HTTP 地址，例如 http://127.0.0.1:5030",
+        }
     effective_timeout = float(timeout or getattr(settings, "CHATLOG_HTTP_SESSION_TIMEOUT_SECONDS", 5) or 5)
     url = f"{base}/api/v1/session"
+    system_name = platform.system().lower()
+    if system_name.startswith("win"):
+        hint = "Windows 请先打开微信电脑版，并运行 scripts\\run_chatlog_windows.ps1 start"
+    elif system_name == "darwin":
+        hint = "macOS 请先打开微信电脑版，并运行 bash scripts/chatlog_sidecar.sh status/start-gray"
+    else:
+        hint = "chatlog 依赖本机微信数据；云服务器通常需使用 wechatapi 主链路或连接本机 sidecar"
     try:
         resp = requests.get(url, timeout=effective_timeout)
         return {
             "ok": resp.status_code < 500,
             "status_code": resp.status_code,
             "url": url,
+            "hint": hint if resp.status_code >= 500 else "",
         }
     except Exception as exc:
-        return {"ok": False, "url": url, "error": str(exc)}
+        return {"ok": False, "url": url, "error": str(exc), "hint": hint}
+
+
+def probe_wx_cli(timeout: float | None = None) -> dict[str, Any]:
+    try:
+        probe = WxCliClient(timeout=int(timeout or min(5, settings.WX_CLI_TIMEOUT_SECONDS or 5))).probe()
+        if probe.get("ok"):
+            return {"ok": True, "bin": probe.get("bin"), "message": "wx-cli 可用"}
+        return {
+            "ok": False,
+            "bin": probe.get("bin"),
+            "work_dir": probe.get("work_dir"),
+            "config_path": probe.get("config_path"),
+            "all_keys_path": probe.get("all_keys_path"),
+            "key_count": probe.get("key_count"),
+            "error": probe.get("error") or "wx-cli unavailable",
+            "hint": "wx-cli 已完成 init 但当前未提取到可用密钥；macOS 若已重签并仍为 0 个密钥，多半是当前微信版本的已知兼容问题，先用 chatlog/WeChat API 兜底。",
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "hint": "请确认 wx-cli 已安装并完成 wx init；macOS 可能需要授权调试微信进程。",
+        }
+
+
+def _wechat_cloud_primary_enabled() -> bool:
+    try:
+        conf = load_ai_config()
+    except Exception:
+        conf = {}
+    provider = str(conf.get("send_provider") or "").strip()
+    return provider in {"", "wechatapi_gateway"}
+
+
+def _optional_fallback_message(kind: str) -> str:
+    if kind == "chatlog":
+        return "可选本地兜底未连接；云端 WeChat API 主链路可继续使用。本机使用时再打开微信电脑版并启动 chatlog。"
+    if kind == "wx_cli":
+        return "可选 wx-cli 本地兜底未安装；云端 WeChat API 主链路可继续使用。本机使用时再安装并初始化 wx-cli。"
+    return "可选本地兜底未启用；云端主链路可继续使用。"
 
 
 def probe_mp_upstream(db: Session | None = None, timeout: float = 3.0) -> dict[str, Any]:
@@ -304,14 +358,39 @@ def build_readiness_checks(db: Session) -> list[ReadinessCheck]:
         if "llm_config" not in {c.name for c in checks}:
             checks.append(ReadinessCheck(name="llm_config", status="fail", error_code="LLM-CFG-001", message=str(exc)))
 
-    # chatlog reachability
+    cloud_primary = _wechat_cloud_primary_enabled()
+
+    # chatlog reachability (optional fallback when cloud WeChat API is primary)
     try:
         probe = probe_chatlog_http()
         if not probe.get("ok"):
-            raise RuntimeError(str(probe.get("error") or f"http_status={probe.get('status_code')}"))
+            raise RuntimeError(
+                str(probe.get("error") or f"http_status={probe.get('status_code')}")
+                + (f"；{probe.get('hint')}" if probe.get("hint") else "")
+            )
         checks.append(ReadinessCheck(name="chatlog_http", status="ok", message=f"status={probe.get('status_code')}"))
     except Exception as exc:
-        checks.append(ReadinessCheck(name="chatlog_http", status="fail", error_code="CHATLOG-HTTP-001", message=str(exc)))
+        status = "warn" if cloud_primary else "fail"
+        checks.append(ReadinessCheck(
+            name="chatlog_http",
+            status=status,
+            error_code="CHATLOG-HTTP-001" if status == "fail" else "CHATLOG-OPTIONAL-001",
+            message=_optional_fallback_message("chatlog") if status == "warn" else str(exc),
+        ))
+
+    # wx-cli reachability (local CLI fallback)
+    try:
+        probe = probe_wx_cli()
+        if not probe.get("ok"):
+            raise RuntimeError(str(probe.get("error") or "wx-cli unavailable") + (f"；{probe.get('hint')}" if probe.get("hint") else ""))
+        checks.append(ReadinessCheck(name="wx_cli", status="ok", message=str(probe.get("message") or "ok")))
+    except Exception as exc:
+        checks.append(ReadinessCheck(
+            name="wx_cli",
+            status="warn",
+            error_code="WX-CLI-OPTIONAL-001",
+            message=_optional_fallback_message("wx_cli"),
+        ))
 
     # media collector installation
     try:
@@ -374,7 +453,7 @@ def summarize_diagnostics(db: Session | None = None) -> dict[str, Any]:
         "disk": _disk_info(Path.cwd()),
         "paths": _check_writable_paths(),
         "api_keys": _summarize_ai_config(ai_config),
-        "external_services": {"chatlog_http": probe_chatlog_http()},
+        "external_services": {"chatlog_http": probe_chatlog_http(), "wx_cli": probe_wx_cli()},
         "content_engines": {
             "media_collector": collector_installation_status(),
             "mp_upstream": probe_mp_upstream(db),

@@ -128,6 +128,7 @@ Deepsee 可通过 wechatapi.net 的 iPad 协议接入微信，也可在云服务
 ## 开发
 
 ```bash
+python -m pip install -r requirements-dev.txt
 python -m pytest -q
 bash scripts/manage.sh dev
 ```

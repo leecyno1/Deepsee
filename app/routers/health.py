@@ -53,7 +53,7 @@ def ready():
     finally:
         db.close()
 
-    failed = [c for c in checks if c.status != "ok"]
+    failed = [c for c in checks if c.status == "fail"]
     error_code = failed[0].error_code if failed else None
     return ReadyOut(
         status="ok" if not failed else "degraded",

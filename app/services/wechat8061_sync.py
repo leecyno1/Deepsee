@@ -34,6 +34,16 @@ _STATE: dict[str, Any] = {
 _ws = None
 
 
+def _is_deprecated_ws_url(url: str) -> bool:
+    value = (url or "").strip().lower()
+    return (
+        not value
+        or "{wxid}" in value
+        or "60.205.58.39:8088" in value
+        or "getsyncmsg" in value
+    )
+
+
 def get_status() -> dict[str, Any]:
     with _STATE_LOCK:
         return dict(_STATE)
@@ -52,13 +62,14 @@ def _set_state(**kwargs: Any) -> None:
 
 def _build_ws_url(raw: str, wxid: str) -> str:
     url = (raw or "").strip()
-    if not url:
+    if _is_deprecated_ws_url(url):
+        return ""
+    if not url.lower().startswith(("ws://", "wss://")):
         return ""
     if "{wxid}" in url:
-        try:
-            return url.replace("{wxid}", wxid)
-        except Exception:
-            return url
+        if not wxid:
+            return ""
+        return url.replace("{wxid}", wxid)
     if wxid:
         stripped = url.rstrip("/")
         if stripped.endswith("/ws"):
@@ -309,4 +320,3 @@ async def wechat8061_sync_loop() -> None:
                 pass
             _ws = None
             await asyncio.sleep(2)
-

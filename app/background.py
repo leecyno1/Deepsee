@@ -14,6 +14,7 @@ from .services import news_client
 from .services.wechat8061_sync import wechat8061_sync_loop
 from .services.aggregation_retention import prune_aggregation_data
 from .services.media_collector_runner import run_media_collector_once
+from .services.cache_cleanup import cleanup_application_cache
 
 logger = logging.getLogger(__name__)
 BACKGROUND_RUNTIME: dict[str, dict] = {}
@@ -82,6 +83,7 @@ _BACKGROUND_RUNTIME_NAMES = [
     "media_collector",
     "summary_overlay",
     "aggregation_retention",
+    "media_cache_cleanup",
 ]
 
 
@@ -252,6 +254,21 @@ def _run_aggregation_retention_job() -> dict:
     try:
         retention_days = int(settings.__dict__.get("AGGREGATION_RETENTION_DAYS", 90) or 90)
         result = prune_aggregation_data(db, retention_days=retention_days)
+        db.commit()
+        return result
+    finally:
+        db.close()
+
+
+def _run_media_cache_cleanup_job() -> dict:
+    db = SessionLocal()
+    try:
+        result = cleanup_application_cache(
+            db,
+            ttl_hours=int(settings.__dict__.get("MEDIA_CACHE_TTL_HOURS", 720) or 720),
+            max_mb=int(settings.__dict__.get("MEDIA_CACHE_MAX_MB", 256) or 256),
+            dry_run=False,
+        )
         db.commit()
         return result
     finally:
@@ -456,6 +473,26 @@ async def _aggregation_retention_loop():
         await asyncio.sleep(max(3600, interval))
 
 
+async def _media_cache_cleanup_loop():
+    loop_name = "media_cache_cleanup"
+    enabled = bool(settings.__dict__.get("MEDIA_CACHE_CLEANUP_ENABLED", True))
+    interval = int(settings.__dict__.get("MEDIA_CACHE_CLEANUP_INTERVAL_SECONDS", 86400) or 0)
+    if not enabled or interval <= 0:
+        _bg_mark_enabled(loop_name, False)
+        return
+    _bg_mark_enabled(loop_name, True)
+    await asyncio.sleep(10)
+    while True:
+        try:
+            _bg_mark_start(loop_name)
+            result = await asyncio.to_thread(_run_media_cache_cleanup_job)
+            logger.info("media cache cleanup finished: %s", result)
+            _bg_mark_success(loop_name)
+        except Exception as exc:
+            _bg_mark_error(loop_name, exc)
+        await asyncio.sleep(max(3600, interval))
+
+
 async def _summary_overlay_loop():
     loop_name = "summary_overlay"
     interval = int(settings.__dict__.get("SUMMARY_OVERLAY_INTERVAL_SECONDS", 3600) or 0)
@@ -480,9 +517,16 @@ async def start_background_loops(app: FastAPI | None = None) -> None:
     _bg_mark_enabled("chatlog_sync", bool(interval and interval > 0))
     if interval and interval > 0:
         asyncio.create_task(_sync_loop())
-    # Optional: wechat8061 message sync (controlled by ai_config.json wechatpad_sync_enabled)
-    _bg_mark_enabled("wechat8061_sync", True)
-    asyncio.create_task(wechat8061_sync_loop())
+    # Deprecated optional 8061 fallback; keep runtime entry but do not start unless explicitly enabled.
+    try:
+        from .services.llm_client import load_ai_config
+
+        wechat8061_enabled = bool((load_ai_config() or {}).get("wechatpad_sync_enabled", False))
+    except Exception:
+        wechat8061_enabled = False
+    _bg_mark_enabled("wechat8061_sync", wechat8061_enabled)
+    if wechat8061_enabled:
+        asyncio.create_task(wechat8061_sync_loop())
     # 邮件同步改为“仅手动触发”，不再定时自动拉取
     # 如需恢复定时，请显式改回并确保 EMAIL_SYNC_INTERVAL_SECONDS > 0
     # email_interval = int(settings.__dict__.get("EMAIL_SYNC_INTERVAL_SECONDS", 0) or 0)
@@ -514,3 +558,8 @@ async def start_background_loops(app: FastAPI | None = None) -> None:
     _bg_mark_enabled("aggregation_retention", bool(retention_interval and retention_interval > 0))
     if retention_interval and retention_interval > 0:
         asyncio.create_task(_aggregation_retention_loop())
+    cache_cleanup_enabled = bool(settings.__dict__.get("MEDIA_CACHE_CLEANUP_ENABLED", True))
+    cache_cleanup_interval = int(settings.__dict__.get("MEDIA_CACHE_CLEANUP_INTERVAL_SECONDS", 86400) or 0)
+    _bg_mark_enabled("media_cache_cleanup", bool(cache_cleanup_enabled and cache_cleanup_interval > 0))
+    if cache_cleanup_enabled and cache_cleanup_interval > 0:
+        asyncio.create_task(_media_cache_cleanup_loop())

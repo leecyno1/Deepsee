@@ -423,7 +423,7 @@ def test_list_contacts_omits_labels_unless_requested():
     assert full[0].labels == {"tags": ["重点"]}
 
 
-def test_list_contacts_includes_score_summary_when_available(monkeypatch):
+def test_list_contacts_includes_score_summary_when_requested(monkeypatch):
     row = _ContactRow(id="wxid_a", name="Alice", alias="A", rating=88, labels={"tags": ["重点"]})
     db = _DummyDb(
         execute_results=[
@@ -444,9 +444,27 @@ def test_list_contacts_includes_score_summary_when_available(monkeypatch):
         },
     )
 
-    out = contacts.list_contacts(include_labels=False, db=db)
+    out = contacts.list_contacts(include_labels=False, include_score_summary=True, db=db)
     assert out[0].score_summary["total_predictions"] == 6
     assert out[0].score_summary["top_asset_name"] == "紫金矿业"
+
+
+def test_list_contacts_skips_score_summary_by_default(monkeypatch):
+    row = _ContactRow(id="wxid_a", name="Alice", alias="A", rating=88, labels={"tags": ["重点"]})
+    db = _DummyDb(
+        execute_results=[
+            _DummyExecuteResult(1),
+            _DummyExecuteResult([row]),
+        ]
+    )
+
+    def _unexpected_summary(_db, _ids):
+        raise AssertionError("score summaries should be opt-in for the contact list")
+
+    monkeypatch.setattr(contacts, "build_contact_score_summaries", _unexpected_summary)
+
+    out = contacts.list_contacts(include_labels=False, db=db)
+    assert out[0].score_summary is None
 
 
 def test_list_contacts_supports_limit_offset_and_total_header():
@@ -477,10 +495,11 @@ def test_list_contact_ratings_returns_compact_mapping():
 
 
 
-def test_api_token_helpers_keep_token_parsing_but_leave_workspace_gate_disabled(monkeypatch):
+def test_api_token_helpers_enable_workspace_gate_when_required(monkeypatch):
     monkeypatch.setattr("app.main.settings.APP_ENV", "production")
+    monkeypatch.setattr("app.main.settings.API_AUTH_REQUIRED", True)
     monkeypatch.setattr("app.main.settings.API_TOKEN", "prod-token")
-    assert _api_token_auth_enabled() is False
+    assert _api_token_auth_enabled() is True
     assert _configured_api_tokens() == {"prod-token"}
     assert _is_api_auth_exempt_path("/api/health") is True
     assert _is_api_auth_exempt_path("/api/ready") is True
@@ -495,8 +514,9 @@ def test_api_token_helpers_keep_token_parsing_but_leave_workspace_gate_disabled(
     assert _extract_api_token(header_request) == "prod-token"
 
 
-def test_api_token_auth_stays_disabled_even_when_token_is_configured(monkeypatch):
+def test_api_token_auth_stays_disabled_for_local_default(monkeypatch):
     monkeypatch.setattr("app.main.settings.APP_ENV", "development")
+    monkeypatch.setattr("app.main.settings.API_AUTH_REQUIRED", False)
     monkeypatch.setattr("app.main.settings.API_TOKEN", "dev-local-token")
     assert _api_token_auth_enabled() is False
 

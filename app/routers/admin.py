@@ -21,7 +21,9 @@ from ..models import (
     Task,
 )
 from ..services.aggregation_retention import prune_aggregation_data
+from ..services.cache_cleanup import cleanup_application_cache
 from ..services.deployment_status import summarize_diagnostics
+from ..config import settings
 
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -49,6 +51,23 @@ def prune_aggregation_retention(payload: dict | None = None, db: Session = Depen
 @router.get("/diagnostics")
 def diagnostics(db: Session = Depends(_get_db)):
     return {"status": "ok", "diagnostics": summarize_diagnostics(db)}
+
+
+@router.post("/cache-cleanup")
+def cache_cleanup(payload: dict | None = None, db: Session = Depends(_get_db)):
+    payload = payload or {}
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "invalid payload")
+    dry_run = bool(payload.get("dry_run", True))
+    result = cleanup_application_cache(
+        db,
+        ttl_hours=int(payload.get("ttl_hours") or settings.__dict__.get("MEDIA_CACHE_TTL_HOURS", 720) or 720),
+        max_mb=int(payload.get("max_mb") or settings.__dict__.get("MEDIA_CACHE_MAX_MB", 256) or 256),
+        dry_run=dry_run,
+    )
+    if not dry_run:
+        db.commit()
+    return result
 
 
 def _parse_dt(v: Any) -> datetime | None:

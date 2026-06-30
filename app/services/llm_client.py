@@ -13,6 +13,13 @@ from typing import Optional, Dict, Any, List
 from ..config import settings
 
 
+DASHENG_CLOUD_PROVIDER_NAME = "大圣 Cloud（水木算力）"
+DASHENG_CLOUD_API_URL = "https://df.dawnloadai.com:9888/v1"
+DASHENG_CLOUD_MAIN_MODEL = "deepseek-ai/DeepSeek-V4-Pro"
+DASHENG_CLOUD_TOOL_MODEL = "MiniMax-M3"
+DASHENG_CLOUD_ONEPAGE_MODEL = "MiniMax-M3"
+
+
 DEFAULT_MODULE_PROMPTS: Dict[str, Dict[str, str]] = {
     "market": {
         "system": "\n".join(
@@ -544,35 +551,74 @@ def _to_route_map(raw: Any, default_map: Dict[str, List[str]], valid_ids: set[st
 
 
 def _default_model_router(conf: Dict[str, Any]) -> Dict[str, Any]:
-    main_model = str(conf.get("main_model") or conf.get("model") or "Qwen/Qwen3.5-4B").strip()
-    mid_model = str(conf.get("tool_model_messages") or conf.get("tool_model") or "Qwen/Qwen3-8B").strip()
-    tool_msg_model = str(conf.get("tool_model_messages") or conf.get("tool_model") or "Qwen/Qwen3-8B").strip()
-    tool_email_model = str(conf.get("tool_model_emails") or conf.get("tool_model") or "Qwen/Qwen3-8B").strip()
-    main_channels = [{"id": "main-1", "name": "main-1", "model": main_model, "weight": 1, "enabled": True, "api_url": "", "api_key": ""}]
+    main_model = str(conf.get("main_model") or conf.get("model") or DASHENG_CLOUD_MAIN_MODEL).strip()
+    mid_model = str(conf.get("tool_model_messages") or conf.get("tool_model") or DASHENG_CLOUD_TOOL_MODEL).strip()
+    tool_msg_model = str(conf.get("tool_model_messages") or conf.get("tool_model") or DASHENG_CLOUD_TOOL_MODEL).strip()
+    tool_email_model = str(conf.get("tool_model_emails") or conf.get("tool_model") or DASHENG_CLOUD_TOOL_MODEL).strip()
+    main_channels = [
+        {
+            "id": "dasheng-main-deepseek-v4-pro",
+            "name": "大圣Cloud 主模型 DeepSeek V4 Pro",
+            "model": main_model,
+            "weight": 8,
+            "enabled": True,
+            "api_url": DASHENG_CLOUD_API_URL,
+            "api_key": "",
+            "max_inflight": 4,
+        },
+        {
+            "id": "dasheng-onepage-minimax-m3",
+            "name": "大圣Cloud 一页通 MiniMax M3",
+            "model": DASHENG_CLOUD_ONEPAGE_MODEL,
+            "weight": 4,
+            "enabled": True,
+            "api_url": DASHENG_CLOUD_API_URL,
+            "api_key": "",
+            "max_inflight": 4,
+        },
+    ]
     mid_channels = [{"id": "mid-1", "name": "中模型-1", "model": mid_model, "weight": 1, "enabled": True, "api_url": "", "api_key": ""}]
     tool_channels = [
-        {"id": "tool-msg", "name": "tool-msg", "model": tool_msg_model, "weight": 1, "enabled": True, "api_url": "", "api_key": ""},
-        {"id": "tool-email", "name": "tool-email", "model": tool_email_model, "weight": 1, "enabled": True, "api_url": "", "api_key": ""},
+        {
+            "id": "dasheng-tool-minimax-m3",
+            "name": "大圣Cloud 小模型 MiniMax M3",
+            "model": tool_msg_model,
+            "weight": 8,
+            "enabled": True,
+            "api_url": DASHENG_CLOUD_API_URL,
+            "api_key": "",
+            "max_inflight": 8,
+        },
+        {
+            "id": "dasheng-email-minimax-m3",
+            "name": "大圣Cloud 邮件 MiniMax M3",
+            "model": tool_email_model,
+            "weight": 4,
+            "enabled": True,
+            "api_url": DASHENG_CLOUD_API_URL,
+            "api_key": "",
+            "max_inflight": 8,
+        },
     ]
     main_route_defaults = {
-        "default": ["main-1"],
-        "onepage": ["main-1"],
-        "market": ["main-1"],
-        "meetings": ["main-1"],
-        "counter": ["main-1"],
-        "contacts": ["main-1"],
-        "newswatch": ["main-1"],
-        "socialwatch": ["main-1"],
-        "mediawatch": ["main-1"],
-        "mpwatch": ["main-1"],
-        "minuteswatch": ["main-1"],
+        "default": ["dasheng-main-deepseek-v4-pro"],
+        "onepage": ["dasheng-onepage-minimax-m3"],
+        "market": ["dasheng-main-deepseek-v4-pro"],
+        "meetings": ["dasheng-main-deepseek-v4-pro"],
+        "counter": ["dasheng-main-deepseek-v4-pro"],
+        "contacts": ["dasheng-main-deepseek-v4-pro"],
+        "newswatch": ["dasheng-main-deepseek-v4-pro"],
+        "socialwatch": ["dasheng-main-deepseek-v4-pro"],
+        "mediawatch": ["dasheng-main-deepseek-v4-pro"],
+        "mpwatch": ["dasheng-main-deepseek-v4-pro"],
+        "minuteswatch": ["dasheng-main-deepseek-v4-pro"],
     }
     tool_route_defaults = {
-        "default": ["tool-msg"],
-        "messages": ["tool-msg"],
-        "emails": ["tool-email"],
-        "minutes": ["tool-msg"],
-        "reply": ["tool-msg"],
+        "default": ["dasheng-tool-minimax-m3"],
+        "messages": ["dasheng-tool-minimax-m3"],
+        "emails": ["dasheng-email-minimax-m3"],
+        "minutes": ["dasheng-tool-minimax-m3"],
+        "reply": ["dasheng-tool-minimax-m3"],
     }
     mid_route_defaults = {
         "default": ["mid-1"],
@@ -580,7 +626,7 @@ def _default_model_router(conf: Dict[str, Any]) -> Dict[str, Any]:
         "reply": ["mid-1"],
     }
     return {
-        "enabled": False,
+        "enabled": True,
         "strategy": "mixed",
         "prefer_router": True,
         "dynamic_weighting": True,
@@ -661,12 +707,12 @@ def load_ai_config() -> Dict[str, Any]:
     if not conf:
         conf = {
             "api_key": settings.SILICONFLOW_API_KEY or "",
-            "api_url": settings.SILICONFLOW_API_URL or "https://api.siliconflow.cn/v1",
-            "model": settings.SILICONFLOW_MODEL or "Qwen/Qwen3.5-4B",
-            "main_model": conf.get("main_model") or "Qwen/Qwen3-30B-A3B",
-            "tool_model": settings.SILICONFLOW_TOOL_MODEL or "Qwen/Qwen3-8B",
-            "tool_model_messages": settings.SILICONFLOW_TOOL_MODEL or "Qwen/Qwen3-8B",
-            "tool_model_emails": settings.SILICONFLOW_TOOL_MODEL or "Qwen/Qwen3-8B",
+            "api_url": settings.SILICONFLOW_API_URL or DASHENG_CLOUD_API_URL,
+            "model": settings.SILICONFLOW_MODEL or DASHENG_CLOUD_MAIN_MODEL,
+            "main_model": conf.get("main_model") or DASHENG_CLOUD_MAIN_MODEL,
+            "tool_model": settings.SILICONFLOW_TOOL_MODEL or DASHENG_CLOUD_TOOL_MODEL,
+            "tool_model_messages": settings.SILICONFLOW_TOOL_MODEL or DASHENG_CLOUD_TOOL_MODEL,
+            "tool_model_emails": settings.SILICONFLOW_TOOL_MODEL or DASHENG_CLOUD_TOOL_MODEL,
             "max_tokens": 4000,
             "model_temperature": 0.7,
             "message_filters": {"external_only": True, "exclude_short": True, "exclude_system": True},
@@ -674,12 +720,12 @@ def load_ai_config() -> Dict[str, Any]:
         }
     else:
         conf.setdefault("api_key", settings.SILICONFLOW_API_KEY or conf.get("api_key", ""))
-        conf.setdefault("api_url", settings.SILICONFLOW_API_URL or conf.get("api_url", "https://api.siliconflow.cn/v1"))
-        conf.setdefault("model", settings.SILICONFLOW_MODEL or conf.get("model", "Qwen/Qwen3.5-4B"))
-        conf.setdefault("main_model", conf.get("main_model") or "Qwen/Qwen3-30B-A3B")
-        conf.setdefault("tool_model", settings.SILICONFLOW_TOOL_MODEL or conf.get("tool_model", "Qwen/Qwen3-8B"))
-        conf.setdefault("tool_model_messages", conf.get("tool_model_messages") or conf.get("tool_model", "Qwen/Qwen3-8B"))
-        conf.setdefault("tool_model_emails", conf.get("tool_model_emails") or conf.get("tool_model", "Qwen/Qwen3-8B"))
+        conf.setdefault("api_url", settings.SILICONFLOW_API_URL or conf.get("api_url", DASHENG_CLOUD_API_URL))
+        conf.setdefault("model", settings.SILICONFLOW_MODEL or conf.get("model", DASHENG_CLOUD_MAIN_MODEL))
+        conf.setdefault("main_model", conf.get("main_model") or DASHENG_CLOUD_MAIN_MODEL)
+        conf.setdefault("tool_model", settings.SILICONFLOW_TOOL_MODEL or conf.get("tool_model", DASHENG_CLOUD_TOOL_MODEL))
+        conf.setdefault("tool_model_messages", conf.get("tool_model_messages") or conf.get("tool_model", DASHENG_CLOUD_TOOL_MODEL))
+        conf.setdefault("tool_model_emails", conf.get("tool_model_emails") or conf.get("tool_model", DASHENG_CLOUD_TOOL_MODEL))
         conf.setdefault("max_tokens", conf.get("max_tokens", 4000))
         conf.setdefault("model_temperature", conf.get("model_temperature", 0.7))
         conf.setdefault("message_filters", conf.get("message_filters", {"external_only": True, "exclude_short": True, "exclude_system": True}))

@@ -20,9 +20,9 @@ import os
 
 def _api_token_auth_enabled() -> bool:
     # Deepsee is now deployed as a private workspace app without a project-level
-    # login gate. Keep token helpers for downstream integrations, but do not
-    # block the UI/API behind API_TOKEN.
-    return False
+    # login gate by default. Cloud deployments can enable API_TOKEN protection
+    # with API_AUTH_REQUIRED=true while keeping local desktop use frictionless.
+    return bool(getattr(settings, "API_AUTH_REQUIRED", False))
 
 
 def _configured_api_tokens() -> set[str]:
@@ -76,7 +76,7 @@ async def app_lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     init_db()
-    app = FastAPI(title="WeChat Chatlog Analysis API", lifespan=app_lifespan)
+    app = FastAPI(title="Deepsee Personal Information Flow API", lifespan=app_lifespan)
 
     cors = _cors_options()
     if cors:
@@ -87,7 +87,12 @@ def create_app() -> FastAPI:
     @app.middleware("http")
     async def require_api_token(request: Request, call_next):
         configured = _configured_api_tokens()
-        if _api_token_auth_enabled() and configured and not _is_api_auth_exempt_path(request.url.path):
+        if _api_token_auth_enabled() and not _is_api_auth_exempt_path(request.url.path):
+            if not configured:
+                return JSONResponse(
+                    {"detail": "API auth is required but API_TOKEN is not configured"},
+                    status_code=503,
+                )
             provided = _extract_api_token(request)
             if provided not in configured:
                 return JSONResponse({"detail": "unauthorized"}, status_code=401)

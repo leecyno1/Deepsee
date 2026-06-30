@@ -705,6 +705,42 @@ def _coerce_message_time(value: Any) -> datetime | None:
         return None
 
 
+def _message_type_51_references_auto_reply(db: Session, chat_id: str, content_text: Any) -> bool:
+    """Return True when a msg_type=51 status callback is only an echo for our bot send.
+
+    WeChat iPad callbacks often emit <op><name>lastMessage</name> rows after an
+    outbound message.  If the embedded messageSvrId matches an outbound auto-reply
+    we already recorded, it is just provider echo and must not suppress future
+    replies.  If it points at an unknown message, treat the manual/human flag as
+    a real human takeover signal.
+    """
+    text = str(content_text or "")
+    match = re.search(r'"messageSvrId"\s*:\s*"?(\d+)"?', text)
+    if not match:
+        return False
+    message_svr_id = match.group(1)
+    recent_rows = (
+        db.query(Message)
+        .filter(Message.chat_id == chat_id, Message.direction == "out", Message.timestamp.is_not(None))
+        .order_by(Message.timestamp.desc(), Message.id.desc())
+        .limit(50)
+        .all()
+    )
+    for row in recent_rows:
+        meta = row.meta if isinstance(row.meta, dict) else {}
+        if not meta.get("auto_reply"):
+            continue
+        if str(meta.get("external_new_msg_id") or "").strip() == message_svr_id:
+            return True
+        provider_value = meta.get("provider_result")
+        provider = provider_value if isinstance(provider_value, dict) else {}
+        data_value = provider.get("data")
+        data = data_value if isinstance(data_value, dict) else {}
+        if str(data.get("newMsgId") or data.get("NewMsgId") or "").strip() == message_svr_id:
+            return True
+    return False
+
+
 def _has_human_manual_reply_since(db: Session, chat_id: str, threshold: datetime) -> bool:
     recent_rows = (
         db.query(Message)
@@ -721,7 +757,7 @@ def _has_human_manual_reply_since(db: Session, chat_id: str, threshold: datetime
             continue
         if str(meta.get("source") or "").strip() == "wechat_gateway":
             msg_type = str(meta.get("msg_type") or "").strip()
-            if msg_type == "51":
+            if msg_type == "51" and _message_type_51_references_auto_reply(db, chat_id, row.content_text):
                 continue
             if not (meta.get("human_manual") or meta.get("manual")):
                 continue

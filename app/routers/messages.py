@@ -6,21 +6,25 @@ from sqlalchemy.orm import Session
 from typing import Optional
 import threading
 from ..db import session_scope, SessionLocal
-from ..models import Message, Interaction, InteractionExt
+from ..models import Message, Interaction, InteractionExt, Contact
 from ..schemas import PaginatedMessages, MessageOut, UpDownVoteResult, TagUpdateIn, MessageDeriveRequest
+from ..config import settings
 from ..services.ai_tools import ensure_message_features, populate_fallback_derived
 from ..services.sync_service import _build_chatlog_media_url
+from ..services.wechatapi_client import WechatApiClient
 from ..services.llm_client import load_ai_config
 from ..services.message_filters import filter_effective_messages, WECHAT_NOISE_SENDER_IDS, WECHAT_NOISE_CHAT_IDS
-from starlette.responses import Response, RedirectResponse
+from starlette.responses import FileResponse, Response, RedirectResponse
 from typing import Dict, Any, List
-import csv, io, html, json
+import csv, hashlib, io, html, json, mimetypes, re
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from urllib.parse import quote
 import requests
 
 
 router = APIRouter(prefix="/api/messages", tags=["messages"])
+_SMALL_FILE_CACHE_LIMIT = 1024 * 1024
 
 # simple in-memory progress for derive tasks
 PROGRESS: Dict[str, Dict[str, Any]] = {}
@@ -43,6 +47,36 @@ _DROP_META_KEYS = {
     "content_text",
     "full_text",
 }
+
+
+def _contact_display_name(contact_id: Any, alias: Any = None, name: Any = None, fallback: Any = None) -> str:
+    contact_key = str(contact_id or "").strip()
+    for value in (alias, name, fallback, contact_key):
+        text_value = str(value or "").strip()
+        if text_value:
+            return text_value
+    return ""
+
+
+def _load_contact_display_names(db: Session, sender_ids: list[Any]) -> dict[str, str]:
+    contact_ids = sorted({str(value or "").strip() for value in sender_ids if str(value or "").strip()})
+    if not contact_ids:
+        return {}
+    try:
+        rows = db.execute(
+            select(Contact.id, Contact.alias, Contact.name).where(Contact.id.in_(contact_ids))
+        ).all()
+    except Exception:
+        return {}
+    display_names: dict[str, str] = {}
+    for contact_id, alias, name in rows:
+        contact_key = str(contact_id or "").strip()
+        if not contact_key:
+            continue
+        display_name = _contact_display_name(contact_key, alias=alias, name=name)
+        if display_name:
+            display_names[contact_key] = display_name
+    return display_names
 
 
 def _compose_message_display_summary(d: dict | None) -> str:
@@ -77,7 +111,7 @@ def _compose_message_display_summary(d: dict | None) -> str:
 def _normalize_media_host(host: str | None) -> str:
     v = (host or "").strip()
     if not v:
-        v = "http://127.0.0.1:5030"
+        v = (settings.CHATLOG_HTTP_BASE or "").strip() or "http://127.0.0.1:5030"
     if not v.startswith(("http://", "https://")):
         v = "http://" + v
     return v.rstrip("/")
@@ -119,6 +153,243 @@ def _build_image_candidates(*, host: str | None, md5: str | None, path: str | No
     return uniq
 
 
+def _looks_like_http_url(value: Any) -> str:
+    text_value = str(value or "").strip()
+    if text_value.startswith(("http://", "https://")):
+        return text_value
+    return ""
+
+
+def _build_file_candidates(
+    *,
+    host: str | None,
+    md5: str | None,
+    path: str | None,
+    direct_url: str | None,
+    contents: dict[str, Any] | None = None,
+) -> List[str]:
+    base = _normalize_media_host(host)
+    c = contents or {}
+    out: List[str] = []
+    for value in (
+        direct_url,
+        c.get("fileUrl"),
+        c.get("file_url"),
+        c.get("url"),
+        c.get("cdn_dataurl"),
+        c.get("cdndataurl"),
+        c.get("dataurl"),
+    ):
+        url_value = _looks_like_http_url(value)
+        if url_value:
+            out.append(url_value)
+    key = (md5 or c.get("md5") or c.get("fullmd5") or c.get("id") or c.get("mediaId") or "").strip()
+    rel = _encode_rel_path(path or c.get("path") or c.get("data") or c.get("relative") or c.get("localPath") or "")
+    if key:
+        out.append(f"{base}/file/{quote(key, safe='')}")
+    if rel:
+        out.append(f"{base}/data/{rel}")
+    seen = set()
+    uniq: List[str] = []
+    for u in out:
+        if not u or u in seen:
+            continue
+        seen.add(u)
+        uniq.append(u)
+    return uniq
+
+
+def _find_url_deep(value: Any) -> str:
+    if isinstance(value, str):
+        return _looks_like_http_url(value)
+    if isinstance(value, dict):
+        preferred = (
+            "fileUrl",
+            "file_url",
+            "downloadUrl",
+            "download_url",
+            "url",
+            "cdnUrl",
+            "cdn_url",
+        )
+        for key in preferred:
+            found = _find_url_deep(value.get(key))
+            if found:
+                return found
+        for item in value.values():
+            found = _find_url_deep(item)
+            if found:
+                return found
+    if isinstance(value, list):
+        for item in value:
+            found = _find_url_deep(item)
+            if found:
+                return found
+    return ""
+
+
+def _is_file_appmsg(appmsg: dict[str, Any] | None) -> bool:
+    if not isinstance(appmsg, dict):
+        return False
+    appmsg_type = str(appmsg.get("appmsg_type") or "").strip()
+    if appmsg_type == "6":
+        return True
+    if appmsg_type == "24" and (
+        appmsg.get("cdn_dataurl")
+        or appmsg.get("cdndataurl")
+        or appmsg.get("datatitle")
+        or appmsg.get("datafmt")
+    ):
+        return True
+    return False
+
+
+def _parse_file_size(*values: Any) -> int | None:
+    for value in values:
+        text_value = str(value or "").strip()
+        if not text_value:
+            continue
+        try:
+            parsed = int(float(text_value))
+            if parsed >= 0:
+                return parsed
+        except Exception:
+            continue
+    return None
+
+
+def _safe_download_name(value: Any, fallback: str = "wechat-file") -> str:
+    text_value = str(value or "").strip() or fallback
+    text_value = re.sub(r"[\\/:*?\"<>|\r\n\t]+", "_", text_value)
+    text_value = text_value.strip(" ._")
+    return (text_value or fallback)[:180]
+
+
+def _wechat_file_cache_dir() -> Path:
+    path = Path(__file__).resolve().parents[2] / "data" / "media_cache" / "wechat_files"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _wechat_image_cache_dir() -> Path:
+    path = Path(__file__).resolve().parents[2] / "data" / "media_cache" / "wechat_images"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _cached_file_path(url: str, filename: str) -> Path:
+    digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:24]
+    return _wechat_file_cache_dir() / f"{digest}__{_safe_download_name(filename)}"
+
+
+def _guess_image_suffix(media_type: str | None, url: str = "") -> str:
+    media = str(media_type or "").split(";", 1)[0].strip().lower()
+    if media == "image/png":
+        return ".png"
+    if media in {"image/jpeg", "image/jpg"}:
+        return ".jpg"
+    if media == "image/gif":
+        return ".gif"
+    if media == "image/webp":
+        return ".webp"
+    guessed = mimetypes.guess_extension(media or "")
+    if guessed:
+        return ".jpg" if guessed == ".jpe" else guessed
+    suffix = Path(str(url or "").split("?", 1)[0]).suffix.lower()
+    if suffix in {".jpg", ".jpeg", ".png", ".gif", ".webp"}:
+        return suffix
+    return ".jpg"
+
+
+def _cached_image_path(cache_key: str, suffix: str = ".jpg") -> Path:
+    digest = hashlib.sha256(str(cache_key or "").encode("utf-8")).hexdigest()[:32]
+    return _wechat_image_cache_dir() / f"{digest}{suffix or '.jpg'}"
+
+
+def _serve_or_cache_image_url(url: str, cache_key: str):
+    if not url:
+        return None
+    existing = list(_wechat_image_cache_dir().glob(f"{hashlib.sha256(str(cache_key or url).encode('utf-8')).hexdigest()[:32]}.*"))
+    for path in existing:
+        if path.exists() and path.stat().st_size > 0:
+            media_type = mimetypes.guess_type(str(path))[0] or "image/jpeg"
+            return FileResponse(str(path), media_type=media_type, filename=path.name, content_disposition_type="inline")
+    tmp_path = _cached_image_path(cache_key or url, ".part")
+    try:
+        with requests.get(url, stream=True, allow_redirects=True, timeout=15) as resp:
+            if resp.status_code >= 400:
+                return None
+            content_type = resp.headers.get("content-type") or ""
+            suffix = _guess_image_suffix(content_type, url)
+            cache_path = _cached_image_path(cache_key or url, suffix)
+            total = 0
+            with open(tmp_path, "wb") as fh:
+                for chunk in resp.iter_content(chunk_size=64 * 1024):
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > 12 * 1024 * 1024:
+                        try:
+                            tmp_path.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                        return RedirectResponse(url=url, status_code=302)
+                    fh.write(chunk)
+        if tmp_path.stat().st_size <= 0:
+            tmp_path.unlink(missing_ok=True)
+            return None
+        tmp_path.replace(cache_path)
+        media_type = mimetypes.guess_type(str(cache_path))[0] or (content_type.split(";", 1)[0] if content_type else "image/jpeg")
+        return FileResponse(str(cache_path), media_type=media_type, filename=cache_path.name, content_disposition_type="inline")
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return None
+
+
+def _serve_or_cache_small_file(url: str, filename: str, expected_size: int | None = None):
+    if not url:
+        return None
+    filename = _safe_download_name(filename)
+    cache_path = _cached_file_path(url, filename)
+    media_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    if cache_path.exists() and cache_path.stat().st_size > 0:
+        return FileResponse(str(cache_path), media_type=media_type, filename=filename, content_disposition_type="inline")
+    if expected_size is not None and expected_size > _SMALL_FILE_CACHE_LIMIT:
+        return RedirectResponse(url=url, status_code=302)
+    tmp_path = cache_path.with_suffix(cache_path.suffix + ".part")
+    try:
+        with requests.get(url, stream=True, allow_redirects=True, timeout=12) as resp:
+            if resp.status_code >= 400:
+                return None
+            content_length = _parse_file_size(resp.headers.get("content-length"))
+            if content_length is not None and content_length > _SMALL_FILE_CACHE_LIMIT:
+                return RedirectResponse(url=url, status_code=302)
+            total = 0
+            with open(tmp_path, "wb") as fh:
+                for chunk in resp.iter_content(chunk_size=64 * 1024):
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > _SMALL_FILE_CACHE_LIMIT:
+                        try:
+                            tmp_path.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                        return RedirectResponse(url=url, status_code=302)
+                    fh.write(chunk)
+        tmp_path.replace(cache_path)
+        return FileResponse(str(cache_path), media_type=media_type, filename=filename, content_disposition_type="inline")
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return None
+
+
 def _coerce_json_field(v: Any) -> Any:
     """Coerce possibly-stringified JSON fields (meta/derived/tags) to python objects."""
     if v is None:
@@ -136,9 +407,37 @@ def _coerce_json_field(v: Any) -> Any:
     return v
 
 
+def _wechat_gateway_content_string(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("string", "content", "Content", "text"):
+            found = _wechat_gateway_content_string(value.get(key))
+            if found:
+                return found
+    return ""
+
+
+def _extract_wechat_xml_payload(content: Any) -> str:
+    text_value = _wechat_gateway_content_string(content) or str(content or "")
+    text_value = text_value.strip()
+    if not text_value:
+        return ""
+    positions = [
+        pos for pos in (
+            text_value.find("<?xml"),
+            text_value.lower().find("<msg"),
+            text_value.lower().find("<appmsg"),
+        )
+        if pos >= 0
+    ]
+    if positions:
+        text_value = text_value[min(positions):].strip()
+    return text_value
+
 
 def _extract_wechat_appmsg(content: Any) -> dict[str, str]:
-    text_value = str(content or "").strip()
+    text_value = _extract_wechat_xml_payload(content)
     if not text_value or "<appmsg" not in text_value.lower():
         return {}
     try:
@@ -158,14 +457,83 @@ def _extract_wechat_appmsg(content: Any) -> dict[str, str]:
                 return value
         return ""
 
+    record_root = None
+    record_text = find_text(".//appmsg/recorditem", ".//recorditem", ".//appmsg/announcement", ".//announcement")
+    if record_text and "<" in record_text:
+        try:
+            import xml.etree.ElementTree as ET
+            record_root = ET.fromstring(record_text)
+        except Exception:
+            record_root = None
+
+    def find_record_text(*paths: str) -> str:
+        if record_root is None:
+            return ""
+        for path in paths:
+            try:
+                value = record_root.findtext(path)
+            except Exception:
+                value = None
+            value = str(value or "").strip()
+            if value:
+                return value
+        return ""
+
+    appmsg_type = find_text(".//appmsg/type", ".//type")
     return {
+        "appmsg_type": appmsg_type,
         "title": find_text(".//appmsg/title", ".//title"),
         "desc": find_text(".//appmsg/des", ".//appmsg/description", ".//des"),
         "url": find_text(".//appmsg/url", ".//url"),
         "sourceusername": find_text(".//appmsg/sourceusername", ".//sourceusername"),
         "sourcedisplayname": find_text(".//appmsg/sourcedisplayname", ".//sourcedisplayname"),
         "thumburl": find_text(".//appmsg/thumburl", ".//thumburl", ".//weappinfo/weappiconurl"),
+        "attachid": find_text(".//appmsg/appattach/attachid", ".//appattach/attachid"),
+        "cdnattachurl": find_text(".//appmsg/appattach/cdnattachurl", ".//appattach/cdnattachurl"),
+        "aeskey": find_text(".//appmsg/appattach/aeskey", ".//appattach/aeskey"),
+        "fileext": find_text(".//appmsg/appattach/fileext", ".//appattach/fileext"),
+        "totallen": find_text(".//appmsg/appattach/totallen", ".//appattach/totallen"),
+        "md5": find_text(".//appmsg/md5", ".//md5"),
+        "cdn_dataurl": find_record_text(".//dataitem/cdn_dataurl", ".//dataitem/cdndataurl"),
+        "cdndataurl": find_record_text(".//dataitem/cdndataurl", ".//dataitem/cdn_dataurl"),
+        "cdndatakey": find_record_text(".//dataitem/cdn_datakey", ".//dataitem/cdndatakey"),
+        "datatitle": find_record_text(".//dataitem/datatitle"),
+        "datadesc": find_record_text(".//dataitem/datadesc"),
+        "datafmt": find_record_text(".//dataitem/datafmt"),
+        "datasize": find_record_text(".//dataitem/datasize", ".//dataitem/fullsize"),
     }
+
+
+def _extract_wechat_img(content: Any) -> dict[str, str]:
+    text_value = _extract_wechat_xml_payload(content)
+    if not text_value or "<img" not in text_value.lower():
+        return {}
+    try:
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(text_value)
+    except Exception:
+        return {}
+    img = root.find(".//img")
+    if img is None:
+        return {}
+    out: dict[str, str] = {}
+    for key in (
+        "cdnthumburl",
+        "cdnmidimgurl",
+        "cdnbigimgurl",
+        "cdnthumbaeskey",
+        "aeskey",
+        "md5",
+        "length",
+        "hdlength",
+        "cdnthumblength",
+        "cdnthumbheight",
+        "cdnthumbwidth",
+    ):
+        value = str(img.attrib.get(key) or "").strip()
+        if value:
+            out[key] = value
+    return out
 
 
 def _is_wechat_mp_message(sender_id: Any, chat_id: Any, meta: Any = None) -> bool:
@@ -220,11 +588,30 @@ def _normalize_wechat_gateway_message_fields(sender_id: Any, sender_name: Any, c
     out_meta = dict(meta_obj) if isinstance(meta_obj, dict) else {}
     contents = out_meta.get('contents') if isinstance(out_meta.get('contents'), dict) else {}
 
+    # chatlog / wx-cli imported messages may keep WeChat XML in content_text while meta is empty.
+    # Parse it here as well, so file/app messages can be rendered and clicked from the list.
+    raw_content_from_text = _extract_wechat_xml_payload(content_text)
+    if raw_content_from_text and "<appmsg" in raw_content_from_text.lower():
+        appmsg = _extract_wechat_appmsg(raw_content_from_text)
+        if appmsg:
+            extracted = dict(contents)
+            for key, val in appmsg.items():
+                if val:
+                    extracted[key] = val
+            out_meta['contents'] = extracted
+            contents = extracted
+            is_file_appmsg = _is_file_appmsg(appmsg)
+            out_type = 'file' if is_file_appmsg else 'link'
+            if appmsg.get('title'):
+                out_meta['display_title'] = appmsg.get('title')
+            elif is_file_appmsg and (appmsg.get("datatitle") or appmsg.get("datafmt")):
+                out_meta['display_title'] = appmsg.get("datatitle") or appmsg.get("datafmt")
+
     if str(out_meta.get('source') or '').strip() == 'wechat_gateway':
         raw = out_meta.get('raw') if isinstance(out_meta.get('raw'), dict) else {}
         data = raw.get('Data') if isinstance(raw.get('Data'), dict) else {}
-        raw_content = str(data.get('Content') or content_text or '').strip()
-        if raw_content.startswith('<'):
+        raw_content = _extract_wechat_xml_payload(data.get('Content')) or _extract_wechat_xml_payload(content_text)
+        if raw_content:
             appmsg = _extract_wechat_appmsg(raw_content)
             if appmsg:
                 extracted = dict(contents)
@@ -233,17 +620,29 @@ def _normalize_wechat_gateway_message_fields(sender_id: Any, sender_name: Any, c
                         extracted[key] = val
                 out_meta['contents'] = extracted
                 contents = extracted
-                out_type = 'link'
+                is_file_appmsg = _is_file_appmsg(appmsg)
+                out_type = 'file' if is_file_appmsg else 'link'
                 if appmsg.get('title'):
                     out_meta['display_title'] = appmsg.get('title')
+                elif is_file_appmsg and (appmsg.get("datatitle") or appmsg.get("datafmt")):
+                    out_meta['display_title'] = appmsg.get("datatitle") or appmsg.get("datafmt")
             try:
                 import xml.etree.ElementTree as ET
-                root = ET.fromstring(raw_content)
-                img = root.find('img')
-                if img is not None:
+                img_fields = _extract_wechat_img(raw_content)
+                if img_fields:
                     extracted = dict(contents)
-                    for key in ('cdnthumburl', 'md5', 'aeskey', 'cdnmidimgurl'):
-                        val = str(img.attrib.get(key) or '').strip()
+                    for key in (
+                        'cdnthumburl',
+                        'cdnmidimgurl',
+                        'cdnbigimgurl',
+                        'cdnthumbaeskey',
+                        'md5',
+                        'aeskey',
+                        'length',
+                        'hdlength',
+                        'cdnthumblength',
+                    ):
+                        val = str(img_fields.get(key) or '').strip()
                         if val:
                             extracted[key] = val
                     out_meta['contents'] = extracted
@@ -258,13 +657,16 @@ def _normalize_wechat_gateway_message_fields(sender_id: Any, sender_name: Any, c
         talker_id_text = str(chat_id or '').strip()
         talker_name_text = str(out_talker_name or '').strip()
         lookup_db = db
-        if sender_id_text and sender_name_text == sender_id_text and lookup_db is not None:
+        if sender_id_text and lookup_db is not None:
             try:
                 row = lookup_db.execute(text('select alias, name from contacts where id = :id'), {'id': sender_id_text}).fetchone()
                 if row:
-                    alias = str(row[0] or '').strip()
-                    name = str(row[1] or '').strip()
-                    out_sender_name = alias or name or out_sender_name
+                    out_sender_name = _contact_display_name(
+                        sender_id_text,
+                        alias=row[0],
+                        name=row[1],
+                        fallback=out_sender_name,
+                    )
             except Exception:
                 pass
         if talker_id_text and talker_name_text == talker_id_text and lookup_db is not None:
@@ -649,25 +1051,186 @@ def get_db():
 
 @router.get("/media/image")
 def resolve_image_media(
+    message_id: int | None = Query(default=None),
     md5: str | None = Query(default=None),
     path: str | None = Query(default=None),
     host: str | None = Query(default=None),
     url: str | None = Query(default=None, description="optional direct media url"),
+    db: Session = Depends(get_db),
 ):
-    candidates = _build_image_candidates(host=host, md5=md5, path=path, direct_url=url)
+    message = db.get(Message, message_id) if message_id else None
+    meta_obj = _coerce_json_field(message.meta) if message and message.meta is not None else None
+    meta_obj = meta_obj if isinstance(meta_obj, dict) else {}
+    contents = meta_obj.get("contents") if isinstance(meta_obj.get("contents"), dict) else {}
+
+    raw_xml = _extract_wechat_xml_payload(message.content_text) if message else ""
+    if message and not raw_xml:
+        raw = meta_obj.get("raw") if isinstance(meta_obj.get("raw"), dict) else {}
+        data = raw.get("Data") if isinstance(raw.get("Data"), dict) else {}
+        raw_xml = _extract_wechat_xml_payload(data.get("Content"))
+
+    img_fields = _extract_wechat_img(raw_xml)
+    if img_fields:
+        merged_contents = dict(contents)
+        for key, val in img_fields.items():
+            if val and not merged_contents.get(key):
+                merged_contents[key] = val
+        contents = merged_contents
+
+    aeskey = str(contents.get("aeskey") or contents.get("cdnthumbaeskey") or "").strip()
+    message_media_url = message.media_url if message else ""
+    file_id = str(
+        path
+        or contents.get("cdnmidimgurl")
+        or contents.get("cdnbigimgurl")
+        or contents.get("cdnthumburl")
+        or message_media_url
+        or ""
+    ).strip()
+    image_md5 = str(md5 or contents.get("md5") or "").strip()
+    direct_url = _looks_like_http_url(url) or _looks_like_http_url(message.media_url if message else "") or ""
+    candidates = _build_image_candidates(host=host, md5=image_md5, path=file_id, direct_url=direct_url)
+    configured_base = (settings.CHATLOG_HTTP_BASE or "").strip()
+    if configured_base and configured_base.rstrip("/") != _normalize_media_host(host).rstrip("/"):
+        candidates.extend(_build_image_candidates(host=configured_base, md5=image_md5, path=file_id, direct_url=None))
+
+    cache_key = "|".join([str(message_id or ""), image_md5, file_id, direct_url])
+    for candidate in candidates:
+        served = _serve_or_cache_image_url(candidate, cache_key or candidate)
+        if served is not None:
+            return served
+
+    if raw_xml and "<img" in raw_xml.lower():
+        try:
+            client = WechatApiClient()
+            if client.configured():
+                for img_type in (2, 1, 3):
+                    try:
+                        result = client.download_image_by_xml(xml=raw_xml, img_type=img_type)
+                        file_url = _find_url_deep(result)
+                        if file_url:
+                            served = _serve_or_cache_image_url(file_url, f"{cache_key}|xml|{img_type}")
+                            return served or RedirectResponse(url=file_url, status_code=302)
+                    except Exception:
+                        continue
+                if aeskey and file_id:
+                    for img_type in ("mid", "hd", "thumb"):
+                        try:
+                            result = client.download_image(aeskey=aeskey, file_id=file_id, img_type=img_type)
+                            file_url = _find_url_deep(result)
+                            if file_url:
+                                served = _serve_or_cache_image_url(file_url, f"{cache_key}|cdn|{img_type}")
+                                return served or RedirectResponse(url=file_url, status_code=302)
+                        except Exception:
+                            continue
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"image download failed: {exc}") from exc
+
     if not candidates:
         raise HTTPException(status_code=400, detail="missing md5/path/url")
 
-    for c in candidates:
-        try:
-            # GET (not HEAD): chatlog 会在这里做解密并返回正确 content-type/302。
-            resp = requests.get(c, allow_redirects=False, timeout=4)
-            if resp.status_code in (200, 301, 302):
-                return RedirectResponse(url=c, status_code=302)
-        except Exception:
-            continue
-
     return RedirectResponse(url=candidates[0], status_code=302)
+
+
+@router.get("/media/file")
+def resolve_file_media(
+    message_id: int | None = Query(default=None),
+    md5: str | None = Query(default=None),
+    path: str | None = Query(default=None),
+    host: str | None = Query(default=None),
+    url: str | None = Query(default=None, description="optional direct media url"),
+    name: str | None = Query(default=None, description="optional display filename"),
+    db: Session = Depends(get_db),
+):
+    message = db.get(Message, message_id) if message_id else None
+    meta_obj = _coerce_json_field(message.meta) if message and message.meta is not None else None
+    meta_obj = meta_obj if isinstance(meta_obj, dict) else {}
+    contents = meta_obj.get("contents") if isinstance(meta_obj.get("contents"), dict) else {}
+
+    if message:
+        appmsg = _extract_wechat_appmsg(message.content_text)
+        if not appmsg:
+            raw_meta = _coerce_json_field(message.meta) if message.meta is not None else None
+            if isinstance(raw_meta, dict):
+                raw = raw_meta.get("raw") if isinstance(raw_meta.get("raw"), dict) else {}
+                data = raw.get("Data") if isinstance(raw.get("Data"), dict) else {}
+                appmsg = _extract_wechat_appmsg(data.get("Content"))
+        if appmsg:
+            merged_contents = dict(contents)
+            for key, val in appmsg.items():
+                if val and not merged_contents.get(key):
+                    merged_contents[key] = val
+            contents = merged_contents
+
+    filename = _safe_download_name(
+        name
+        or contents.get("title")
+        or contents.get("datatitle")
+        or contents.get("desc")
+        or contents.get("datadesc")
+        or f"wechat-file-{message_id or md5 or 'unknown'}"
+    )
+    expected_size = _parse_file_size(
+        contents.get("totallen"),
+        contents.get("datasize"),
+        contents.get("fullsize"),
+    )
+    candidates = _build_file_candidates(host=host, md5=md5, path=path, direct_url=url, contents=contents)
+    for candidate in candidates:
+        served = _serve_or_cache_small_file(candidate, filename, expected_size=expected_size)
+        if served is not None:
+            return served
+
+    raw_xml = _extract_wechat_xml_payload(message.content_text) if message else ""
+    if message and (not raw_xml or "<appmsg" not in raw_xml.lower()):
+        raw_meta = _coerce_json_field(message.meta) if message.meta is not None else None
+        if isinstance(raw_meta, dict):
+            raw = raw_meta.get("raw") if isinstance(raw_meta.get("raw"), dict) else {}
+            data = raw.get("Data") if isinstance(raw.get("Data"), dict) else {}
+            raw_xml = _extract_wechat_xml_payload(data.get("Content"))
+    if raw_xml and "<appmsg" in raw_xml.lower():
+        last_error: Exception | None = None
+        try:
+            client = WechatApiClient()
+            if client.configured():
+                try:
+                    result = client.download_file_by_xml(xml=raw_xml)
+                    file_url = _find_url_deep(result)
+                    if file_url:
+                        served = _serve_or_cache_small_file(file_url, filename, expected_size=expected_size)
+                        return served or RedirectResponse(url=file_url, status_code=302)
+                except Exception as exc:
+                    last_error = exc
+                aeskey = str(contents.get("aeskey") or contents.get("cdndatakey") or contents.get("cdn_datakey") or "").strip()
+                file_id = str(contents.get("cdnattachurl") or contents.get("cdndataurl") or contents.get("cdn_dataurl") or "").strip()
+                total_size = str(expected_size if expected_size is not None else "").strip()
+                suffix = str(contents.get("fileext") or contents.get("datafmt") or "").strip().lstrip(".")
+                if aeskey and file_id:
+                    result = client.download_cdn_file(
+                        aeskey=aeskey,
+                        file_id=file_id,
+                        total_size=total_size or "0",
+                        suffix=suffix,
+                    )
+                    file_url = _find_url_deep(result)
+                    if file_url:
+                        served = _serve_or_cache_small_file(file_url, filename, expected_size=expected_size)
+                        return served or RedirectResponse(url=file_url, status_code=302)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"WeChat API 文件下载失败：{exc}",
+            )
+        if last_error:
+            raise HTTPException(
+                status_code=502,
+                detail=f"WeChat API 文件下载失败：{last_error}",
+            )
+
+    raise HTTPException(
+        status_code=404,
+        detail=f"未找到可浏览文件链接：{name or md5 or message_id or 'unknown'}",
+    )
 
 
 @router.get("", response_model=PaginatedMessages)
@@ -764,9 +1327,29 @@ def list_messages(
             if fast
             else (db.execute(count_sql, {k: v for k, v in params.items() if k != "limit" and k != "offset"}).scalar() or 0)
         )
+        contact_display_names = _load_contact_display_names(db, [row.get("sender_id") for row in items])
         data = []
         for row in items:
             rd = dict(row)
+            normalized = _normalize_wechat_gateway_message_fields(
+                rd.get("sender_id"),
+                rd.get("sender_name"),
+                rd.get("chat_id"),
+                rd.get("talker_name"),
+                rd.get("type"),
+                rd.get("content_text"),
+                rd.get("media_url"),
+                rd.get("meta"),
+                db=db,
+            )
+            rd["sender_name"] = normalized.get("sender_name")
+            rd["talker_name"] = normalized.get("talker_name")
+            rd["type"] = normalized.get("type")
+            rd["media_url"] = normalized.get("media_url")
+            rd["meta"] = normalized.get("meta")
+            sender_key = str(rd.get("sender_id") or "").strip()
+            if sender_key and contact_display_names.get(sender_key):
+                rd["sender_name"] = contact_display_names[sender_key]
             msg_id = rd.get("id")
             if msg_id in derived_map:
                 rd["derived"] = derived_map[msg_id]
@@ -796,12 +1379,17 @@ def list_messages(
                 rd["meta"] = None
             else:
                 rd["meta"] = _sanitize_meta_for_list(rd.get("meta"))
-            rd["content_text"] = _truncate_text(rd.get("content_text"), content_max_chars)
+            display_title = ""
+            try:
+                display_title = str(((rd.get("meta") or {}).get("display_title") or "")).strip()
+            except Exception:
+                display_title = ""
+            rd["content_text"] = _truncate_text(display_title or rd.get("content_text"), content_max_chars)
             
             # include raw meta to allow frontend to render link/image badges
-            if rd.get("meta") is None and hasattr(row, 'meta'):
+            if include_meta and rd.get("meta") is None and "meta" in row:
                 try:
-                    rd["meta"] = row["meta"]
+                    rd["meta"] = _coerce_json_field(row["meta"])
                 except Exception:
                     pass
             # 兼容旧前端：回填 key_info/key_info_origin
@@ -881,14 +1469,17 @@ def list_messages(
     # except Exception:
     #     concurrency = 8
     # ensure_message_features(db, list(items), concurrency=concurrency)
+    contact_display_names = _load_contact_display_names(db, [item.sender_id for item in items])
     compat_items: list[MessageOut] = []
     for i in items:
         normalized = _normalize_wechat_gateway_message_fields(i.sender_id, i.sender_name, i.chat_id, i.talker_name, i.type, i.content_text, i.media_url, i.meta, db=db)
+        sender_key = str(i.sender_id or "").strip()
+        sender_display_name = contact_display_names.get(sender_key) or normalized['sender_name']
         out = MessageOut(
             id=int(i.id),
             chat_id=i.chat_id,
             sender_id=i.sender_id,
-            sender_name=normalized['sender_name'],
+            sender_name=sender_display_name,
             talker_name=normalized['talker_name'],
             timestamp=i.timestamp,
             direction=i.direction,

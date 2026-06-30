@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     CHATLOG_DIR: str | None = None
     CHATLOG_HTTP_SESSION_TIMEOUT_SECONDS: int = Field(default=5)
     CHATLOG_HTTP_TIMEOUT_SECONDS: int = Field(default=10)
+    WX_CLI_BIN: str | None = None
+    WX_CLI_TIMEOUT_SECONDS: int = Field(default=45)
+    WX_CLI_SESSION_LIMIT: int = Field(default=200)
 
     # n8n webhooks
     N8N_REPLY_WEBHOOK: str | None = None
@@ -23,6 +26,7 @@ class Settings(BaseSettings):
 
     # API
     API_TOKEN: str | None = None
+    API_AUTH_REQUIRED: bool = Field(default=False)
     AGENT_API_TOKEN: str | None = None
     AGENT_API_TOKENS: str | None = None
     AGENT_API_ALLOWLIST: str | None = None
@@ -40,9 +44,9 @@ class Settings(BaseSettings):
 
     # LLM
     SILICONFLOW_API_KEY: str | None = None
-    SILICONFLOW_API_URL: str | None = "https://api.siliconflow.cn/v1"
-    SILICONFLOW_MODEL: str | None = "Qwen/Qwen3-30B-A3B"
-    SILICONFLOW_TOOL_MODEL: str | None = "Qwen/Qwen3-8B"
+    SILICONFLOW_API_URL: str | None = "https://df.dawnloadai.com:9888/v1"
+    SILICONFLOW_MODEL: str | None = "deepseek-ai/DeepSeek-V4-Pro"
+    SILICONFLOW_TOOL_MODEL: str | None = "MiniMax-M3"
     AI_MAX_PARALLEL: int = 3
 
     # Market data
@@ -74,5 +78,11 @@ class Settings(BaseSettings):
     MEDIA_COLLECTOR_DAILY_HOUR: int = Field(default=5)
     MEDIA_COLLECTOR_DAILY_MINUTE: int = Field(default=0)
     MEDIA_COLLECTOR_TIMEOUT_SECONDS: int = Field(default=240)
+
+    # Media cache lifecycle
+    MEDIA_CACHE_CLEANUP_ENABLED: bool = True
+    MEDIA_CACHE_TTL_HOURS: int = Field(default=720)
+    MEDIA_CACHE_MAX_MB: int = Field(default=256)
+    MEDIA_CACHE_CLEANUP_INTERVAL_SECONDS: int = Field(default=86400)
 
 settings = Settings()

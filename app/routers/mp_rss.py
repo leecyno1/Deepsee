@@ -12,6 +12,66 @@ from ..services.mp_rss_store import DEFAULT_MP_UPSTREAM_URL, get_mp_article, lis
 
 
 router = APIRouter(prefix="/api/mp", tags=["mp-rss"])
+
+MP_INVESTMENT_KEEP_TERMS = (
+    "投研", "投资", "研究", "研报", "策略", "宏观", "行业", "产业", "市场", "资本市场", "金融", "监管",
+    "A股", "港股", "美股", "债券", "固收", "基金", "ETF", "股票", "个股", "标的",
+    "上市公司", "财报", "业绩", "估值", "盈利", "利润", "营收", "现金流", "订单", "景气",
+    "周期", "供需", "库存", "价格", "利率", "汇率", "通胀", "降息", "加息", "美联储", "政策",
+    "央行", "财政", "并购", "重组", "回购", "分红", "股权", "融资", "IPO", "龙虎榜",
+    "北向", "资金流", "量化", "期货", "期权", "商品", "黄金", "原油", "半导体", "芯片",
+    "能源", "电力", "贸易", "算力", "AI", "机器人", "新能源", "光伏", "储能", "电池", "汽车", "医药", "创新药",
+    "消费", "地产", "银行", "券商", "保险",
+)
+MP_SPAM_DROP_TERMS = (
+    "广告", "推广", "招商", "加盟", "代理", "优惠", "福利", "领取", "限时", "秒杀",
+    "团购", "折扣", "满减", "红包", "抽奖", "中奖", "免费送", "低价", "爆款", "带货",
+    "直播间", "下单", "购买链接", "扫码", "二维码", "私信", "加微信", "客服", "课程报名",
+    "训练营", "开课", "招生", "活动报名", "门票", "演唱会", "旅游", "酒店", "民宿",
+    "机票", "签证", "美食", "餐厅", "探店", "菜谱", "穿搭", "护肤", "美妆", "彩妆",
+    "减肥", "瘦身", "养生", "育儿", "亲子", "婚恋", "星座", "情感", "娱乐", "综艺",
+    "明星", "八卦", "宠物", "家装", "装修", "房产中介", "租房", "招聘", "求职",
+    "二手", "闲置", "游戏", "小说", "电影", "电视剧", "短剧",
+)
+MP_SPAM_HARD_DROP_TERMS = (
+    "购买链接", "扫码", "二维码", "加微信", "课程报名", "训练营", "活动报名", "招商加盟", "直播间", "下单",
+    "礼品", "签收", "快递", "包裹", "收货", "发货", "优惠券", "月度账单", "账单提醒", "端午", "高铁",
+    "出行", "活动", "心理学", "性格", "幸福人生", "和谐关系", "开发者", "生成APP", "开灯",
+)
+
+
+def _mp_item_text(item: dict) -> str:
+    return " ".join(
+        str(item.get(key) or "").strip()
+        for key in ("channel_name", "title", "summary", "description", "desc", "content")
+        if str(item.get(key) or "").strip()
+    )
+
+
+def _is_investment_mp_item(item: dict) -> bool:
+    text = _mp_item_text(item)
+    return any(term in text for term in MP_INVESTMENT_KEEP_TERMS)
+
+
+def _is_spam_life_mp_item(item: dict) -> bool:
+    text = _mp_item_text(item)
+    if not text:
+        return False
+    title = str(item.get("title") or "").strip()
+    if title and len(title) <= 8 and not _is_investment_mp_item(item):
+        return True
+    if any(term in text for term in MP_SPAM_HARD_DROP_TERMS):
+        return True
+    if _is_investment_mp_item(item):
+        return False
+    return any(term in text for term in MP_SPAM_DROP_TERMS)
+
+
+def _filter_spam_life_mp_items(items: list[dict]) -> tuple[list[dict], int]:
+    filtered = [item for item in items if not _is_spam_life_mp_item(item)]
+    return filtered, max(0, len(items) - len(filtered))
+
+
 def _extract_appmsg_from_content(content_text):
     """Parse WeChat appmsg XML to get title/desc/url."""
     text = str(content_text or "").strip()
@@ -170,6 +230,7 @@ def api_list_articles(
     limit: int = Query(100, ge=1, le=300),
     offset: int = Query(0, ge=0),
     q: str | None = None,
+    filter_spam: bool = Query(True),
     db: Session = Depends(get_db),
 ):
     cfg = _get_mp_config(db)
@@ -200,6 +261,15 @@ def api_list_articles(
         result["total"] = max(int(result.get("total") or 0), len(deduped))
         source = result.get("source") if isinstance(result.get("source"), dict) else {}
         source["local_wechat_mp"] = len(local_items)
+        result["source"] = source
+    if filter_spam:
+        raw_items = list(result.get("items") or [])
+        filtered_items, removed_count = _filter_spam_life_mp_items(raw_items)
+        result["items"] = filtered_items
+        result["total"] = max(0, int(result.get("total") or len(raw_items)) - removed_count)
+        source = result.get("source") if isinstance(result.get("source"), dict) else {}
+        source["spam_life_filtered"] = removed_count
+        source["filter_mode"] = "investment_keep"
         result["source"] = source
     return result
 
