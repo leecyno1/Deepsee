@@ -26,6 +26,8 @@ __pycache__/
 .venv/
 venv/
 .local/
+chatlog_*/
+chatlog_alpha/
 
 # Backups
 backups/
@@ -47,4 +49,8 @@ Thumbs.db
 .jiebang/
 .playwright-mcp/
 .hermes/
+scripts/_tmp_*.py
+scripts/*_tmp.py
+scripts/remark_formatter.py
+scripts/zombie_*.py
 media-collector/.cache/

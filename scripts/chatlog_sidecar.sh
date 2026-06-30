@@ -30,10 +30,10 @@ candidate_bin() {
     return 0
   fi
   for path in \
-    "$ROOT_DIR/.local/chatlog_0.0.31_darwin_arm64/chatlog" \
-    "$ROOT_DIR/chatlog_0.0.31_darwin_arm64/chatlog" \
-    "$ROOT_DIR/chatlog_0.0.29_darwin_arm64_副本3/chatlog" \
-    "$ROOT_DIR/chatlog_0.0.29_darwin_arm64_副本2/chatlog"
+    "$ROOT_DIR/.local/wechat-local/chatlog_alpha/chatlog" \
+    "$ROOT_DIR/.local/wechat-local/chatlog_alpha/chatlog-darwin-arm64" \
+    "$ROOT_DIR/.local/wechat-local/chatlog_alpha/chatlog-darwin-amd64" \
+    "$ROOT_DIR/.local/chatlog_0.0.31_darwin_arm64/chatlog"
   do
     if [[ -x "$path" ]]; then
       printf '%s\n' "$path"
