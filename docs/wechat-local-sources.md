@@ -8,7 +8,9 @@ Deepsee 的微信引擎现在支持三类来源：
 
 ## 依赖安装
 
-依赖清单在 `deps/wechat-local-deps.json`。二进制不会直接提交到 Git，而是下载安装到 `.local/wechat-local/`：
+Chatlog 源码已内置在 `third_party/chatlog/`，安装脚本会从仓库源码本地构建，
+不再从其他 Chatlog 仓库下载。生成的二进制放在 `.local/wechat-local/`；
+wx-cli 仍按 `deps/wechat-local-deps.json` 下载：
 
 ```bash
 python scripts/install_wechat_local_deps.py --tool all
@@ -21,18 +23,28 @@ python scripts/install_wechat_local_deps.py --tool chatlog_alpha
 python scripts/install_wechat_local_deps.py --tool wx_cli
 ```
 
-Windows 可指定平台：
+也可以直接构建 Chatlog：
+
+```bash
+bash scripts/build_chatlog.sh
+```
+
+Chatlog 当前需要 Go 1.24+ 和本机 CGO 编译环境。源码许可证及免责声明保留在
+`third_party/chatlog/LICENSE` 和 `third_party/chatlog/DISCLAIMER.md`。
+
+Windows 在本机 PowerShell 中可以直接构建仓库版本：
 
 ```powershell
-python scripts\install_wechat_local_deps.py --tool all --platform windows-amd64
+powershell -ExecutionPolicy Bypass -File scripts\run_chatlog_windows.ps1 build
 ```
 
 ## Windows 推荐流程
 
 1. 打开并登录 Windows 微信电脑版。
-2. 安装依赖：
+2. 从仓库源码构建 Chatlog，并安装 wx-cli：
    ```powershell
-   python scripts\install_wechat_local_deps.py --tool all --platform windows-amd64
+   powershell -ExecutionPolicy Bypass -File scripts\run_chatlog_windows.ps1 build
+   python scripts\install_wechat_local_deps.py --tool wx_cli --platform windows-amd64
    ```
 3. 初始化 wx-cli：
    ```powershell

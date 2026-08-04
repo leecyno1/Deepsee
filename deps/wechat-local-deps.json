@@ -1,14 +1,8 @@
 {
   "chatlog_alpha": {
-    "repo": "teest114514/chatlog_alpha",
-    "release": "latest",
-    "purpose": "本地微信聊天记录 HTTP sidecar，兼容 Deepsee 现有 chatlog HTTP 链路",
-    "assets": {
-      "darwin-amd64": "chatlog-darwin-amd64",
-      "darwin-arm64": "chatlog-darwin-arm64",
-      "windows-amd64": "chatlog-windows-amd64.exe",
-      "windows-arm64": "chatlog-windows-arm64.exe"
-    }
+    "source": "third_party/chatlog",
+    "imported_commit": "bfb031f7f94923a97ac186f5f048ef6006ab3d63",
+    "purpose": "仓库内置的本地微信聊天记录 HTTP sidecar 源码，由安装脚本本机构建"
   },
   "wx_cli": {
     "repo": "jackwener/wx-cli",

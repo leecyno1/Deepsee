@@ -92,6 +92,24 @@ uvicorn app.main:app --host 127.0.0.1 --port 8001
 
 打开浏览器访问 `http://127.0.0.1:8001/`。
 
+### 内置 Chatlog 依赖
+
+用于本机微信历史补齐的 Chatlog 源码已收录在 `third_party/chatlog/`，无需再从其他
+Chatlog 仓库下载。首次使用时在本机编译：
+
+```bash
+bash scripts/build_chatlog.sh
+```
+
+也可以让本地依赖安装器完成构建：
+
+```bash
+python scripts/install_wechat_local_deps.py --tool chatlog_alpha
+```
+
+需要 Go 1.24+ 和 CGO 编译环境；生成文件位于 `.local/`，不会提交到 Git。
+Chatlog 的 MIT 许可证和免责声明随源码保留在 `third_party/chatlog/`。
+
 ## WeChat API 对接
 
 Deepsee 可通过 wechatapi.net 的 iPad 协议接入微信，也可在云服务器侧与 Hermes 等服务组合部署。配置要求：

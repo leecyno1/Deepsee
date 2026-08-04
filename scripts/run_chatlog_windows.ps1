@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("status", "probe", "start", "stop", "restart", "install-task", "remove-task")]
+    [ValidateSet("build", "status", "probe", "start", "stop", "restart", "install-task", "remove-task")]
     [string]$Command = "status"
 )
 
@@ -32,6 +32,7 @@ function Resolve-ChatlogBin {
     if ($explicit -and (Test-Path $explicit)) { return $explicit }
 
     $candidates = @(
+        (Join-Path $RootDir ".local\chatlog\bin\chatlog.exe"),
         (Join-Path $RootDir ".local\wechat-local\chatlog_alpha\chatlog.exe"),
         (Join-Path $RootDir ".local\wechat-local\chatlog_alpha\chatlog-windows-amd64.exe"),
         (Join-Path $RootDir ".local\wechat-local\chatlog_alpha\chatlog-windows-arm64.exe"),
@@ -48,6 +49,31 @@ function Resolve-ChatlogBin {
     $cmd = Get-Command "chatlog" -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
     return ""
+}
+
+function Build-VendoredChatlog {
+    $sourceDir = Join-Path $RootDir "third_party\chatlog"
+    if (-not (Test-Path (Join-Path $sourceDir "go.mod"))) {
+        throw "仓库内置 Chatlog 源码不存在：$sourceDir"
+    }
+    $go = Get-Command "go" -ErrorAction SilentlyContinue
+    if (-not $go) { throw "需要安装 Go 1.24+ 才能编译仓库内置 Chatlog 源码。" }
+    $outputDir = Join-Path $RootDir ".local\chatlog\bin"
+    New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
+    $output = Join-Path $outputDir "chatlog.exe"
+    $previousCgo = $env:CGO_ENABLED
+    $env:CGO_ENABLED = if ($previousCgo) { $previousCgo } else { "1" }
+    Push-Location $sourceDir
+    try {
+        & $go.Source build -trimpath `
+            -ldflags "-s -w -X github.com/sjzar/chatlog/pkg/version.Version=vendored-bfb031f" `
+            -o $output .\main.go
+        if ($LASTEXITCODE -ne 0) { throw "Chatlog 编译失败，退出码：$LASTEXITCODE" }
+    } finally {
+        Pop-Location
+        $env:CGO_ENABLED = $previousCgo
+    }
+    Write-Host "已从仓库内置源码构建 Chatlog：$output"
 }
 
 function Get-PortProcess([int]$Port) {
@@ -82,7 +108,11 @@ function Test-ChatlogHttp([string]$Base, [int]$Timeout = 5) {
 function Assert-StartConfig {
     $bin = Resolve-ChatlogBin
     if (-not $bin) {
-        throw "未找到 chatlog.exe。请下载 Windows 预编译版本，或设置 CHATLOG_BIN=C:\path\to\chatlog.exe"
+        Build-VendoredChatlog
+        $bin = Resolve-ChatlogBin
+    }
+    if (-not $bin) {
+        throw "仓库内置 Chatlog 编译后仍未找到 chatlog.exe"
     }
     $dataDir = Get-EnvValue "CHATLOG_DATA_DIR"
     $workDir = Get-EnvValue "CHATLOG_WORK_DIR" (Get-EnvValue "CHATLOG_DIR")
@@ -164,6 +194,7 @@ function Remove-ChatlogTask {
 Import-DotEnv
 
 switch ($Command) {
+    "build" { Build-VendoredChatlog }
     "probe" {
         $base = Get-EnvValue "CHATLOG_HTTP_BASE" "http://127.0.0.1:5030"
         Test-ChatlogHttp $base ([int](Get-EnvValue "CHATLOG_HTTP_SESSION_TIMEOUT_SECONDS" "5")) | Out-Null

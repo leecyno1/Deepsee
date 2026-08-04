@@ -12,8 +12,23 @@ if [[ -f "$ENV_FILE" ]]; then
   set +a
 fi
 
+if [[ -n "${CHATLOG_BIN:-}" && ! -x "$CHATLOG_BIN" ]]; then
+  echo "configured CHATLOG_BIN is unavailable, falling back to vendored source: $CHATLOG_BIN" >> "$LOG_FILE"
+  CHATLOG_BIN=""
+fi
+
 if [[ -z "${CHATLOG_BIN:-}" ]]; then
-  if [[ -x "$ROOT_DIR/.local/chatlog_0.0.31_darwin_arm64/chatlog" ]]; then
+  VENDORED_BIN="$ROOT_DIR/.local/chatlog/bin/chatlog"
+  VENDORED_SOURCE="$ROOT_DIR/third_party/chatlog"
+  if [[ -f "$VENDORED_SOURCE/go.mod" ]] && {
+    [[ ! -x "$VENDORED_BIN" ]] ||
+    find "$VENDORED_SOURCE" -type f \( -name '*.go' -o -name 'go.mod' -o -name 'go.sum' \) -newer "$VENDORED_BIN" -print -quit | grep -q .
+  }; then
+    "$ROOT_DIR/scripts/build_chatlog.sh" >> "$LOG_FILE" 2>&1
+  fi
+  if [[ -x "$VENDORED_BIN" ]]; then
+    CHATLOG_BIN="$VENDORED_BIN"
+  elif [[ -x "$ROOT_DIR/.local/chatlog_0.0.31_darwin_arm64/chatlog" ]]; then
     CHATLOG_BIN="$ROOT_DIR/.local/chatlog_0.0.31_darwin_arm64/chatlog"
   else
     CHATLOG_BIN="$(command -v chatlog 2>/dev/null || true)"

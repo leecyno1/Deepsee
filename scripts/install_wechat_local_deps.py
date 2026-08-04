@@ -5,7 +5,9 @@ import argparse
 import json
 import os
 import platform
+import shutil
 import stat
+import subprocess
 import sys
 import urllib.request
 from pathlib import Path
@@ -15,6 +17,7 @@ from zipfile import ZipFile
 ROOT = Path(__file__).resolve().parents[1]
 DEPS_FILE = ROOT / "deps" / "wechat-local-deps.json"
 INSTALL_ROOT = ROOT / ".local" / "wechat-local"
+VENDORED_CHATLOG_SOURCE = ROOT / "third_party" / "chatlog"
 
 
 def detect_key() -> str:
@@ -100,6 +103,41 @@ def install_asset(tool: str, spec: dict, platform_key: str) -> Path:
     return executable
 
 
+def build_vendored_chatlog(platform_key: str) -> Path:
+    native_key = detect_key()
+    if platform_key != native_key:
+        raise RuntimeError(
+            f"vendored chatlog builds natively; requested {platform_key}, current platform is {native_key}"
+        )
+    if not (VENDORED_CHATLOG_SOURCE / "go.mod").exists():
+        raise RuntimeError(f"vendored chatlog source missing: {VENDORED_CHATLOG_SOURCE}")
+    go_bin = shutil.which("go")
+    if not go_bin:
+        raise RuntimeError("Go 1.24+ is required to build the vendored chatlog source")
+
+    tool_dir = INSTALL_ROOT / "chatlog_alpha"
+    tool_dir.mkdir(parents=True, exist_ok=True)
+    executable = tool_dir / ("chatlog.exe" if platform.system().lower() == "windows" else "chatlog")
+    env = {**os.environ, "CGO_ENABLED": os.environ.get("CGO_ENABLED", "1")}
+    command = [
+        go_bin,
+        "build",
+        "-trimpath",
+        "-ldflags",
+        "-s -w -X github.com/sjzar/chatlog/pkg/version.Version=vendored-bfb031f",
+        "-o",
+        str(executable),
+        "./main.go",
+    ]
+    print(f"build chatlog_alpha from vendored source: {VENDORED_CHATLOG_SOURCE}")
+    subprocess.run(command, cwd=VENDORED_CHATLOG_SOURCE, env=env, check=True)
+    if platform.system().lower() != "windows":
+        executable.chmod(executable.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    (tool_dir / "BIN_PATH").write_text(str(executable), encoding="utf-8")
+    print(f"installed chatlog_alpha: {executable}")
+    return executable
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Install Deepsee local WeChat dependencies")
     parser.add_argument("--tool", choices=["all", "chatlog_alpha", "wx_cli"], default="all")
@@ -111,7 +149,10 @@ def main() -> int:
     installed: dict[str, str] = {}
     for tool, spec in selected:
         try:
-            installed[tool] = str(install_asset(tool, spec, args.platform))
+            if tool == "chatlog_alpha":
+                installed[tool] = str(build_vendored_chatlog(args.platform))
+            else:
+                installed[tool] = str(install_asset(tool, spec, args.platform))
         except Exception as exc:
             print(f"ERROR {tool}: {exc}", file=sys.stderr)
             if args.tool != "all":

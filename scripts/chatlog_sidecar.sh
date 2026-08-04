@@ -25,11 +25,12 @@ err() { printf '\033[31m%s\033[0m\n' "$1"; }
 
 candidate_bin() {
   local explicit="${CHATLOG_BIN:-}"
-  if [[ -n "$explicit" ]]; then
+  if [[ -n "$explicit" && -x "$explicit" ]]; then
     printf '%s\n' "$explicit"
     return 0
   fi
   for path in \
+    "$ROOT_DIR/.local/chatlog/bin/chatlog" \
     "$ROOT_DIR/.local/wechat-local/chatlog_alpha/chatlog" \
     "$ROOT_DIR/.local/wechat-local/chatlog_alpha/chatlog-darwin-arm64" \
     "$ROOT_DIR/.local/wechat-local/chatlog_alpha/chatlog-darwin-amd64" \
@@ -78,11 +79,9 @@ PY
 }
 
 build_v031() {
-  local out="${CHATLOG_BUILD_DIR:-$ROOT_DIR/.local/chatlog_0.0.31_darwin_arm64}"
-  mkdir -p "$out"
-  info "编译 chatlog v0.0.31 -> $out"
-  GOBIN="$out" go install github.com/sjzar/chatlog@v0.0.31
-  ok "完成: $out/chatlog"
+  info "从仓库内置源码编译 chatlog"
+  "$ROOT_DIR/scripts/build_chatlog.sh"
+  ok "完成: $ROOT_DIR/.local/chatlog/bin/chatlog"
 }
 
 pid_on_port() {
@@ -113,7 +112,7 @@ PY
 require_start_config() {
   CHATLOG_BIN_RESOLVED="$(candidate_bin)"
   if [[ -z "${CHATLOG_BIN_RESOLVED:-}" || ! -x "$CHATLOG_BIN_RESOLVED" ]]; then
-    err "未找到 chatlog 可执行文件；先运行: bash scripts/chatlog_sidecar.sh build-v031"
+    err "未找到 chatlog 可执行文件；先从仓库内置源码编译: bash scripts/chatlog_sidecar.sh build"
     return 2
   fi
   CHATLOG_DATA_DIR="${CHATLOG_DATA_DIR:-}"
@@ -256,7 +255,7 @@ disable_old_autostart() {
 load_env
 cmd="${1:-status}"
 case "$cmd" in
-  build-v031) build_v031 ;;
+  build|build-v031) build_v031 ;;
   probe) http_probe "${2:-${CHATLOG_HTTP_BASE:-http://127.0.0.1:5030}}" "${3:-${CHATLOG_HTTP_SESSION_TIMEOUT_SECONDS:-5}}" ;;
   status) status ;;
   start-gray) start_gray ;;
@@ -275,7 +274,7 @@ case "$cmd" in
 commands:
   status        同时探测主链路 5030 与灰度链路 5031
   probe [url]   探测指定 chatlog HTTP 地址
-  build-v031    编译 chatlog v0.0.31 到独立目录
+  build         从仓库内置源码编译 chatlog（build-v031 为兼容别名）
   start-gray    启动 5031 灰度服务，不影响 5030
   stop-gray     停止 5031 灰度服务
   restart-gray  重启 5031 灰度服务

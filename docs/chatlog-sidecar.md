@@ -5,7 +5,8 @@ Deepsee 的微信引擎采用双轨：
 - **主轨道：wechatapi** — 负责实时回调、发送消息和云端部署后的在线链路。
 - **兜底轨道：chatlog** — 读取本机微信聊天记录，用于历史补齐和网关异常时的本地恢复。
 
-如需一键安装 chatlog_alpha / wx-cli，见 `docs/wechat-local-sources.md`。
+Chatlog 源码已内置于 `third_party/chatlog/`。构建和 wx-cli 安装方式见
+`docs/wechat-local-sources.md`。
 
 ## 使用条件
 
@@ -27,12 +28,14 @@ chatlog 只能读取本机微信数据，因此必须满足：
 
 Deepsee 调用 chatlog 的方式是 HTTP API，因此后端本身不依赖 macOS。Windows 当前不可用的主要原因通常不是 Deepsee 同步逻辑，而是本地缺少可运行的 `chatlog.exe` 服务，或 `.env` 仍沿用 macOS 的 `darwin`、`xwechat_files` 路径。
 
-旧上游文档显示 chatlog 曾支持 Windows/macOS，并提供 `/api/v1/session`、`/api/v1/chatlog` 等 HTTP API。当前上游仓库已不可直接拉取，建议把 chatlog 当作本机 sidecar 使用：Windows 负责启动 `chatlog.exe`，Deepsee 只连接 `CHATLOG_HTTP_BASE`。
+Chatlog 提供 `/api/v1/session`、`/api/v1/chatlog` 等 HTTP API。Deepsee 已将所用
+源码内置到仓库，建议把它作为本机 sidecar 使用：Windows 负责启动 `chatlog.exe`，
+Deepsee 只连接 `CHATLOG_HTTP_BASE`。
 
 Windows 使用前请确认：
 
 1. 使用 Windows 微信电脑版，并保持微信已登录。
-2. 下载或编译 Windows 版 `chatlog.exe`，放到固定目录。
+2. 从仓库内置源码构建 Windows 版 `chatlog.exe`。
 3. 使用 Windows Terminal 或 PowerShell 运行，避免 TUI 显示异常。
 4. `.env` 中设置：
    - `CHATLOG_BIN=C:\tools\chatlog\chatlog.exe`
@@ -44,6 +47,7 @@ Windows 使用前请确认：
 Windows 启动与检查：
 
 ```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run_chatlog_windows.ps1 build
 powershell -ExecutionPolicy Bypass -File scripts\run_chatlog_windows.ps1 status
 powershell -ExecutionPolicy Bypass -File scripts\run_chatlog_windows.ps1 start
 powershell -ExecutionPolicy Bypass -File scripts\run_chatlog_windows.ps1 probe
@@ -64,10 +68,11 @@ powershell -ExecutionPolicy Bypass -File scripts\run_chatlog_windows.ps1 remove-
 
 ## macOS 灰度新版 chatlog
 
-项目提供了 sidecar 脚本，不直接替换现有 `5030` 主服务，而是使用 `5031` 做灰度验证：
+项目提供了 sidecar 脚本，不直接替换现有 `5030` 主服务，而是使用 `5031` 做灰度验证。
+`build`（兼容别名 `build-v031`）从仓库内置源码构建，不再执行远程 `go install`：
 
 ```bash
-bash scripts/chatlog_sidecar.sh build-v031
+bash scripts/chatlog_sidecar.sh build
 bash scripts/chatlog_sidecar.sh status
 bash scripts/chatlog_sidecar.sh start-gray
 bash scripts/chatlog_sidecar.sh logs
