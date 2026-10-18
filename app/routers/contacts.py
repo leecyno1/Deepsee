@@ -5,10 +5,11 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from ..db import SessionLocal
 from ..models import Contact, SyncState
-from ..config import settings
 import json
 from ..schemas import ContactOut, ContactsLookupRequest
-from ..services.chatlog_contact_book import resolve_contact_db, iter_chatlog_contacts
+from ..services.wechat_contact_sync import sync_contacts_from_wechatapi
+from ..services.wechatapi_client import WechatApiClient
+from ..services.wechat_labels import resolve_label_names
 from ..services.contact_scoring import (
     build_contact_score_summaries,
     build_contact_scorecard,
@@ -41,11 +42,18 @@ def list_contacts(
     offset: int = 0,
     include_labels: bool = False,
     include_score_summary: bool = False,
+    wechatapi_only: bool = False,
     response: Response = None,
     db: Session = Depends(get_db),
 ):
-    total = db.execute(select(func.count()).select_from(Contact)).scalar() or 0
-    query = select(Contact).order_by(Contact.rating.desc())
+    source_filter = Contact.labels["source"].as_string() == "wechatapi_gateway"
+    count_query = select(func.count()).select_from(Contact)
+    query = select(Contact)
+    if wechatapi_only:
+        count_query = count_query.where(source_filter)
+        query = query.where(source_filter)
+    total = db.execute(count_query).scalar() or 0
+    query = query.order_by(Contact.rating.desc())
     if limit is not None:
         query = query.limit(limit).offset(offset)
     items = db.execute(query).scalars().all()
@@ -92,26 +100,19 @@ def list_contact_ratings(db: Session = Depends(get_db)):
 
 
 @router.get("/labels")
-def list_contact_labels():
-    """List all WeChat contact labels (tags) from chatlog contact.db."""
-    contact_db = resolve_contact_db(settings.CHATLOG_DIR)
-    if not contact_db:
-        raise HTTPException(400, "chatlog contact.db not found (check CHATLOG_DIR)")
-    import sqlite3
-
-    con = sqlite3.connect(str(contact_db))
-    con.row_factory = sqlite3.Row
-    try:
-        rows = con.execute("SELECT label_id_, label_name_ FROM contact_label ORDER BY sort_order_, label_id_").fetchall()
-        items = []
-        for r in rows:
-            name = str(r["label_name_"] or "").strip()
-            if not name:
-                continue
-            items.append({"id": int(r["label_id_"]), "name": name})
-        return {"status": "ok", "items": items, "contact_db": str(contact_db)}
-    finally:
-        con.close()
+def list_contact_labels(db: Session = Depends(get_db)):
+    """List labels from the configured WeChatAPI account."""
+    client = WechatApiClient()
+    if not client.configured():
+        raise HTTPException(503, "WeChatAPI 未配置")
+    state = resolve_label_names(db, client)
+    db.commit()
+    return {
+        "status": "ok" if state["upstream_available"] or state["names"] else "unavailable",
+        "items": [{"id": key, "name": value} for key, value in state["names"].items()],
+        "source": state["source"], "upstream_available": state["upstream_available"],
+        "warning": state.get("warning"),
+    }
 
 
 @router.post("/lookup", response_model=list[ContactOut])
@@ -220,68 +221,15 @@ def add_to_blacklist(contact_id: str, db: Session = Depends(get_db)):
 
 @router.post("/sync-book")
 def sync_contact_book(limit: int | None = None, insert_missing: bool = True, db: Session = Depends(get_db)):
-    """Sync contact nick/remark/labels from local chatlog contact.db into our contacts table.
-
-    This enables displaying remark names and WeChat labels (tags) in UI.
-    """
-    contact_db = resolve_contact_db(settings.CHATLOG_DIR)
-    if not contact_db:
-        raise HTTPException(400, "chatlog contact.db not found (check CHATLOG_DIR)")
-
-    existing = {c.id: c for c in db.execute(select(Contact)).scalars().all()}
-    inserted = 0
-    updated = 0
-    updated_alias = 0
-    updated_labels = 0
-
-    for rec in iter_chatlog_contacts(contact_db, limit=limit):
-        cid = rec.wxid
-        if not cid:
-            continue
-        c = existing.get(cid)
-        if not c:
-            if not insert_missing:
-                continue
-            c = Contact(
-                id=cid,
-                name=rec.nick_name or None,
-                alias=rec.remark or None,
-                rating=50,
-                labels=({"tags": rec.label_names, "source": "chatlog_contact_db"} if rec.label_names else None),
-                stats={"manual_rating": 50, "final_rating": 50, "auto_focus": False},
-            )
-            db.add(c)
-            existing[cid] = c
-            inserted += 1
-            continue
-
-        changed = False
-        if rec.nick_name and (not c.name or c.name != rec.nick_name):
-            c.name = rec.nick_name
-            changed = True
-        if rec.remark and (not c.alias or c.alias != rec.remark):
-            c.alias = rec.remark
-            changed = True
-            updated_alias += 1
-        if rec.label_names:
-            next_labels = {"tags": rec.label_names, "source": "chatlog_contact_db"}
-            if not c.labels or c.labels != next_labels:
-                c.labels = next_labels
-                changed = True
-                updated_labels += 1
-        if not c.stats:
-            c.stats = {"manual_rating": c.rating or 50, "final_rating": c.rating or 50}
-            changed = True
-        if changed:
-            db.add(c)
-            updated += 1
-
-    db.commit()
-    return {
-        "status": "ok",
-        "contact_db": str(contact_db),
-        "inserted": inserted,
-        "updated": updated,
-        "updated_alias": updated_alias,
-        "updated_labels": updated_labels,
-    }
+    """Sync friends, saved groups, official accounts and labels from WeChatAPI."""
+    try:
+        return sync_contacts_from_wechatapi(
+            db,
+            client=WechatApiClient(),
+            insert_missing=insert_missing,
+            limit=limit,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(502, f"WeChatAPI 通讯录同步失败：{exc}") from exc

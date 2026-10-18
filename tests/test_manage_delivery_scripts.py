@@ -113,9 +113,28 @@ def test_manage_diagnose_repairs_stale_pid_file_in_script():
 
 def test_manage_script_wraps_launchd_operations():
     source = (PROJECT_ROOT / "scripts" / "manage.sh").read_text(encoding="utf-8")
-    assert "launchd <install|restart|status|logs|health|uninstall>" in source
+    assert "launchd <install|start|stop|restart|status|logs|health|uninstall>" in source
     assert "launchd_svc()" in source
     assert 'bash "$ROOT_DIR/scripts/launchd_8001.sh" "$action"' in source
+
+
+def test_manage_start_stop_restart_respect_configured_launchd_service():
+    manage_source = (PROJECT_ROOT / "scripts" / "manage.sh").read_text(encoding="utf-8")
+    launchd_source = (PROJECT_ROOT / "scripts" / "launchd_8001.sh").read_text(encoding="utf-8")
+
+    assert "launchd_service_configured()" in manage_source
+    assert "launchd_service_loaded()" in manage_source
+    assert 'grep -Fq "<string>${ROOT_DIR}/scripts/run_uvicorn_8001.sh</string>"' in manage_source
+    assert "restart_svc()" in manage_source
+    assert "restart) restart_svc ;;" in manage_source
+    assert 'bash "$ROOT_DIR/scripts/launchd_8001.sh" start' in manage_source
+    assert 'bash "$ROOT_DIR/scripts/launchd_8001.sh" stop' in manage_source
+    assert 'bash "$ROOT_DIR/scripts/launchd_8001.sh" restart' in manage_source
+
+    assert "start_service()" in launchd_source
+    assert "stop_service()" in launchd_source
+    assert "start) start_service ;;" in launchd_source
+    assert "stop) stop_service ;;" in launchd_source
 
 
 def test_manage_usage_and_invalid_launchd_return_quickly(tmp_path):
@@ -130,7 +149,7 @@ def test_manage_usage_and_invalid_launchd_return_quickly(tmp_path):
         timeout=5,
     )
     assert usage.returncode == 0, usage.stdout
-    assert "launchd <install|restart|status|logs|health|uninstall>" in usage.stdout
+    assert "launchd <install|start|stop|restart|status|logs|health|uninstall>" in usage.stdout
 
     invalid = subprocess.run(
         ["bash", "scripts/manage.sh", "launchd", "invalid"],
@@ -142,4 +161,4 @@ def test_manage_usage_and_invalid_launchd_return_quickly(tmp_path):
         timeout=5,
     )
     assert invalid.returncode == 2
-    assert "launchd <install|restart|status|logs|health|uninstall>" in invalid.stdout
+    assert "launchd <install|start|stop|restart|status|logs|health|uninstall>" in invalid.stdout

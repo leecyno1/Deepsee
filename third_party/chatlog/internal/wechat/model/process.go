@@ -11,10 +11,7 @@ type Process struct {
 	AccountName string
 }
 
-// 平台常量定义
-const (
-	PlatformWindows = "windows"
-)
+const PlatformDarwin = "darwin"
 
 const (
 	StatusInit    = ""

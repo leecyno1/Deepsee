@@ -303,7 +303,7 @@ def build_email_features(items: List[dict]) -> Dict[str, dict]:
         model_ovr = None
     features = extract_message_features(
         prepared,
-        batch_size=8,
+        batch_size=50,
         concurrency=max_workers,
         temperature=0.1,
         prompt_key='email_message_summary',
@@ -384,6 +384,7 @@ def build_email_features(items: List[dict]) -> Dict[str, dict]:
         # 两段式：产出 summary（短）与 key_info；其余字段尽量补齐
         # 修复：当工具已给出 summary 时，必须直接使用工具的摘要，避免回退到标题导致“标题 + 摘要重复标题”的问题。
         tool_summary = (feat.get('summary') or '').strip()
+        tool_origin = 'fallback' if feat.get('summary_origin') == 'fallback' else 'tool'
         detected_platform = feat.get('platform') or feat.get('meeting_platform') or _infer_platform(raw_text)
         summary_value = (summary_short or _build_summary(raw_text) or main_point or raw_text[:50]).strip()
         if tool_summary:
@@ -397,7 +398,7 @@ def build_email_features(items: List[dict]) -> Dict[str, dict]:
                 analyst=analyst,
             ) or body
             summary_text = f"ai: {summary_body}".strip()
-            summary_origin = 'tool'
+            summary_origin = tool_origin
         else:
             summary_body = _compose_summary_body(
                 appointment_time=appointment_time,
@@ -414,7 +415,7 @@ def build_email_features(items: List[dict]) -> Dict[str, dict]:
         key_info_body = re.sub(r'^\s*(ai:|fallback:)\s*', '', summary_text, flags=re.IGNORECASE).strip()
         key_info_src = feat.get('key_info') or key_info_body or main_point or summary_value or raw_text[:50]
         key_info = (key_info_src or '').strip()[:30]
-        key_info_origin = 'tool' if feat.get('key_info') or tool_summary else 'fallback'
+        key_info_origin = tool_origin if feat.get('key_info') or tool_summary else 'fallback'
 
         key_points_raw = feat.get('key_points') or feat.get('points') or []
         if isinstance(key_points_raw, str):

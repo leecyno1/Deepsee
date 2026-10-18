@@ -321,7 +321,7 @@ def test_generate_local_reply_injects_history(tmp_path, monkeypatch):
             "sender_name": "测试",
             "talker_name": "测试",
             "is_group": False,
-            "message_time": "2026-05-09T20:00:00",
+            "message_time": datetime.utcnow().isoformat(),
             "subsession_id": "wechat_gateway_default",
         })
 
@@ -329,13 +329,16 @@ def test_generate_local_reply_injects_history(tmp_path, monkeypatch):
         assert result["reply"] == "测试回复"
         assert result["execution"]["history_turns"] == 2
         assert len([m for m in captured_messages if m["role"] == "user"]) >= 2  # history + current
-        assert len([m for m in captured_messages if m["role"] == "assistant"]) >= 1
+        import json
+        context = json.loads(captured_messages[-2]['content'])
+        assert [record['发言方'] for record in context['记录']] == ['对方', '我方']
+        assert context['记录'][1]['内容'] == '助手: 之前的回答'
     finally:
         session.close()
 
 
-def test_generate_local_reply_no_history_when_max_messages_zero(tmp_path, monkeypatch):
-    """When history_max_messages=0, no history turns are injected."""
+def test_generate_local_reply_no_history_when_memory_disabled(tmp_path, monkeypatch):
+    """The automation memory switch, not an obsolete subsession cap, controls memory."""
     Session = _session_factory(tmp_path)
     session = Session()
     try:
@@ -361,7 +364,7 @@ def test_generate_local_reply_no_history_when_max_messages_zero(tmp_path, monkey
         def fake_chat(messages, **kwargs):
             captured_messages.extend(messages)
             return {"text": "回复", "execution": {}}
-        monkeypatch.setattr(reply_generation_service, "load_ai_config", lambda: {"api_key": "***", "tool_model": "test-model", "tool_prompts": {}})
+        monkeypatch.setattr(reply_generation_service, "load_ai_config", lambda: {"api_key": "***", "tool_model": "test-model", "tool_prompts": {}, "reply_memory": {"enabled": False}})
         monkeypatch.setattr(reply_generation_service, "siliconflow_chat", fake_chat)
 
         result = reply_generation_service.generate_local_reply(session, {
@@ -376,6 +379,6 @@ def test_generate_local_reply_no_history_when_max_messages_zero(tmp_path, monkey
         })
         assert result["status"] == "ok"
         assert result["execution"]["history_turns"] == 0
-        assert len(captured_messages) == 2  # system + user only
+        assert len(captured_messages) == 3  # system + contact background + current message
     finally:
         session.close()

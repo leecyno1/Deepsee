@@ -4,9 +4,6 @@ import (
 	"context"
 	"hash"
 	"io"
-
-	"github.com/sjzar/chatlog/internal/errors"
-	"github.com/sjzar/chatlog/internal/wechat/decrypt/windows"
 )
 
 // Decryptor 定义数据库解密的接口
@@ -31,15 +28,4 @@ type Decryptor interface {
 
 	// GetVersion 返回解密器版本
 	GetVersion() string
-}
-
-// NewDecryptor 创建一个新的解密器
-func NewDecryptor(platform string, version int) (Decryptor, error) {
-	// 根据平台返回对应的实现
-	switch {
-	case (platform == "windows" || platform == "darwin") && version == 4:
-		return windows.NewV4Decryptor(), nil
-	default:
-		return nil, errors.PlatformUnsupported(platform, version)
-	}
 }

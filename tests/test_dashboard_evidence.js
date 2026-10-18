@@ -1,0 +1,10 @@
+const assert = require('node:assert/strict');
+const intelligence = require('../static/modules/intelligence-quality.js');
+for (const term of ['DOCX','excel','PDF','pptx','庆祝','玫瑰','感兴趣','不知道','第二次']) assert.equal(intelligence.isNoise(term),true);
+for (const term of ['AI','ETF','PCB','半导体设备']) assert.equal(intelligence.isNoise(term),false);
+assert.equal(intelligence.opportunity('[庆祝]欢迎参加 AI 机会会议，时间：今天15:00，腾讯会议123。'),false);
+assert.equal(intelligence.opportunity('会议主题：看好算力需求增长，欢迎报名交流。'),false);
+assert.equal(intelligence.opportunity('[太阳]海光信息订单增长30%，利润超预期，受益国产算力需求。'),true);
+assert.equal(intelligence.opportunity('不看好需求改善，未超预期。'),false);
+assert.equal(intelligence.clean('[庆祝]行业研报.docx').includes('庆祝'),false);
+console.log('dashboard evidence: passed');

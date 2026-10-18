@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd -P)"
 SOURCE_DIR="${CHATLOG_SOURCE_DIR:-$ROOT_DIR/third_party/chatlog}"
 OUTPUT_DIR="${CHATLOG_BUILD_DIR:-$ROOT_DIR/.local/chatlog/bin}"
-VERSION="${CHATLOG_BUILD_VERSION:-vendored-bfb031f}"
+VERSION="${CHATLOG_BUILD_VERSION:-vendored-cc281cc}"
 
 find_go() {
   if command -v go >/dev/null 2>&1; then
@@ -45,11 +45,15 @@ mkdir -p "$OUTPUT_DIR"
 echo "building vendored chatlog -> $OUTPUT_BIN"
 (
   cd "$SOURCE_DIR"
-  CGO_ENABLED="${CGO_ENABLED:-1}" "$GO_BIN" build \
-    -trimpath \
-    -ldflags "-s -w -X github.com/sjzar/chatlog/pkg/version.Version=$VERSION" \
-    -o "$OUTPUT_BIN" \
-    ./main.go
+  CHATLOG_VERSION="$VERSION" \
+    GOFLAGS='' \
+    CGO_ENABLED="${CGO_ENABLED:-1}" \
+    "$GO_BIN" build \
+      -tags sqlite_fts5 \
+      -trimpath \
+      -ldflags "-s -w -X github.com/sjzar/chatlog/pkg/version.Version=$VERSION" \
+      -o "$OUTPUT_BIN" \
+      main.go
 )
-chmod +x "$OUTPUT_BIN" 2>/dev/null || true
+chmod 755 "$OUTPUT_BIN"
 echo "built: $OUTPUT_BIN"

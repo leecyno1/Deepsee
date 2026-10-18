@@ -3,6 +3,8 @@ package model
 import (
 	"encoding/xml"
 	"fmt"
+	"html"
+	"regexp"
 	"strings"
 	"time"
 
@@ -12,7 +14,7 @@ import (
 var Debug = false
 
 const (
-	WeChatV4       = "wechatv4"
+	WeChatV4 = "wechatv4"
 )
 
 const (
@@ -45,6 +47,9 @@ const (
 
 	// MessageTypeSystem 系统
 	MessageTypeSystem = 10000
+
+	// MessageTypeSystemNotification 系统级控制通知
+	MessageTypeSystemNotification = 11000
 )
 
 const (
@@ -62,6 +67,9 @@ const (
 
 	// MessageSubTypeGIF 动图
 	MessageSubTypeGIF = 8
+
+	// MessageSubTypeRealtimeLocation 实时位置共享
+	MessageSubTypeRealtimeLocation = 17
 
 	// MessageSubTypeMergeForward 合并转发
 	MessageSubTypeMergeForward = 19
@@ -84,6 +92,9 @@ const (
 	// MessageSubTypePat 拍一拍
 	MessageSubTypePat = 62
 
+	// MessageSubTypeFileUploading 文件发送中的通知
+	MessageSubTypeFileUploading = 74
+
 	// MessageSubTypeChannelLive 视频号直播
 	MessageSubTypeChannelLive = 63
 
@@ -104,24 +115,47 @@ const (
 )
 
 type Message struct {
-	Version    string                 `json:"-"`                  // 消息版本，内部判断
-	Seq        int64                  `json:"seq"`                // 唯一序列号 (timestamp * 1000000 + local_id)
-	ID         int64                  `json:"id"`                 // 冗余 ID 字段，确保某些客户端能正确解析
-	Time       time.Time              `json:"time"`               // 消息创建时间，10位时间戳
-	Talker     string                 `json:"talker"`             // 聊天对象，微信 ID or 群 ID
-	TalkerName string                 `json:"talkerName"`         // 聊天对象名称
-	IsChatRoom bool                   `json:"isChatRoom"`         // 是否为群聊消息
-	Sender     string                 `json:"sender"`             // 发送人，微信 ID
-	SenderName string                 `json:"senderName"`         // 发送人名称
-	IsSelf     bool                   `json:"isSelf"`             // 是否为自己发送的消息
-	Type       int64                  `json:"type"`               // 消息类型
-	SubType    int64                  `json:"subType"`            // 消息子类型
-	Content    string                 `json:"content"`            // 消息内容，文字聊天内容
-	Contents   map[string]interface{} `json:"contents,omitempty"` // 消息内容，多媒体消息，采用更灵活的记录方式
+	Version    string                 `json:"-"`                          // 消息版本，内部判断
+	Seq        int64                  `json:"seq"`                        // 唯一序列号 (timestamp * 1000000 + local_id)
+	ID         int64                  `json:"id"`                         // 冗余 ID 字段，确保某些客户端能正确解析
+	DBLocalID  int64                  `json:"dbLocalID,omitempty"`        // 数据库原始 local_id
+	ServerID   int64                  `json:"server_id,string,omitempty"` // 微信服务端 ID，可与实时通道去重
+	Time       time.Time              `json:"time"`                       // 消息创建时间，10位时间戳
+	Talker     string                 `json:"talker"`                     // 聊天对象，微信 ID or 群 ID
+	TalkerName string                 `json:"talkerName"`                 // 聊天对象名称
+	IsChatRoom bool                   `json:"isChatRoom"`                 // 是否为群聊消息
+	Sender     string                 `json:"sender"`                     // 发送人，微信 ID
+	SenderName string                 `json:"senderName"`                 // 发送人名称
+	IsSelf     bool                   `json:"isSelf"`                     // 是否为自己发送的消息
+	Type       int64                  `json:"type"`                       // 消息类型
+	SubType    int64                  `json:"subType"`                    // 消息子类型
+	Content    string                 `json:"content"`                    // 消息内容，文字聊天内容
+	Contents   map[string]interface{} `json:"contents,omitempty"`         // 消息内容，多媒体消息，采用更灵活的记录方式
+	AtUserList []string               `json:"at_user_list,omitempty"`     // 群聊 @ 提及的 wxid 列表
 
 	// Debug Info
 	MediaMsg *MediaMsg `json:"mediaMsg,omitempty"` // 原始多媒体消息，XML 格式
 	SysMsg   *SysMsg   `json:"sysMsg,omitempty"`   // 原始系统消息，XML 格式
+}
+
+// MessageCursor identifies a stable position inside one conversation. A
+// timestamp alone is not sufficient because WeChat may write multiple rows in
+// the same second.
+type MessageCursor struct {
+	Timestamp int64 `json:"timestamp"`
+	LocalID   int64 `json:"local_id"`
+}
+
+func (c MessageCursor) Before(other MessageCursor) bool {
+	return c.Timestamp < other.Timestamp ||
+		(c.Timestamp == other.Timestamp && c.LocalID < other.LocalID)
+}
+
+func (c MessageCursor) BeforeMessage(message *Message) bool {
+	if message == nil {
+		return false
+	}
+	return c.Before(MessageCursor{Timestamp: message.Time.Unix(), LocalID: message.DBLocalID})
 }
 
 func (m *Message) ParseMediaInfo(data string) error {
@@ -138,13 +172,48 @@ func (m *Message) ParseMediaInfo(data string) error {
 		m.SenderName = ""
 		var sysMsg SysMsg
 		if err := xml.Unmarshal([]byte(data), &sysMsg); err != nil {
-			m.Content = data
+			m.setSystemDisplayContent(data)
 			return nil
 		}
 		if Debug {
 			m.SysMsg = &sysMsg
 		}
 		m.Content = sysMsg.String()
+		if strings.TrimSpace(m.Content) == "" && strings.TrimSpace(data) != "" {
+			// Some WeChat 4.x type=10000 rows are plain text containing an
+			// inline <a> tag instead of a <sysmsg> envelope. encoding/xml can
+			// successfully ignore that unmatched shape, so keep the source
+			// text rather than returning an empty API content field.
+			m.Content = data
+		}
+		m.setSystemDisplayContent(m.Content)
+		return nil
+	}
+
+	if m.Type == MessageTypeSystemNotification {
+		m.Sender = "系统通知"
+		m.SenderName = ""
+		if m.Contents == nil {
+			m.Contents = make(map[string]interface{})
+		}
+		m.Contents["notification_sub_type"] = m.SubType
+		m.Content = strings.TrimSpace(data)
+		if m.Content == "" {
+			m.Content = "[系统通知]"
+		}
+		return nil
+	}
+
+	if m.Type == MessageTypeVOIP {
+		var voip VoIPMsg
+		if err := xml.Unmarshal([]byte(data), &voip); err != nil {
+			return err
+		}
+		m.Content = strings.TrimSpace(voip.Bubble.Message)
+		m.Contents["room_type"] = voip.Bubble.RoomType
+		m.Contents["msg_type"] = voip.Bubble.MsgType
+		m.Contents["duration"] = voip.Bubble.Duration
+		m.Contents["business"] = voip.Bubble.Business
 		return nil
 	}
 
@@ -165,6 +234,42 @@ func (m *Message) ParseMediaInfo(data string) error {
 	switch m.Type {
 	case MessageTypeImage:
 		m.Contents["md5"] = msg.Image.MD5
+		// CDN metadata required to request mid/HD download via WeChat-native or
+		// future direct CDN client. Absent when the payload is incomplete.
+		if msg.Image.AesKey != "" {
+			m.Contents["aeskey"] = msg.Image.AesKey
+		}
+		if msg.Image.CdnMidImgUrl != "" {
+			m.Contents["cdnmidimgurl"] = msg.Image.CdnMidImgUrl
+		}
+		if msg.Image.CdnBigImgUrl != "" {
+			m.Contents["cdnbigimgurl"] = msg.Image.CdnBigImgUrl
+		}
+		if msg.Image.CdnThumbUrl != "" {
+			m.Contents["cdnthumburl"] = msg.Image.CdnThumbUrl
+		}
+		if msg.Image.CdnThumbAesKey != "" {
+			m.Contents["cdnthumbaeskey"] = msg.Image.CdnThumbAesKey
+		}
+		if msg.Image.HdLength != "" {
+			m.Contents["hdlength"] = msg.Image.HdLength
+		}
+		if msg.Image.Length != "" {
+			m.Contents["length"] = msg.Image.Length
+		}
+		if msg.Image.OriginSourceMd5 != "" {
+			m.Contents["originsourcemd5"] = msg.Image.OriginSourceMd5
+		}
+		if msg.Image.EncryVer != "" {
+			m.Contents["encryver"] = msg.Image.EncryVer
+		}
+		if msg.Image.HevcMidSize != "" {
+			m.Contents["hevc_mid_size"] = msg.Image.HevcMidSize
+		}
+	case MessageTypeCard:
+		m.Contents["username"] = msg.UserName
+		m.Contents["nickname"] = msg.NickName
+		m.Contents["alias"] = msg.Alias
 	case MessageTypeVideo:
 		if msg.Video.Md5 != "" {
 			m.Contents["md5"] = msg.Video.Md5
@@ -179,6 +284,13 @@ func (m *Message) ParseMediaInfo(data string) error {
 		m.Contents["y"] = msg.Location.Y
 		m.Contents["label"] = msg.Location.Label
 		m.Contents["cityname"] = msg.Location.CityName
+		m.Contents["poiname"] = msg.Location.PoiName
+		m.Contents["poiid"] = msg.Location.PoiID
+		m.Contents["scale"] = msg.Location.Scale
+		m.Contents["maptype"] = msg.Location.MapType
+		m.Contents["adcode"] = msg.Location.Adcode
+		m.Contents["building_id"] = msg.Location.BuildingID
+		m.Contents["floor_name"] = msg.Location.FloorName
 	case MessageTypeShare:
 		m.SubType = int64(msg.App.Type)
 		switch m.SubType {
@@ -191,6 +303,15 @@ func (m *Message) ParseMediaInfo(data string) error {
 			// 文件
 			m.Contents["title"] = msg.App.Title
 			m.Contents["md5"] = msg.App.MD5
+		case MessageSubTypeRealtimeLocation:
+			m.Contents["title"] = msg.App.Title
+			m.Content = strings.TrimSpace(msg.App.Title)
+		case MessageSubTypeFileUploading:
+			m.Contents["title"] = msg.App.Title
+			if msg.App.AppAttach != nil {
+				m.Contents["file_ext"] = msg.App.AppAttach.FileExt
+				m.Contents["total_len"] = msg.App.AppAttach.TotalLen
+			}
 		case MessageSubTypeMergeForward, MessageSubTypeNote, MessageSubTypeChatRoomNotice:
 			// 合并转发 & 笔记
 			m.Contents["title"] = msg.App.Title
@@ -282,9 +403,34 @@ func (m *Message) ParseMediaInfo(data string) error {
 				payMemo = "(" + msg.App.WCPayInfo.PayMemo + ")"
 			}
 			m.Content = fmt.Sprintf("[转账|%s%s]%s", _type, msg.App.WCPayInfo.FeeDesc, payMemo)
+		case MessageSubTypeRedEnvelope, MessageSubTypeRedEnvelopeCover:
+			wcpay := msg.App.WCPayInfo
+			if wcpay == nil {
+				break
+			}
+			title := firstTrimmed(
+				wcpay.ReceiverTitle,
+				wcpay.SenderTitle,
+				msg.App.Title,
+			)
+			status := strings.TrimSpace(wcpay.ReceiverDesc)
+			if m.IsSelf {
+				status = strings.TrimSpace(wcpay.SenderDesc)
+			}
+			if status == "" {
+				status = strings.TrimSpace(msg.App.Des)
+			}
+			m.Contents["red_envelope_title"] = title
+			m.Contents["red_envelope_status"] = status
+			m.Contents["scene_text"] = firstTrimmed(wcpay.SceneText, msg.App.Title, "微信红包")
+			m.Contents["description"] = strings.TrimSpace(msg.App.Des)
+			m.Contents["pay_msg_id"] = strings.TrimSpace(wcpay.PayMsgID)
+			m.Contents["invalid_time"] = strings.TrimSpace(wcpay.InvalidTime)
+			m.Contents["template_id"] = strings.TrimSpace(wcpay.TemplateID)
 		}
 	}
 
+	m.RefreshProxyFields()
 	return nil
 }
 
@@ -377,6 +523,14 @@ func (m *Message) PlainTextContent() string {
 		}
 		return "[语音]"
 	case MessageTypeCard:
+		name := strings.TrimSpace(fmt.Sprint(m.Contents["nickname"]))
+		username := strings.TrimSpace(fmt.Sprint(m.Contents["username"]))
+		if name != "" && username != "" {
+			return fmt.Sprintf("[名片|%s](%s)", name, username)
+		}
+		if name != "" {
+			return fmt.Sprintf("[名片|%s]", name)
+		}
 		return "[名片]"
 	case MessageTypeVideo:
 		if host, _ := m.Contents["host"].(string); host == "" {
@@ -408,9 +562,13 @@ func (m *Message) PlainTextContent() string {
 		return "[动画表情]"
 	case MessageTypeLocation:
 		keylist := make([]string, 0)
-		for _, key := range []string{"label", "cityname", "x", "y"} {
+		for _, key := range []string{"poiname", "label", "cityname", "x", "y"} {
 			if m.Contents[key] != nil {
 				if value, ok := m.Contents[key].(string); ok {
+					value = strings.TrimSpace(value)
+					if value == "" || (key == "label" && value == "[位置]") {
+						continue
+					}
 					keylist = append(keylist, value)
 				}
 			}
@@ -429,6 +587,11 @@ func (m *Message) PlainTextContent() string {
 			return fmt.Sprintf("[文件|%s](http://%s/file/%s)", m.Contents["title"], m.Contents["host"], m.Contents["md5"])
 		case MessageSubTypeGIF:
 			return "[GIF表情]"
+		case MessageSubTypeRealtimeLocation:
+			if strings.TrimSpace(m.Content) != "" {
+				return fmt.Sprintf("[实时位置共享|%s]", m.Content)
+			}
+			return "[实时位置共享]"
 		case MessageSubTypeMergeForward:
 			_recordInfo, ok := m.Contents["recordInfo"]
 			if !ok {
@@ -501,6 +664,11 @@ func (m *Message) PlainTextContent() string {
 			return buf.String()
 		case MessageSubTypePat:
 			return m.Content
+		case MessageSubTypeFileUploading:
+			if title := strings.TrimSpace(fmt.Sprint(m.Contents["title"])); title != "" {
+				return fmt.Sprintf("[文件发送中|%s]", title)
+			}
+			return "[文件发送中]"
 		case MessageSubTypeChannelLive:
 			if m.Contents["title"] != nil {
 				return fmt.Sprintf("[视频号直播|%s]", m.Contents["title"])
@@ -525,23 +693,92 @@ func (m *Message) PlainTextContent() string {
 		case MessageSubTypePay:
 			return m.Content
 		case MessageSubTypeRedEnvelope:
-			return "[红包]"
+			return redEnvelopePlainText("红包", m.Contents)
 		case MessageSubTypeRedEnvelopeCover:
-			return "[红包封面]"
+			return redEnvelopePlainText("红包封面", m.Contents)
 		default:
 			return "[分享]"
 		}
 	case MessageTypeVOIP:
+		if strings.TrimSpace(m.Content) != "" {
+			return fmt.Sprintf("[语音通话|%s]", m.Content)
+		}
 		return "[语音通话]"
-	case MessageTypeSystem:
+	case MessageTypeSystem, MessageTypeSystemNotification:
 		return m.Content
 	default:
-		content := m.Content
-		if len(content) > 120 {
-			content = content[:120] + "<...>"
-		}
+		content := truncateText(m.Content, 120, "<...>")
 		return fmt.Sprintf("Type: %d Content: %s", m.Type, content)
 	}
+}
+
+var (
+	systemImageTagPattern   = regexp.MustCompile(`(?is)<img\b[^>]*>`)
+	systemCustomLinkPattern = regexp.MustCompile(`(?is)<_wc_custom_link_\b[^>]*>(.*?)</_wc_custom_link_>`)
+	systemMarkupPattern     = regexp.MustCompile(`(?is)</?[_a-z][^>]*>`)
+	hongbaoSendIDPattern    = regexp.MustCompile(`(?i)(?:[?&]|&amp;)sendid=([0-9]+)`)
+)
+
+func (m *Message) setSystemDisplayContent(raw string) {
+	raw = strings.TrimSpace(raw)
+	if m.Contents == nil {
+		m.Contents = make(map[string]interface{})
+	}
+	isHongbao := strings.Contains(raw, "SystemMessages_HongbaoIcon") ||
+		strings.Contains(raw, "weixinhongbao") ||
+		(strings.Contains(raw, "_wc_custom_link_") && strings.Contains(raw, "红包"))
+	if !isHongbao {
+		m.Content = raw
+		return
+	}
+
+	if match := hongbaoSendIDPattern.FindStringSubmatch(raw); len(match) == 2 {
+		m.Contents["hongbao_send_id"] = match[1]
+	}
+	cleaned := systemImageTagPattern.ReplaceAllString(raw, "")
+	cleaned = systemCustomLinkPattern.ReplaceAllString(cleaned, "$1")
+	cleaned = systemMarkupPattern.ReplaceAllString(cleaned, "")
+	cleaned = html.UnescapeString(cleaned)
+	cleaned = strings.Join(strings.Fields(cleaned), " ")
+	if cleaned == "" {
+		cleaned = "红包状态更新"
+	}
+	m.Content = cleaned
+	m.Contents["system_kind"] = "red_envelope_receipt"
+	if strings.Contains(cleaned, "领取") {
+		m.Contents["red_envelope_status"] = "已领取"
+	}
+}
+
+func firstTrimmed(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func redEnvelopePlainText(kind string, contents map[string]interface{}) string {
+	parts := []string{kind}
+	for _, key := range []string{"red_envelope_title", "red_envelope_status"} {
+		value := strings.TrimSpace(fmt.Sprint(contents[key]))
+		if value != "" && value != "<nil>" {
+			parts = append(parts, value)
+		}
+	}
+	return "[" + strings.Join(parts, "|") + "]"
+}
+
+func truncateText(value string, limit int, suffix string) string {
+	if limit < 0 {
+		return value
+	}
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit]) + suffix
 }
 
 func (m *Message) CSV(host string) []string {

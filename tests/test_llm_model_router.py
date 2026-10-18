@@ -30,9 +30,101 @@ def test_empty_config_uses_dasheng_cloud_preset(monkeypatch, tmp_path):
     assert conf["tool_model"] == DASHENG_CLOUD_TOOL_MODEL
     router = conf["model_router"]
     assert router["enabled"] is True
-    assert router["main_module_channels"]["market"] == ["dasheng-main-deepseek-v4-pro"]
-    assert router["main_module_channels"]["onepage"] == ["dasheng-onepage-minimax-m3"]
-    assert router["tool_route_channels"]["messages"] == ["dasheng-tool-minimax-m3"]
+    assert router["main_module_channels"]["market"] == ["dasheng-report-gpt-55", "dasheng-report-deepseek-v4-flash"]
+    assert router["main_module_channels"]["meetings"] == ["dasheng-report-minimax-m3", "dasheng-report-deepseek-v4-flash"]
+    assert router["mid_route_channels"]["onepage"] == ["dasheng-onepage-minimax-m3"]
+    assert router["tool_route_channels"]["messages"][0] == "dasheng-tool-minimax-m3"
+
+
+def test_chat_completions_url_accepts_openai_base_and_full_endpoint():
+    from app.services.llm_client import _chat_completions_url
+
+    assert _chat_completions_url("https://example.com") == "https://example.com/v1/chat/completions"
+    assert _chat_completions_url("https://example.com/v1") == "https://example.com/v1/chat/completions"
+    assert _chat_completions_url("https://example.com/v1/chat/completions") == "https://example.com/v1/chat/completions"
+    assert _chat_completions_url("https://example.com/chat/completions") == "https://example.com/chat/completions"
+
+
+def test_minimax_m3_caps_oversized_chat_context_without_mutating_input():
+    from app.services.llm_client import _prepare_chat_messages
+
+    original = [
+        {"role": "system", "content": "S" * 2000},
+        {"role": "user", "content": "HEAD" + ("x" * 100_000) + "TAIL"},
+    ]
+
+    prepared = _prepare_chat_messages(original, model="MiniMax-M3")
+
+    assert prepared is not original
+    assert prepared[0] == original[0]
+    assert len(prepared[1]["content"]) <= 48_000
+    assert prepared[1]["content"].startswith("HEAD")
+    assert prepared[1]["content"].endswith("TAIL")
+    assert "上下文已截断" in prepared[1]["content"]
+    assert len(original[1]["content"]) > 100_000
+
+
+def test_non_minimax_models_keep_full_chat_context():
+    from app.services.llm_client import _prepare_chat_messages
+
+    original = [{"role": "user", "content": "x" * 60_000}]
+    prepared = _prepare_chat_messages(original, model="gpt-5.6-terra")
+
+    assert prepared == original
+
+
+def test_normalizer_uses_reasoning_block_only_when_provider_has_no_final_text():
+    from app.services.llm_client import _normalize_llm_content
+
+    assert _normalize_llm_content("<think>有效分析结论</think>") == "有效分析结论"
+    assert _normalize_llm_content("<think>中间推理</think>\n最终结论") == "最终结论"
+
+
+def test_minimax_m3_uses_small_model_output_budget():
+    from app.services.llm_client import _effective_max_tokens
+
+    assert _effective_max_tokens("MiniMax-M3", 4000) == 1800
+    assert _effective_max_tokens("MiniMax-M3", 1200) == 1200
+    assert _effective_max_tokens("gpt-5.6-terra", 4000) == 4000
+
+
+def test_minimax_m3_does_not_force_reasoning_split_with_small_output_budget():
+    from app.services.llm_client import _model_payload_extras
+
+    assert _model_payload_extras("MiniMax-M3") == {}
+    assert _model_payload_extras("gpt-5.6-terra") == {}
+
+
+def test_reasoning_only_fallback_removes_planning_preamble_and_localizes_labels():
+    from app.services.llm_client import _normalize_llm_content
+
+    raw = (
+        "<think>Let me analyze the messages.\n"
+        "Let me go through them carefully.\n"
+        "1. 会议安排\nTime: 08:00, Platform: 腾讯, Topic: 宏观策略</think>"
+    )
+    normalized = _normalize_llm_content(raw)
+
+    assert "Let me" not in normalized
+    assert "时间：" in normalized
+    assert "平台：" in normalized
+    assert "主题：" in normalized
+
+
+def test_minimax_plain_content_removes_task_restatement_and_planning_lines():
+    from app.services.llm_client import _normalize_model_content
+
+    raw = (
+        "The user wants me to extract meeting information.\n"
+        "Let me analyze the messages carefully.\n\n"
+        "1. 会议安排\nTime: 08:00, Platform: 腾讯, Topic: 宏观策略"
+    )
+    normalized = _normalize_model_content(raw, model="MiniMax-M3")
+
+    assert "The user wants me" not in normalized
+    assert "Let me" not in normalized
+    assert normalized.startswith("1. 会议安排")
+    assert "时间：" in normalized
 
 
 def test_router_disabled_falls_back_to_default_model():

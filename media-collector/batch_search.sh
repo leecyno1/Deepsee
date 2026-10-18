@@ -5,7 +5,9 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CONFIG_FILE="$SCRIPT_DIR/keywords.json"
+OUTPUT_BASE="${OUTPUT_BASE:-$PROJECT_ROOT/data/search}"
 PRETTY=""
 
 # 解析参数
@@ -39,7 +41,7 @@ while IFS= read -r kw; do
     # 调用统一搜索
     if bash "$SCRIPT_DIR/search.sh" "$kw" $PRETTY > /dev/null 2>&1; then
         # 统计条数
-        latest=$(find "$(cd "$SCRIPT_DIR/.." && pwd)/data/search" -name "_summary.json" -newer "$CONFIG_FILE" 2>/dev/null | sort -r | head -1)
+        latest=$(find "$OUTPUT_BASE" -name "_summary.json" -newer "$CONFIG_FILE" 2>/dev/null | sort -r | head -1)
         if [ -n "$latest" ]; then
             cnt=$(python3 -c "import json; print(json.load(open('$latest')).get('total_items',0))" 2>/dev/null || echo 0)
             echo "  ✅ $cnt 条"
@@ -62,4 +64,4 @@ echo "════════════════════════�
 echo "📊 批量搜索完成"
 echo "  关键词: $KW_OK/$TOTAL 成功"
 echo "  总条目: $TOTAL_ITEMS"
-echo "  输出目录: data/search/"
+echo "  输出目录: $OUTPUT_BASE/"

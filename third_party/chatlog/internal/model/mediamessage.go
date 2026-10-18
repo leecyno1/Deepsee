@@ -9,6 +9,9 @@ import (
 
 type MediaMsg struct {
 	XMLName  xml.Name `xml:"msg"`
+	UserName string   `xml:"username,attr,omitempty"`
+	NickName string   `xml:"nickname,attr,omitempty"`
+	Alias    string   `xml:"alias,attr,omitempty"`
 	Image    Image    `xml:"img,omitempty"`
 	Video    Video    `xml:"videomsg,omitempty"`
 	App      App      `xml:"appmsg,omitempty"`
@@ -16,24 +19,35 @@ type MediaMsg struct {
 	Location Location `xml:"location,omitempty"`
 }
 
+type VoIPMsg struct {
+	XMLName xml.Name      `xml:"voipmsg"`
+	Type    string        `xml:"type,attr,omitempty"`
+	Bubble  VoIPBubbleMsg `xml:"VoIPBubbleMsg"`
+}
+
+type VoIPBubbleMsg struct {
+	Message  string `xml:"msg"`
+	RoomType int64  `xml:"room_type"`
+	MsgType  int64  `xml:"msg_type"`
+	Duration int64  `xml:"duration"`
+	Business int64  `xml:"business"`
+}
+
 type Image struct {
-	MD5 string `xml:"md5,attr"`
-	// HdLength            string `xml:"hdlength,attr"`
-	// Length              string `xml:"length,attr"`
-	// AesKey              string `xml:"aeskey,attr"`
-	// EncryVer            string `xml:"encryver,attr"`
-	// OriginSourceMd5     string `xml:"originsourcemd5,attr"`
-	// FileKey             string `xml:"filekey,attr"`
-	// UploadContinueCount string `xml:"uploadcontinuecount,attr"`
-	// ImgSourceUrl        string `xml:"imgsourceurl,attr"`
-	// HevcMidSize         string `xml:"hevc_mid_size,attr"`
-	// CdnBigImgUrl        string `xml:"cdnbigimgurl,attr"`
-	// CdnMidImgUrl        string `xml:"cdnmidimgurl,attr"`
-	// CdnThumbUrl         string `xml:"cdnthumburl,attr"`
-	// CdnThumbLength      string `xml:"cdnthumblength,attr"`
-	// CdnThumbWidth       string `xml:"cdnthumbwidth,attr"`
-	// CdnThumbHeight      string `xml:"cdnthumbheight,attr"`
-	// CdnThumbAesKey      string `xml:"cdnthumbaeskey,attr"`
+	MD5              string `xml:"md5,attr"`
+	HdLength         string `xml:"hdlength,attr"`
+	Length           string `xml:"length,attr"`
+	AesKey           string `xml:"aeskey,attr"`
+	EncryVer         string `xml:"encryver,attr"`
+	OriginSourceMd5  string `xml:"originsourcemd5,attr"`
+	HevcMidSize      string `xml:"hevc_mid_size,attr"`
+	CdnBigImgUrl     string `xml:"cdnbigimgurl,attr"`
+	CdnMidImgUrl     string `xml:"cdnmidimgurl,attr"`
+	CdnThumbUrl      string `xml:"cdnthumburl,attr"`
+	CdnThumbLength   string `xml:"cdnthumblength,attr"`
+	CdnThumbWidth    string `xml:"cdnthumbwidth,attr"`
+	CdnThumbHeight   string `xml:"cdnthumbheight,attr"`
+	CdnThumbAesKey   string `xml:"cdnthumbaeskey,attr"`
 }
 
 type Video struct {
@@ -74,7 +88,7 @@ type App struct {
 	PatMsg            *PatMsg     `xml:"patMsg,omitempty"`            // type 62 拍一拍
 	PatInfo           *PatInfo    `xml:"patinfo,omitempty"`           // type 62 拍一拍 v2
 	FinderLive        *FinderLive `xml:"finderLive,omitempty"`        // type 63 视频号直播
-	WCPayInfo         *WCPayInfo  `xml:"wcpayinfo,omitempty"`         // type 2000 微信转账
+	WCPayInfo         *WCPayInfo  `xml:"wcpayinfo,omitempty"`         // type 2000/2001/2003 微信支付消息
 }
 
 type Emoji struct {
@@ -111,22 +125,22 @@ type Emoji struct {
 }
 
 type Location struct {
-	X        string `xml:"x,attr"`
-	Y        string `xml:"y,attr"`
-	Scale    string `xml:"scale,attr"`
-	Label    string `xml:"label,attr"`
-	MapType  string `xml:"maptype,attr"`
-	Adcode   string `xml:"adcode,attr"`
-	CityName string `xml:"cityname,attr"`
-	// PoiName         string `xml:"poiname,attr"`
-	// PoiId           string `xml:"poiid,attr"`
-	// BuildingId      string `xml:"buildingId,attr"`
-	// FloorName       string `xml:"floorName,attr"`
-	// PoiCategoryTips string `xml:"poiCategoryTips,attr"`
-	// PoiBusinessHour string `xml:"poiBusinessHour,attr"`
-	// PoiPhone        string `xml:"poiPhone,attr"`
-	// PoiPriceTips    string `xml:"poiPriceTips,attr"`
-	// IsFromPoiList   string `xml:"isFromPoiList,attr"`
+	X               string `xml:"x,attr"`
+	Y               string `xml:"y,attr"`
+	Scale           string `xml:"scale,attr"`
+	Label           string `xml:"label,attr"`
+	MapType         string `xml:"maptype,attr"`
+	Adcode          string `xml:"adcode,attr"`
+	CityName        string `xml:"cityname,attr"`
+	PoiName         string `xml:"poiname,attr"`
+	PoiID           string `xml:"poiid,attr"`
+	BuildingID      string `xml:"buildingId,attr"`
+	FloorName       string `xml:"floorName,attr"`
+	PoiCategoryTips string `xml:"poiCategoryTips,attr"`
+	PoiBusinessHour string `xml:"poiBusinessHour,attr"`
+	PoiPhone        string `xml:"poiPhone,attr"`
+	PoiPriceTips    string `xml:"poiPriceTips,attr"`
+	IsFromPoiList   string `xml:"isFromPoiList,attr"`
 }
 
 // ReferMsg 表示引用消息
@@ -162,15 +176,16 @@ type RecordItem struct {
 
 // RecordInfo 表示聊天记录信息
 type RecordInfo struct {
-	XMLName       xml.Name `xml:"recordinfo"`
-	FromScene     string   `xml:"fromscene,omitempty"`
-	FavUsername   string   `xml:"favusername,omitempty"`
-	FavCreateTime string   `xml:"favcreatetime,omitempty"`
-	IsChatRoom    string   `xml:"isChatRoom,omitempty"`
-	Title         string   `xml:"title,omitempty"`
-	Desc          string   `xml:"desc,omitempty"`
-	Info          string   `xml:"info,omitempty"`
-	DataList      DataList `xml:"datalist,omitempty"`
+	XMLName       xml.Name      `xml:"recordinfo"`
+	FromScene     string        `xml:"fromscene,omitempty"`
+	FavUsername   string        `xml:"favusername,omitempty"`
+	FavCreateTime string        `xml:"favcreatetime,omitempty"`
+	IsChatRoom    string        `xml:"isChatRoom,omitempty"`
+	Title         string        `xml:"title,omitempty"`
+	Desc          string        `xml:"desc,omitempty"`
+	Info          string        `xml:"info,omitempty"`
+	DataList      DataList      `xml:"datalist,omitempty"`
+	Assets        []RecordAsset `json:"assets,omitempty" xml:"-"`
 }
 
 // DataList 表示数据列表
@@ -221,6 +236,13 @@ type DataItem struct {
 	// 套娃合并转发
 	DataTitle string     `xml:"datatitle,omitempty"`
 	RecordXML *RecordXML `xml:"recordxml,omitempty"`
+
+	MD5       string `json:"md5,omitempty" xml:"-"`
+	ProxyType string `json:"proxyType,omitempty" xml:"-"`
+	ProxyKey  string `json:"proxyKey,omitempty" xml:"-"`
+	ProxyURL  string `json:"proxyUrl,omitempty" xml:"-"`
+	Resolved  bool   `json:"resolved" xml:"-"`
+	KeySource string `json:"keySource,omitempty" xml:"-"`
 }
 
 type DataItemLocation struct {
@@ -242,9 +264,7 @@ func (r *RecordInfo) String(_type, title, host string) string {
 	}
 	if title == "" {
 		title = strings.TrimSpace(strings.ReplaceAll(r.Desc, "\n", " "))
-		if len(title) > 80 {
-			title = title[:80] + "..."
-		}
+		title = truncateText(title, 80, "...")
 	}
 	buf.WriteString(fmt.Sprintf("[%s|%s]\n", _type, title))
 	for _, item := range r.DataList.DataItems {
@@ -264,17 +284,33 @@ func (r *RecordInfo) String(_type, title, host string) string {
 		switch item.DataType {
 		case "2":
 			// 图片
-			buf.WriteString(fmt.Sprintf("  ![图片](http://%s/image/%s)\n", host, item.FullMD5))
+			if strings.TrimSpace(host) == "" || strings.TrimSpace(item.FullMD5) == "" {
+				buf.WriteString("  [图片]\n")
+			} else {
+				buf.WriteString(fmt.Sprintf("  ![图片](http://%s/image/%s)\n", host, item.FullMD5))
+			}
 		case "4":
 			//视频
-			buf.WriteString(fmt.Sprintf("  ![视频](http://%s/video/%s)\n", host, item.FullMD5))
+			if strings.TrimSpace(host) == "" || strings.TrimSpace(item.FullMD5) == "" {
+				buf.WriteString("  [视频]\n")
+			} else {
+				buf.WriteString(fmt.Sprintf("  ![视频](http://%s/video/%s)\n", host, item.FullMD5))
+			}
 		case "8":
 			// 文件
 			// FIXME 笔记的第一条是 htm 数据，暂时跳过处理
 			if item.DataFmt == ".htm" {
 				continue
 			}
-			buf.WriteString(fmt.Sprintf("  [文件|%s](http://%s/file/%s)\n", item.DataTitle, host, item.FullMD5))
+			title := strings.TrimSpace(item.DataTitle)
+			if title == "" {
+				title = "文件"
+			}
+			if strings.TrimSpace(host) == "" || strings.TrimSpace(item.FullMD5) == "" {
+				buf.WriteString(fmt.Sprintf("  [文件|%s]\n", title))
+			} else {
+				buf.WriteString(fmt.Sprintf("  [文件|%s](http://%s/file/%s)\n", title, host, item.FullMD5))
+			}
 		case "5":
 			// Link
 			buf.WriteString(fmt.Sprintf("  [链接|%s](%s)\n", item.DataTitle, item.Link))
@@ -348,6 +384,19 @@ type WCPayInfo struct {
 	PayMemo           string `xml:"pay_memo"`          // 支付备注
 	ReceiverUsername  string `xml:"receiver_username"` // 接收方用户名
 	PayerUsername     string `xml:"payer_username"`    // 支付方用户名
+	TemplateID        string `xml:"templateid"`
+	URL               string `xml:"url"`
+	IconURL           string `xml:"iconurl"`
+	ReceiverTitle     string `xml:"receivertitle"`
+	SenderTitle       string `xml:"sendertitle"`
+	SceneText         string `xml:"scenetext"`
+	SenderDesc        string `xml:"senderdes"`
+	ReceiverDesc      string `xml:"receiverdes"`
+	NativeURL         string `xml:"nativeurl"`
+	SceneID           string `xml:"sceneid"`
+	InnerType         string `xml:"innertype"`
+	PayMsgID          string `xml:"paymsgid"`
+	LocalLogoIcon     string `xml:"locallogoicon"`
 }
 
 // FinderFeed 视频号信息

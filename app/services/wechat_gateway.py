@@ -8,14 +8,24 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from xml.etree import ElementTree as ET
 
+from sqlalchemy import insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from ..models import Chat, Contact, Message, SyncState, WechatSubsession, WechatSubsessionMembership, WechatSubsessionTurn
+from .reply_contact_context import DEFAULT_REPLY_REQUIREMENTS
+from .wechat_message_normalizer import (
+    extract_app_message_fields,
+    normalize_message_type,
+    normalize_wechat_message,
+)
 
 CONFIG_KEY = "wechat_gateway_config"
 TRIGGER_RULES_KEY = "wechat_gateway_trigger_rules"
 DEDUP_PREFIX = "wechat_gateway_dedup"
+AUTO_REPLY_ATTEMPT_PREFIX = "wechat_auto_reply_attempt"
+AUTO_REPLY_DELIVERY_PREFIX = "wechat_auto_reply_delivery"
 _RULE_SCOPE = "wechat_gateway"
 _GROUP_TEXT_PREFIX_RE = re.compile(r"^(?P<sender>[^:\n]{1,128}):\n(?P<body>.*)$", re.DOTALL)
 
@@ -31,6 +41,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "header_name": "VideosApi-token",
     "token": "",
     "app_id": "",
+    "ws_enabled": False,
+    "self_wxid": "",
     "callback_path": "/api/wechat-gateway/callback",
     "callback_public_url": "",
     "device_type": "ipad",
@@ -68,6 +80,29 @@ DEFAULT_TRIGGER_RULES: dict[str, Any] = {
     "private_wakeup_exit_commands": [],
     "min_text_length": 1,
     "human_reply_suppression_seconds": 0,
+    "reply_mode": "ai",
+    "delivery_mode": "auto",
+    "fixed_reply_text": "",
+    "reply_system_prompt": DEFAULT_REPLY_REQUIREMENTS,
+    "reply_agent_web_search": True,
+    "max_reply_chars": 0,
+    "blocked_keywords": [],
+    "group_require_mention": False,
+    "schedule_enabled": False,
+    "schedule_start": "09:00",
+    "schedule_end": "18:00",
+    "active_days": [0, 1, 2, 3, 4, 5, 6],
+    "max_input_chars": 0,
+    "reply_cooldown_seconds": 0,
+    "blocked_reply_keywords": [],
+    "low_info_enabled": True,
+    "low_info_emoji_enabled": True,
+    "low_info_repeat_enabled": True,
+    "low_info_min_repeats": 4,
+    "low_info_max_chars": 80,
+    "low_info_repeat_units": ["哈", "呵", "嘻", "嘿", "h", "ha"],
+    "low_info_emoji_names": ["微笑", "呲牙", "大笑", "偷笑", "憨笑", "捂脸", "笑哭", "破涕为笑", "旺柴", "调皮", "愉快", "得意", "害羞", "鼓掌", "强", "握手", "抱拳", "玫瑰", "爱心"],
+    "low_info_allow_texts": [],
 }
 
 
@@ -153,6 +188,11 @@ def _normalize_trigger_rules(payload: dict[str, Any] | None) -> dict[str, Any]:
         "blacklist_sender_ids",
         "private_wakeup_whitelist_chat_ids",
         "private_wakeup_exit_commands",
+        "blocked_keywords",
+        "blocked_reply_keywords",
+        "low_info_repeat_units",
+        "low_info_emoji_names",
+        "low_info_allow_texts",
     ):
         conf[key] = _dedupe_list(conf.get(key))
     conf["enabled"] = bool(conf.get("enabled"))
@@ -166,9 +206,28 @@ def _normalize_trigger_rules(payload: dict[str, Any] | None) -> dict[str, Any]:
     conf["blacklist_sender_ids_enabled"] = bool(conf.get("blacklist_sender_ids_enabled"))
     conf["private_wakeup_whitelist_enabled"] = bool(conf.get("private_wakeup_whitelist_enabled"))
     conf["min_text_length"] = _clamp_int(conf.get("min_text_length"), 1, 0, 10000)
+    for key in ('low_info_enabled', 'low_info_emoji_enabled', 'low_info_repeat_enabled'):
+        conf[key] = bool(conf.get(key))
+    conf['low_info_min_repeats'] = _clamp_int(conf.get('low_info_min_repeats'), 4, 2, 20)
+    conf['low_info_max_chars'] = _clamp_int(conf.get('low_info_max_chars'), 80, 1, 200)
     conf["random_rate"] = _clamp_int(conf.get("random_rate"), 0, 0, 100)
     conf["human_reply_suppression_seconds"] = _clamp_int(conf.get("human_reply_suppression_seconds"), 0, 0, 864000)
     conf["private_wakeup_window_seconds"] = _clamp_int(conf.get("private_wakeup_window_seconds"), 180, 0, 864000)
+    conf["reply_mode"] = conf.get("reply_mode") if conf.get("reply_mode") in {"ai", "fixed"} else "ai"
+    conf["delivery_mode"] = conf.get("delivery_mode") if conf.get("delivery_mode") in {"auto", "preview"} else "auto"
+    conf["fixed_reply_text"] = str(conf.get("fixed_reply_text") or "").strip()[:10000]
+    conf["reply_system_prompt"] = str(conf.get("reply_system_prompt") or "").strip()[:10000]
+    conf['reply_agent_web_search'] = bool(conf.get('reply_agent_web_search'))
+    conf["max_reply_chars"] = _clamp_int(conf.get("max_reply_chars"), 0, 0, 10000)
+    conf["max_input_chars"] = _clamp_int(conf.get("max_input_chars"), 0, 0, 100000)
+    conf["reply_cooldown_seconds"] = _clamp_int(conf.get("reply_cooldown_seconds"), 0, 0, 86400)
+    days = conf.get("active_days")
+    conf["active_days"] = sorted({day for day in days if type(day) is int and 0 <= day <= 6}) if isinstance(days, list) else list(range(7))
+    conf["group_require_mention"] = bool(conf.get("group_require_mention"))
+    conf["schedule_enabled"] = bool(conf.get("schedule_enabled"))
+    for key in ("schedule_start", "schedule_end"):
+        value = str(conf.get(key) or "")
+        conf[key] = value if re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value) else DEFAULT_TRIGGER_RULES[key]
     return conf
 
 
@@ -176,10 +235,29 @@ def load_trigger_rules(db: Session) -> dict[str, Any]:
     return _normalize_trigger_rules(_load_state_dict(db, TRIGGER_RULES_KEY))
 
 
+def validate_trigger_rules(merged: dict[str, Any]) -> dict[str, Any]:
+    """Shared validation for persisted rules and non-persisting draft simulations."""
+    normalized = _normalize_trigger_rules(merged)
+    if normalized["reply_mode"] == "fixed" and not normalized["fixed_reply_text"]:
+        raise ValueError("固定回复不能为空")
+    if normalized["schedule_enabled"]:
+        for key in ("schedule_start", "schedule_end"):
+            if str(merged.get(key)) != normalized[key]:
+                raise ValueError("生效时间必须为 HH:MM")
+    for pattern in normalized["regexp_patterns"]:
+        try:
+            re.compile(pattern)
+        except re.error:
+            raise ValueError("触发正则无效，请检查括号、转义和表达式格式") from None
+    return normalized
+
+
 def save_trigger_rules(db: Session, payload: dict[str, Any]) -> dict[str, Any]:
     current = load_trigger_rules(db)
     merged = {**current, **(payload or {})}
-    normalized = _normalize_trigger_rules(merged)
+    # Emergency pause must remain available even if legacy rules contain invalid input.
+    pause_only = payload in ({"smart_reply_enabled": False}, {"enabled": False})
+    normalized = _normalize_trigger_rules(merged) if pause_only else validate_trigger_rules(merged)
     _save_state_dict(db, TRIGGER_RULES_KEY, normalized)
     return normalized
 
@@ -195,6 +273,8 @@ def load_config(db: Session) -> dict[str, Any]:
         conf[key] = _dedupe_list(conf.get(key))
     conf["enabled"] = bool(conf.get("enabled"))
     conf["outbound_enabled"] = bool(conf.get("outbound_enabled"))
+    conf["ws_enabled"] = bool(conf.get("ws_enabled"))
+    conf["self_wxid"] = str(conf.get("self_wxid") or "").strip()
     conf["sessionized_reply_enabled"] = bool(conf.get("sessionized_reply_enabled"))
     conf["fixed_subsession_enabled"] = bool(conf.get("fixed_subsession_enabled"))
     conf["auto_learn_subsession_members"] = bool(conf.get("auto_learn_subsession_members", True))
@@ -328,6 +408,8 @@ def load_config_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
         conf[key] = _dedupe_list(conf.get(key))
     conf["enabled"] = bool(conf.get("enabled"))
     conf["outbound_enabled"] = bool(conf.get("outbound_enabled"))
+    conf["ws_enabled"] = bool(conf.get("ws_enabled"))
+    conf["self_wxid"] = str(conf.get("self_wxid") or "").strip()
     conf["sessionized_reply_enabled"] = bool(conf.get("sessionized_reply_enabled"))
     conf["fixed_subsession_enabled"] = bool(conf.get("fixed_subsession_enabled"))
     conf["auto_learn_subsession_members"] = bool(conf.get("auto_learn_subsession_members", True))
@@ -364,53 +446,17 @@ def _string_field(value: Any) -> str:
     return str(value or "").strip()
 
 
-
 def _extract_appmsg_fields(content: Any) -> dict[str, str]:
-    text_value = str(content or "").strip()
-    if not text_value or "<appmsg" not in text_value.lower():
-        return {}
-    try:
-        root = ET.fromstring(text_value)
-    except Exception:
-        return {}
+    """Compatibility wrapper for legacy callers."""
+    return extract_app_message_fields(content)
 
-    def find_text(*paths: str) -> str:
-        for path in paths:
-            try:
-                value = root.findtext(path)
-            except Exception:
-                value = None
-            value = str(value or "").strip()
-            if value:
-                return value
-        return ""
-
-    return {
-        "title": find_text(".//appmsg/title", ".//title"),
-        "desc": find_text(".//appmsg/des", ".//appmsg/description", ".//des"),
-        "url": find_text(".//appmsg/url", ".//url"),
-        "sourceusername": find_text(".//appmsg/sourceusername", ".//sourceusername"),
-        "sourcedisplayname": find_text(".//appmsg/sourcedisplayname", ".//sourcedisplayname"),
-        "thumburl": find_text(".//appmsg/thumburl", ".//thumburl", ".//weappinfo/weappiconurl"),
-    }
 
 def _normalize_message_type(msg_type: Any) -> str:
-    mapping = {
-        1: "text",
-        3: "image",
-        34: "voice",
-        43: "video",
-        47: "emoji",
-        48: "location",
-        49: "app",
-        10000: "system",
-        10002: "system",
-    }
-    try:
-        num = int(msg_type)
-    except Exception:
-        return "other"
-    return mapping.get(num, "other")
+    """Compatibility wrapper preserving the gateway's unknown-type fallback."""
+    normalized = normalize_message_type(msg_type)
+    if normalized in {"text", "image", "voice", "video", "emoji", "location", "link", "file", "system"}:
+        return normalized
+    return "other"
 
 
 def _split_group_sender(chat_id: str, content: str) -> tuple[str | None, str]:
@@ -795,16 +841,43 @@ def evaluate_auto_reply_rules(
     message_time: Any = None,
     wait_for_human_reply_suppression: bool = False,
     message_meta: Any = None,
+    rules_override: dict[str, Any] | None = None,
+    now: datetime | None = None,
+    trigger_match: str | None = None,
 ) -> dict[str, Any]:
-    rules = load_trigger_rules(db)
+    rules = _normalize_trigger_rules(rules_override) if rules_override is not None else load_trigger_rules(db)
     if not rules.get("enabled"):
         return {"scope": _RULE_SCOPE, "allowed": False, "reason": "trigger_rules_disabled", "rules": rules}
     if not rules.get("smart_reply_enabled"):
         return {"scope": _RULE_SCOPE, "allowed": False, "reason": "smart_reply_disabled", "rules": rules}
+    current = now or datetime.now(timezone.utc)
+    if current.astimezone(timezone(timedelta(hours=8))).weekday() not in rules['active_days']:
+        return {"allowed": False, "reason": "inactive_day", "rules": rules}
+    if rules['max_input_chars'] and len(str(text or '')) > rules['max_input_chars']:
+        return {"allowed": False, "reason": "input_too_long", "rules": rules}
+    cooldown = rules['reply_cooldown_seconds']
+    if cooldown:
+        threshold = current.astimezone().replace(tzinfo=None) - timedelta(seconds=cooldown)
+        recent = db.query(Message.id).filter(
+            Message.chat_id == chat_id, Message.direction == 'out', Message.timestamp >= threshold,
+            Message.meta['auto_reply']['trigger_message_id'].as_integer().isnot(None),
+        ).first()
+        if recent:
+            return {"allowed": False, "reason": "reply_cooldown", "rules": rules}
     if is_group and not rules.get("group_enabled"):
         return {"scope": _RULE_SCOPE, "allowed": False, "reason": "group_disabled", "rules": rules}
     if (not is_group) and not rules.get("private_enabled"):
         return {"scope": _RULE_SCOPE, "allowed": False, "reason": "private_disabled", "rules": rules}
+    if rules["schedule_enabled"]:
+        clock = (now or datetime.now(timezone.utc)).astimezone(timezone(timedelta(hours=8))).strftime("%H:%M")
+        start, end = rules["schedule_start"], rules["schedule_end"]
+        in_window = (start <= clock < end) if start < end else (clock >= start or clock < end)
+        if not in_window:
+            return {"scope": _RULE_SCOPE, "allowed": False, "reason": "outside_schedule", "rules": rules}
+    if any(word.casefold() in str(text or "").casefold() for word in rules["blocked_keywords"]):
+        return {"scope": _RULE_SCOPE, "allowed": False, "reason": "input_keyword_blocked", "rules": rules}
+    if is_group and rules["group_require_mention"] and not _message_has_at_mention(message_meta):
+        return {"scope": _RULE_SCOPE, "allowed": False, "reason": "group_mention_required", "rules": rules}
     if rules.get("whitelist_chat_ids_enabled") and rules.get("whitelist_chat_ids") and chat_id not in set(rules.get("whitelist_chat_ids") or []):
         return {"scope": _RULE_SCOPE, "allowed": False, "reason": "chat_not_whitelisted", "rules": rules}
     if rules.get("blacklist_chat_ids_enabled") and chat_id in set(rules.get("blacklist_chat_ids") or []):
@@ -814,7 +887,14 @@ def evaluate_auto_reply_rules(
     if sender_id and rules.get("blacklist_sender_ids_enabled") and sender_id in set(rules.get("blacklist_sender_ids") or []):
         return {"scope": _RULE_SCOPE, "allowed": False, "reason": "sender_blacklisted", "rules": rules}
     normalized_text = str(text or "").strip()
+    from .reply_input_filter import low_information_reason
+    content_text = _strip_matching_prefix(normalized_text, list(rules.get("prefixes") or []))
+    low_info = low_information_reason(content_text, rules)
+    if low_info:
+        return {"scope": _RULE_SCOPE, "allowed": False, "reason": low_info, "rules": rules}
     matched, match_reason = _pick_trigger_match(normalized_text, rules, is_group=is_group, message_meta=message_meta)
+    if trigger_match == "random" and rules["random_rate"] > 0:
+        matched, match_reason = True, "random"
     if not matched:
         return {"scope": _RULE_SCOPE, "allowed": False, "reason": str(match_reason or "no_trigger_match"), "rules": rules}
     content_text = _strip_matching_prefix(normalized_text, list(rules.get("prefixes") or []))
@@ -890,14 +970,10 @@ def _resolve_display_name(db: Session, wxid: str | None, fallback: str | None = 
             if contact:
                 alias = str(contact.alias or "").strip()
                 name = str(contact.name or "").strip()
-                if name and name != candidate:
-                    return name
                 if alias and alias != candidate:
                     return alias
-                if name:
+                if name and name != candidate:
                     return name
-                if alias:
-                    return alias
         except Exception:
             pass
         try:
@@ -933,6 +1009,93 @@ def _find_recent_outbound_by_external_new_msg_id(db: Session, chat_id: str, exte
     return None
 
 
+def _find_auto_reply_attempt_by_delivery(
+    db: Session,
+    *,
+    chat_id: str,
+    external_new_msg_id: Any,
+) -> dict[str, Any] | None:
+    target_message_id = str(external_new_msg_id or "").strip()
+    target_chat_id = str(chat_id or "").strip()
+    if not target_message_id or not target_chat_id:
+        return None
+
+    delivery_row = db.get(
+        SyncState,
+        _auto_reply_delivery_key(target_chat_id, target_message_id),
+    )
+    if delivery_row and delivery_row.value:
+        attempt_row = db.get(SyncState, str(delivery_row.value))
+        indexed_attempt = _json_load(attempt_row.value if attempt_row else None)
+        if _auto_reply_attempt_matches_delivery(
+            indexed_attempt,
+            chat_id=target_chat_id,
+            external_new_msg_id=target_message_id,
+        ):
+            return indexed_attempt
+
+    # Backward-compatible fallback for attempts written before the delivery index existed.
+    rows = (
+        db.query(SyncState)
+        .filter(SyncState.key.like(f"{AUTO_REPLY_ATTEMPT_PREFIX}:%"))
+        .order_by(SyncState.updated_at.desc(), SyncState.key.desc())
+        .all()
+    )
+    for row in rows:
+        attempt = _json_load(row.value)
+        if not _auto_reply_attempt_matches_delivery(
+            attempt,
+            chat_id=target_chat_id,
+            external_new_msg_id=target_message_id,
+        ):
+            continue
+
+        trigger_message_id = attempt.get("trigger_message_id")
+        if trigger_message_id in {None, ""}:
+            try:
+                trigger_message_id = int(str(row.key).rsplit(":", 1)[-1])
+            except (TypeError, ValueError):
+                continue
+        try:
+            attempt["trigger_message_id"] = int(trigger_message_id)
+        except (TypeError, ValueError):
+            continue
+        return attempt
+    return None
+
+
+def _auto_reply_attempt_matches_delivery(
+    attempt: dict[str, Any],
+    *,
+    chat_id: str,
+    external_new_msg_id: str,
+) -> bool:
+    if str(attempt.get("state") or "").strip() not in {
+        "sent_pending_record",
+        "recorded",
+        "delivery_unknown",
+    }:
+        return False
+    delivery_value = attempt.get("delivery")
+    delivery = delivery_value if isinstance(delivery_value, dict) else {}
+    provider_new_message_id = str(delivery.get("provider_new_message_id") or "").strip()
+    attempt_target = str(delivery.get("target") or attempt.get("target") or "").strip()
+    return provider_new_message_id == external_new_msg_id and attempt_target == chat_id
+
+
+def _auto_reply_marker_from_attempt(attempt: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(attempt, dict):
+        return None
+    try:
+        trigger_message_id = int(attempt.get("trigger_message_id"))
+    except (TypeError, ValueError):
+        return None
+    return {
+        "trigger_message_id": trigger_message_id,
+        "reconciled_from_attempt": True,
+    }
+
+
 def ingest_callback_event(db: Session, payload: dict[str, Any]) -> dict[str, Any]:
     event_type = str(payload.get("TypeName") or "").strip()
     app_id = str(payload.get("Appid") or "").strip()
@@ -959,9 +1122,13 @@ def ingest_callback_event(db: Session, payload: dict[str, Any]) -> dict[str, Any
     from_user = _string_field(data.get("FromUserName"))
     to_user = _string_field(data.get("ToUserName"))
     self_wxid = str(payload.get("Wxid") or "").strip()
-    msg_type = _normalize_message_type(data.get("MsgType"))
     raw_text = _string_field(data.get("Content"))
     sender_id, clean_text = _split_group_sender(from_user, raw_text)
+    normalized = normalize_wechat_message(
+        msg_type=data.get("MsgType"),
+        content=clean_text,
+        media_policy="wechatapi",
+    )
     timestamp = _message_timestamp(data.get("CreateTime"))
 
     direction = "out" if self_wxid and from_user == self_wxid else "in"
@@ -972,15 +1139,29 @@ def ingest_callback_event(db: Session, payload: dict[str, Any]) -> dict[str, Any
         chat_id = from_user or to_user
         sender_id = sender_id or from_user
 
-    appmsg_fields = _extract_appmsg_fields(clean_text)
-    display_text = appmsg_fields.get("title") or clean_text
-    if appmsg_fields.get("sourceusername") and str(appmsg_fields.get("sourceusername")).startswith("gh_"):
-        sender_id = appmsg_fields.get("sourceusername") or sender_id
+    display_text = normalized.content_text
+    if normalized.source_username.startswith("gh_"):
+        sender_id = normalized.source_username or sender_id
+    auto_reply_marker = None
     if direction == "out":
+        auto_reply_marker = _auto_reply_marker_from_attempt(
+            _find_auto_reply_attempt_by_delivery(
+                db,
+                chat_id=chat_id,
+                external_new_msg_id=data.get("NewMsgId"),
+            )
+        )
         existing_outbound = _find_recent_outbound_by_external_new_msg_id(db, chat_id, data.get("NewMsgId"))
         if existing_outbound is not None:
             meta = dict(existing_outbound.meta or {})
-            if not meta.get("auto_reply"):
+            if auto_reply_marker is not None:
+                existing_auto_reply = meta.get("auto_reply")
+                reconciled_auto_reply = dict(existing_auto_reply) if isinstance(existing_auto_reply, dict) else {}
+                reconciled_auto_reply.update(auto_reply_marker)
+                meta["auto_reply"] = reconciled_auto_reply
+                meta.pop("manual", None)
+                meta.pop("human_manual", None)
+            elif not meta.get("auto_reply"):
                 meta["manual"] = True
                 meta["human_manual"] = True
             msg_id_value = data.get("MsgId") if isinstance(data, dict) else None
@@ -1024,8 +1205,15 @@ def ingest_callback_event(db: Session, payload: dict[str, Any]) -> dict[str, Any
             "mode": subsession.mode,
         }
 
+    outbound_classification_meta: dict[str, Any] = {}
+    if direction == "out":
+        if auto_reply_marker is not None:
+            outbound_classification_meta["auto_reply"] = auto_reply_marker
+        else:
+            outbound_classification_meta.update({"manual": True, "human_manual": True})
+
     _ensure_chat(db, chat_id, title=None, timestamp=timestamp)
-    _ensure_contact(db, sender_id, name=appmsg_fields.get("sourcedisplayname") or None)
+    _ensure_contact(db, sender_id, name=normalized.contents.get("sourcedisplayname") or None)
     sender_display_name = _resolve_display_name(db, sender_id, fallback=sender_id)
     talker_display_name = _resolve_display_name(db, chat_id, fallback=chat_id)
     message = Message(
@@ -1035,20 +1223,20 @@ def ingest_callback_event(db: Session, payload: dict[str, Any]) -> dict[str, Any
         talker_name=talker_display_name,
         timestamp=timestamp,
         direction=direction,
-        type="link" if appmsg_fields else msg_type,
+        type=normalized.message_type,
         content_text=display_text,
-        media_url=None,
+        media_url=normalized.media_url,
         meta={
             "source": "wechat_gateway",
-            "contents": appmsg_fields,
-            "display_title": appmsg_fields.get("title") or "",
+            "contents": normalized.contents,
+            "display_title": normalized.display_title,
             "event_type": event_type,
             "external_msg_id": data.get("MsgId"),
             "external_new_msg_id": data.get("NewMsgId"),
             "msg_type": data.get("MsgType"),
             "pipeline": pipeline,
             "subsession": subsession_meta,
-            **({"manual": True, "human_manual": True} if direction == "out" else {}),
+            **outbound_classification_meta,
             "raw": payload,
         },
     )
@@ -1063,7 +1251,7 @@ def ingest_callback_event(db: Session, payload: dict[str, Any]) -> dict[str, Any
         direction=direction,
         timestamp=timestamp,
         content_text=display_text,
-        meta={"source": "wechat_gateway", "event_type": event_type, "contents": appmsg_fields},
+        meta={"source": "wechat_gateway", "event_type": event_type, "contents": normalized.contents},
     )
     db.add(SyncState(key=dedupe_key, value=str(message.id)))
     db.commit()
@@ -1145,8 +1333,20 @@ def ingest_agent_wechat_event(db: Session, payload: dict[str, Any]) -> dict[str,
     raw_direction = str(data.get("direction") or "in").strip().lower()
     direction = "out" if raw_direction in {"out", "send", "sent", "self"} else "in"
     msg_type = str(data.get("type") or data.get("msg_type") or "text").strip() or "text"
+    normalized = normalize_wechat_message(
+        msg_type=msg_type,
+        content=text,
+        contents=message_meta.get("contents"),
+        media_url=data.get("media_url"),
+        media_policy="wechatapi",
+    )
 
-    pipeline = evaluate_inbound_message(load_config(db), chat_id=chat_id, sender_id=sender_id or None, text=text)
+    pipeline = evaluate_inbound_message(
+        load_config(db),
+        chat_id=chat_id,
+        sender_id=sender_id or None,
+        text=normalized.content_text,
+    )
     if pipeline.get("action") == "drop":
         db.add(SyncState(key=dedupe_key, value="dropped"))
         db.commit()
@@ -1161,14 +1361,16 @@ def ingest_agent_wechat_event(db: Session, payload: dict[str, Any]) -> dict[str,
         talker_name=talker_name or _resolve_display_name(db, chat_id, fallback=str(data.get("chat_name") or chat_id)),
         timestamp=timestamp,
         direction=direction,
-        type=msg_type,
-        content_text=text,
-        media_url=str(data.get("media_url") or "").strip() or None,
+        type=normalized.message_type,
+        content_text=normalized.content_text,
+        media_url=normalized.media_url,
         meta={
             "source": "wechat_gateway",
             "agent_source": source,
             "agent_channel": channel,
             "agent_message_id": message_id,
+            "contents": normalized.contents,
+            "display_title": normalized.display_title,
             "pipeline": pipeline,
             "raw": data,
         },
@@ -1210,9 +1412,174 @@ def _looks_like_manual_wechat_outbound_event(*, result: dict[str, Any], data: di
     return False
 
 
-def record_outbound_message(db: Session, *, target: str, text: str, provider_result: dict[str, Any] | None = None) -> Message:
+def _auto_reply_attempt_key(message_id: int) -> str:
+    return f"{AUTO_REPLY_ATTEMPT_PREFIX}:{int(message_id)}"
+
+
+def _auto_reply_delivery_key(target: str, provider_new_message_id: Any) -> str:
+    return f"{AUTO_REPLY_DELIVERY_PREFIX}:{str(target or '').strip()}:{str(provider_new_message_id or '').strip()}"
+
+
+def _build_auto_reply_attempt_insert(*, key: str, value: str):
+    return insert(SyncState).values(key=key, value=value)
+
+
+def _is_unique_constraint_error(exc: IntegrityError) -> bool:
+    original = getattr(exc, "orig", None)
+    sqlstate = getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)
+    if str(sqlstate or "") == "23505":
+        return True
+    text = str(original or exc).lower()
+    return "unique constraint" in text or "duplicate key" in text or "is not unique" in text
+
+
+def claim_auto_reply_attempt(db: Session, *, message_id: int, target: str) -> dict[str, Any]:
+    key = _auto_reply_attempt_key(message_id)
+    now = datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
+    attempt = {
+        "state": "claimed",
+        "trigger_message_id": int(message_id),
+        "target": str(target or ""),
+        "claimed_at": now,
+        "updated_at": now,
+    }
+
+    # End the read transaction opened while evaluating the message so concurrent
+    # workers can race on one atomic INSERT instead of both upgrading stale reads.
+    db.rollback()
+    last_locked_error: OperationalError | None = None
+    for retry_index in range(20):
+        try:
+            db.execute(
+                _build_auto_reply_attempt_insert(
+                    key=key,
+                    value=json.dumps(attempt, ensure_ascii=False),
+                )
+            )
+            db.commit()
+            return {"claimed": True, "attempt": attempt}
+        except IntegrityError as exc:
+            db.rollback()
+            if not _is_unique_constraint_error(exc):
+                raise
+            row = db.get(SyncState, key)
+            return {"claimed": False, "attempt": _json_load(row.value if row else None)}
+        except OperationalError as exc:
+            db.rollback()
+            if "locked" not in str(exc).lower():
+                raise
+            last_locked_error = exc
+            try:
+                row = db.get(SyncState, key)
+            except OperationalError as read_exc:
+                db.rollback()
+                if "locked" not in str(read_exc).lower():
+                    raise
+                last_locked_error = read_exc
+                row = None
+            if row is not None:
+                return {"claimed": False, "attempt": _json_load(row.value)}
+            db.rollback()
+            time.sleep(min(0.005 * (retry_index + 1), 0.05))
+    if last_locked_error is not None:
+        raise last_locked_error
+    raise RuntimeError(f"failed to claim auto reply attempt: {message_id}")
+
+
+def update_auto_reply_attempt(
+    db: Session,
+    *,
+    message_id: int,
+    state: str,
+    delivery: dict[str, Any] | None = None,
+    error: str | None = None,
+    commit: bool = True,
+) -> dict[str, Any]:
+    key = _auto_reply_attempt_key(message_id)
+    row = db.get(SyncState, key)
+    if row is None:
+        raise RuntimeError(f"auto reply attempt not found: {message_id}")
+
+    attempt = _json_load(row.value)
+    attempt.update(
+        {
+            "state": str(state or "").strip() or "unknown",
+            "trigger_message_id": int(message_id),
+            "updated_at": datetime.utcnow().isoformat(timespec="milliseconds") + "Z",
+        }
+    )
+    if isinstance(delivery, dict):
+        attempt["delivery"] = dict(delivery)
+        delivery_target = str(delivery.get("target") or attempt.get("target") or "").strip()
+        provider_new_message_id = str(delivery.get("provider_new_message_id") or "").strip()
+        if delivery_target and provider_new_message_id:
+            delivery_key = _auto_reply_delivery_key(delivery_target, provider_new_message_id)
+            delivery_row = db.get(SyncState, delivery_key)
+            if delivery_row is None:
+                delivery_row = SyncState(key=delivery_key, value=key)
+            else:
+                delivery_row.value = key
+            db.add(delivery_row)
+    if error:
+        attempt["error"] = str(error)
+    elif attempt["state"] in {"sent_pending_record", "recorded"}:
+        attempt.pop("error", None)
+    row.value = json.dumps(attempt, ensure_ascii=False)
+    db.add(row)
+    if commit:
+        db.commit()
+        db.refresh(row)
+    return attempt
+
+
+def record_outbound_message(
+    db: Session,
+    *,
+    target: str,
+    text: str,
+    provider_result: dict[str, Any] | None = None,
+    commit: bool = True,
+) -> Message:
     result = provider_result if isinstance(provider_result, dict) else {}
     data = _extract_provider_result_data(result)
+    external_msg_id = data.get("msgId") or data.get("MsgId")
+    external_new_msg_id = data.get("newMsgId") or data.get("NewMsgId")
+    result_auto_reply_value = result.get("auto_reply")
+    result_auto_reply = dict(result_auto_reply_value) if isinstance(result_auto_reply_value, dict) else None
+    is_auto_reply = (
+        str(result.get("source") or "").strip() == "wechat_gateway_auto_reply"
+        or result_auto_reply is not None
+    )
+
+    existing_outbound = _find_recent_outbound_by_external_new_msg_id(db, target, external_new_msg_id)
+    if existing_outbound is not None:
+        meta = dict(existing_outbound.meta or {})
+        meta["external_msg_id"] = external_msg_id
+        meta["external_new_msg_id"] = external_new_msg_id
+        meta["provider_result"] = result
+        if is_auto_reply:
+            existing_auto_reply_value = meta.get("auto_reply")
+            existing_auto_reply = (
+                dict(existing_auto_reply_value) if isinstance(existing_auto_reply_value, dict) else {}
+            )
+            existing_auto_reply.update(result_auto_reply or {"source": "wechat_gateway_auto_reply"})
+            meta["auto_reply"] = existing_auto_reply
+            meta.pop("manual", None)
+            meta.pop("human_manual", None)
+        elif _looks_like_manual_wechat_outbound_event(result=result, data=data) and not meta.get("auto_reply"):
+            meta["manual"] = True
+            meta["human_manual"] = True
+        existing_outbound.type = "text"
+        existing_outbound.content_text = str(text or "")
+        existing_outbound.media_url = None
+        existing_outbound.meta = meta
+        existing_outbound.send_status = "sent"
+        db.add(existing_outbound)
+        if commit:
+            db.commit()
+            db.refresh(existing_outbound)
+        return existing_outbound
+
     timestamp = datetime.now()
     existing_chat = db.get(Chat, target)
     existing_contact = db.get(Contact, target)
@@ -1233,6 +1600,13 @@ def record_outbound_message(db: Session, *, target: str, text: str, provider_res
             "channel": subsession.channel,
             "mode": subsession.mode,
         }
+    outbound_classification_meta: dict[str, Any] = {}
+    if is_auto_reply:
+        outbound_classification_meta["auto_reply"] = result_auto_reply or {
+            "source": "wechat_gateway_auto_reply"
+        }
+    elif _looks_like_manual_wechat_outbound_event(result=result, data=data):
+        outbound_classification_meta.update({"manual": True, "human_manual": True})
     message = Message(
         chat_id=target,
         sender_id=None,
@@ -1245,11 +1619,11 @@ def record_outbound_message(db: Session, *, target: str, text: str, provider_res
         media_url=None,
         meta={
             "source": "wechat_gateway",
-            "external_msg_id": data.get("msgId") or data.get("MsgId"),
-            "external_new_msg_id": data.get("newMsgId") or data.get("NewMsgId"),
+            "external_msg_id": external_msg_id,
+            "external_new_msg_id": external_new_msg_id,
             "provider_result": result,
             "subsession": subsession_meta,
-            **({"manual": True, "human_manual": True} if _looks_like_manual_wechat_outbound_event(result=result, data=data) else {}),
+            **outbound_classification_meta,
         },
         send_status="sent",
     )
@@ -1266,6 +1640,7 @@ def record_outbound_message(db: Session, *, target: str, text: str, provider_res
         content_text=str(text or ""),
         meta={"source": "wechat_gateway", "provider_result": result},
     )
-    db.commit()
-    db.refresh(message)
+    if commit:
+        db.commit()
+        db.refresh(message)
     return message

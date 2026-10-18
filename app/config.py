@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     CORS_ALLOW_ORIGINS: str | None = None
 
     # chatlog
-    CHATLOG_HTTP_BASE: str = Field(default="http://127.0.0.1:5030")
+    CHATLOG_HTTP_BASE: str = Field(default="http://127.0.0.1:5031")
     CHATLOG_DIR: str | None = None
     CHATLOG_HTTP_SESSION_TIMEOUT_SECONDS: int = Field(default=5)
     CHATLOG_HTTP_TIMEOUT_SECONDS: int = Field(default=10)
@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     AGENT_API_TOKENS: str | None = None
     AGENT_API_ALLOWLIST: str | None = None
     AGENT_API_BLOCKLIST: str | None = None
+    DATA_API_CLIENTS: str | None = None  # JSON: project -> token, scopes, requests_per_minute
+    DATA_API_TIMEZONE: str = "Asia/Shanghai"  # timezone of legacy naive source timestamps
 
     # DB
     DATABASE_URL: str = Field(default="sqlite:///./data/app.db")
@@ -44,10 +46,16 @@ class Settings(BaseSettings):
 
     # LLM
     SILICONFLOW_API_KEY: str | None = None
-    SILICONFLOW_API_URL: str | None = "https://df.dawnloadai.com:9888/v1"
-    SILICONFLOW_MODEL: str | None = "deepseek-ai/DeepSeek-V4-Pro"
+    SILICONFLOW_API_URL: str | None = "https://app.watertimber.us/v1"
+    SILICONFLOW_MODEL: str | None = "gpt-5.5"
     SILICONFLOW_TOOL_MODEL: str | None = "MiniMax-M3"
-    AI_MAX_PARALLEL: int = 3
+    AI_MAX_PARALLEL: int = 32
+    ONEPAGE_IMAGE_MODE: str = Field(default="auto")  # auto | image | local
+    ONEPAGE_IMAGE_API_URL: str | None = None
+    ONEPAGE_IMAGE_API_KEY: str | None = None
+    ONEPAGE_IMAGE_MODEL: str = Field(default="MiniMax-M3")
+    ONEPAGE_IMAGE_SIZE: str = Field(default="1024x1536")
+    ONEPAGE_IMAGE_QUALITY: str = Field(default="medium")
 
     # Market data
     TUSHARE_TOKEN: str | None = None
@@ -78,6 +86,8 @@ class Settings(BaseSettings):
     MEDIA_COLLECTOR_DAILY_HOUR: int = Field(default=5)
     MEDIA_COLLECTOR_DAILY_MINUTE: int = Field(default=0)
     MEDIA_COLLECTOR_TIMEOUT_SECONDS: int = Field(default=240)
+    MEDIA_COLLECTOR_AUTO_BOOTSTRAP: bool = Field(default=True)
+    MEDIA_COLLECTOR_BOOTSTRAP_TIMEOUT_SECONDS: int = Field(default=60)
 
     # Media cache lifecycle
     MEDIA_CACHE_CLEANUP_ENABLED: bool = True

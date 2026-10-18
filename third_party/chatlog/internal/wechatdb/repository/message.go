@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -10,6 +11,11 @@ import (
 
 	"github.com/rs/zerolog/log"
 )
+
+type messageChangeDataSource interface {
+	ResolveChangedMessageTalkers(context.Context, []string, map[string]model.MessageCursor) ([]string, error)
+	GetMessagesAfterFiles(context.Context, string, model.MessageCursor, int, []string) ([]*model.Message, error)
+}
 
 // GetMessages 实现 Repository 接口的 GetMessages 方法
 func (r *Repository) GetMessages(ctx context.Context, startTime, endTime time.Time, talker string, sender string, keyword string, limit, offset int) ([]*model.Message, error) {
@@ -25,6 +31,55 @@ func (r *Repository) GetMessages(ctx context.Context, startTime, endTime time.Ti
 		log.Debug().Msgf("EnrichMessages failed: %v", err)
 	}
 
+	return messages, nil
+}
+
+// GetMessagesAfter returns the oldest rows after cursor. Unlike GetMessages it
+// never asks the datasource for a newest-first window, so a burst larger than
+// the page size cannot create a permanent gap.
+func (r *Repository) GetMessagesAfter(ctx context.Context, talker string, cursor model.MessageCursor, limit int) ([]*model.Message, error) {
+	talker, _ = r.parseTalkerAndSender(ctx, talker, "")
+	messages, err := r.ds.GetMessagesAfter(ctx, talker, cursor, limit)
+	if err != nil {
+		return nil, err
+	}
+	if err := r.EnrichMessages(ctx, messages); err != nil {
+		log.Debug().Msgf("EnrichMessages after cursor failed: %v", err)
+	}
+	return messages, nil
+}
+
+func (r *Repository) ResolveChangedMessageTalkers(
+	ctx context.Context,
+	changedFiles []string,
+	candidates map[string]model.MessageCursor,
+) ([]string, error) {
+	ds, ok := r.ds.(messageChangeDataSource)
+	if !ok {
+		return nil, fmt.Errorf("targeted message change queries are not supported")
+	}
+	return ds.ResolveChangedMessageTalkers(ctx, changedFiles, candidates)
+}
+
+func (r *Repository) GetMessagesAfterFiles(
+	ctx context.Context,
+	talker string,
+	cursor model.MessageCursor,
+	limit int,
+	changedFiles []string,
+) ([]*model.Message, error) {
+	ds, ok := r.ds.(messageChangeDataSource)
+	if !ok {
+		return nil, fmt.Errorf("targeted message change queries are not supported")
+	}
+	talker, _ = r.parseTalkerAndSender(ctx, talker, "")
+	messages, err := ds.GetMessagesAfterFiles(ctx, talker, cursor, limit, changedFiles)
+	if err != nil {
+		return nil, err
+	}
+	if err := r.EnrichMessages(ctx, messages); err != nil {
+		log.Debug().Msgf("EnrichMessages after changed files failed: %v", err)
+	}
 	return messages, nil
 }
 
@@ -57,6 +112,7 @@ func (r *Repository) enrichMessage(msg *model.Message) {
 	// 处理群聊消息
 	if msg.IsChatRoom {
 		// 补充群聊名称
+		r.cacheMu.RLock()
 		if chatRoom, ok := r.chatRoomCache[msg.Talker]; ok {
 			msg.TalkerName = chatRoom.DisplayName()
 
@@ -65,6 +121,7 @@ func (r *Repository) enrichMessage(msg *model.Message) {
 				msg.SenderName = displayName
 			}
 		}
+		r.cacheMu.RUnlock()
 	}
 
 	// 如果不是自己发送的消息且还没有显示名称，尝试补充发送者信息
@@ -124,4 +181,11 @@ func (r *Repository) parseTalkerAndSender(ctx context.Context, talker, sender st
 	}
 
 	return talker, sender
+}
+
+// ResolveTalkers converts display names accepted by the HTTP API into stable
+// database usernames before optimized datasource searches apply their scope.
+func (r *Repository) ResolveTalkers(ctx context.Context, talkers []string) []string {
+	resolved, _ := r.parseTalkerAndSender(ctx, strings.Join(talkers, ","), "")
+	return util.Str2List(resolved, ",")
 }

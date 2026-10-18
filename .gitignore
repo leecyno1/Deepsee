@@ -48,6 +48,8 @@ Thumbs.db
 # Temp
 .jiebang/
 .playwright-mcp/
+.playwright-cli/
+output/
 .hermes/
 scripts/_tmp_*.py
 scripts/*_tmp.py

@@ -167,16 +167,16 @@ func (fg *FileGroup) HandleEvent(event fsnotify.Event) {
 	copy(callbacks, fg.Callbacks)
 	fg.mutex.RUnlock()
 
-	// Asynchronously call callbacks
+	// Run callbacks inline so a burst of filesystem events cannot create an
+	// unbounded number of goroutines. Callbacks in this package are expected to
+	// enqueue/debounce heavier work themselves.
 	for _, callback := range callbacks {
-		go func(cb FileChangeCallback) {
-			if err := cb(event); err != nil {
-				log.Error().
-					Str("file", event.Name).
-					Str("op", event.Op.String()).
-					Err(err).
-					Msg("Callback error")
-			}
-		}(callback)
+		if err := callback(event); err != nil {
+			log.Error().
+				Str("file", event.Name).
+				Str("op", event.Op.String()).
+				Err(err).
+				Msg("Callback error")
+		}
 	}
 }

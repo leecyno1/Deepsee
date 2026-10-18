@@ -1,14 +1,22 @@
 from __future__ import annotations
 
-import logging
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
+import logging
+from datetime import datetime, timezone
+from typing import Callable
 
 from fastapi import APIRouter, Depends, HTTPException, Response, WebSocket, WebSocketDisconnect
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from ..db import SessionLocal
-from ..models import Contact, Message
+from ..models import Message
+from ..services.wechat_auto_reply_transaction import (
+    AutoReplyAdapters,
+    execute_wechat_auto_reply_transaction,
+)
 from ..services.wechatapi_client import WechatApiClient
+from ..services.contact_scoring import extract_prediction_events_to_db
 from ..services.wechat_gateway import (
     apply_outbound_random_delay,
     evaluate_auto_reply_rules,
@@ -22,12 +30,17 @@ from ..services.wechat_gateway import (
     save_config,
     save_subsession_config,
     save_trigger_rules,
+    validate_trigger_rules,
 )
 
 
 router = APIRouter(prefix="/api/wechat-gateway", tags=["wechat-gateway"])
-logger = logging.getLogger(__name__)
+# WeChatAPI can deliver callbacks in bursts. Serializing the SQLite write path keeps
+# those requests from occupying FastAPI's shared worker pool and exhausting DB connections.
+_callback_ingest_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="wechat-callback-ingest")
 _auto_reply_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="wechat-auto-reply")
+_contact_scoring_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="wechat-contact-scoring")
+logger = logging.getLogger(__name__)
 
 
 def get_db():
@@ -38,116 +51,96 @@ def get_db():
         db.close()
 
 
-def _run_auto_reply_for_message(message_id: int) -> None:
-    db = SessionLocal()
+def _run_auto_reply_for_message(
+    message_id: int,
+    session_factory: Callable[[], Session] = SessionLocal,
+) -> None:
+    result = execute_wechat_auto_reply_transaction(
+        message_id,
+        session_factory=session_factory,
+        adapters=AutoReplyAdapters(client_factory=WechatApiClient),
+    )
+    # Store the outcome on its source message: no second queue and no automatic retries.
+    with session_factory() as db:
+        message = db.get(Message, message_id)
+        if message and result.reason != "already_claimed":
+            message.meta = {**(message.meta or {}), "robot_result": {
+                "status": result.status, "reason": result.reason,
+                "reply_preview": (result.execution or {}).get("reply_preview"),
+                "memory": (result.execution or {}).get("memory"),
+                "outbound_message_id": result.outbound_message_id,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }}
+            db.commit()
+
+
+def _refresh_contact_prediction_for_message(
+    message_id: int,
+    session_factory: Callable[[], Session] = SessionLocal,
+) -> None:
+    db = session_factory()
     try:
         message = db.get(Message, message_id)
-        if not message or message.direction != "in" or str(message.type or "") != "text":
+        if (
+            message is None
+            or message.direction != "in"
+            or str(message.type or "") != "text"
+            or not message.sender_id
+            or message.timestamp is None
+        ):
             return
-
-        chat_id = str(message.chat_id or "")
-        sender_id = str(message.sender_id or "") or None
-        is_group = chat_id.endswith("@chatroom")
-        message_time = message.timestamp.isoformat() if message.timestamp else None
-
-        # 1. 先跑规则 + 人类回复抑制等待，确认要回才调用 LLM。
-        #    之前 LLM 先生成、后抑制：切到 Kimi 后生成经常 > human_reply_suppression_seconds(20s)，
-        #    抑制窗口被生成时间吃掉，导致“立即就回”。
-        final_gate = evaluate_auto_reply_rules(
+        extract_prediction_events_to_db(
             db,
-            chat_id=chat_id,
-            sender_id=sender_id,
-            text=str(message.content_text or ""),
-            is_group=is_group,
-            message_time=message_time,
-            wait_for_human_reply_suppression=True,
-            message_meta=message.meta,
+            time_from=message.timestamp,
+            time_to=message.timestamp,
+            contact_ids={str(message.sender_id)},
+            force=False,
         )
-        if not final_gate.get("allowed"):
-            logger.info("wechat auto reply blocked: message_id=%s reason=%s", message_id, final_gate.get("reason"))
-            return
-
-        from ..services.hermes_bridge import call_hermes_for_reply
-
-        subsession_id = ((message.meta or {}).get("subsession") or {}).get("id") or "wechat_gateway_default"
-        # 查发送者备注（用于销售检测等）
-        sender_remark = ""
-        if message.sender_id:
-            contact = db.get(Contact, str(message.sender_id))
-            if contact:
-                sender_remark = str(contact.alias or contact.name or "").strip()
-        generated = call_hermes_for_reply(
-            message_text=str(message.content_text or ""),
-            subsession_id=subsession_id,
-            chat_id=chat_id,
-            sender_id=str(message.sender_id or ""),
-            sender_name=str(message.sender_name or ""),
-            sender_remark=sender_remark,
-            talker_name=str(message.talker_name or message.chat_id or ""),
-            is_group=is_group,
-        )
-        if generated.get("status") != "ok":
-            logger.info("wechat auto reply skipped: message_id=%s status=%s", message_id, generated.get("status"))
-            return
-
-        # 2. 生成期间如果人类手动回复已经落库，兜底再拦一次。
-        recheck = evaluate_auto_reply_rules(
-            db,
-            chat_id=chat_id,
-            sender_id=sender_id,
-            text=str(message.content_text or ""),
-            is_group=is_group,
-            message_time=message_time,
-            wait_for_human_reply_suppression=False,
-            message_meta=message.meta,
-        )
-        if not recheck.get("allowed"):
-            logger.info("wechat auto reply blocked before send: message_id=%s reason=%s", message_id, recheck.get("reason"))
-            return
-
-        cfg = load_config(db)
-        reply_text = str(generated.get("reply") or "")
-        rule = evaluate_outbound_message(cfg, target=str(message.chat_id or ""), text=reply_text)
-        if not rule.get("allowed", True):
-            logger.info("wechat outbound blocked: message_id=%s reason=%s", message_id, rule.get("reason"))
-            return
-
-        client = WechatApiClient(
-            base_url=str(cfg.get("base_url") or ""),
-            token=str(cfg.get("token") or ""),
-            header_name=str(cfg.get("header_name") or "VideosApi-token"),
-            app_id=str(cfg.get("app_id") or ""),
-        )
-        if not client.configured():
-            logger.warning("wechat auto reply skipped: gateway not configured")
-            return
-
-        delay_seconds = apply_outbound_random_delay(cfg)
-        provider_result = client.send_text(to_wxid=str(message.chat_id or ""), text=reply_text)
-        outbound = record_outbound_message(
-            db,
-            target=str(message.chat_id or ""),
-            text=reply_text,
-            provider_result={
-                "source": "wechat_gateway_auto_reply",
-                "auto_reply": {"trigger_message_id": message.id},
-                **(provider_result if isinstance(provider_result, dict) else {}),
-            },
-        )
-        meta = dict(outbound.meta or {})
-        meta["auto_reply"] = {
-            "trigger_message_id": message.id,
-            "rule": final_gate,
-            "prompt_key": generated.get("prompt_key"),
-            "execution": generated.get("execution") or None,
-            "outbound_rule": rule,
-            "outbound_delay_seconds": delay_seconds,
-        }
-        outbound.meta = meta
-        db.add(outbound)
-        db.commit()
     except Exception:
-        logger.exception("wechat auto reply failed: message_id=%s", message_id)
+        db.rollback()
+        logger.exception("incremental contact prediction refresh failed for message_id=%s", message_id)
+    finally:
+        db.close()
+
+
+def _queue_contact_prediction_refresh(
+    db: Session,
+    result: dict,
+    session_factory: Callable[[], Session] = SessionLocal,
+) -> None:
+    if not result.get("stored") or result.get("duplicate"):
+        return
+    message_id = int(result.get("message_id") or 0)
+    message = db.get(Message, message_id) if message_id else None
+    if (
+        message is None
+        or message.direction != "in"
+        or str(message.type or "") != "text"
+        or not message.sender_id
+    ):
+        return
+    _contact_scoring_executor.submit(_refresh_contact_prediction_for_message, message_id, session_factory)
+    result["contact_scoring"] = {"status": "queued", "message_id": message_id}
+
+
+def _ingest_callback_payload(payload: dict, session_factory: Callable[[], Session], *, allow_auto_reply: bool = True) -> dict:
+    db = session_factory()
+    try:
+        result = ingest_callback_event(db, payload)
+        if result.get("stored") and not result.get("duplicate"):
+            message_id = int(result.get("message_id") or 0)
+            message = db.get(Message, message_id) if message_id else None
+            cfg = load_config(db)
+            if (allow_auto_reply and cfg.get("enabled")
+                    and (cfg.get("outbound_enabled") or load_trigger_rules(db).get("delivery_mode") == "preview")
+                    and message and message.direction == "in" and str(message.type or "") == "text"):
+                _auto_reply_executor.submit(_run_auto_reply_for_message, message_id, session_factory)
+                result["auto_reply"] = {"status": "queued", "message_id": message_id}
+        _queue_contact_prediction_refresh(db, result, session_factory)
+        return result
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
 
@@ -155,6 +148,78 @@ def _run_auto_reply_for_message(message_id: int) -> None:
 @router.get("/config")
 def get_wechat_gateway_config(db: Session = Depends(get_db)):
     return load_config(db)
+
+
+@router.get("/device-status")
+def get_wechat_device_status():
+    from ..services.wechat_device_ws import get_status
+
+    return get_status()
+
+
+from ..services.reply_memory import ReplyMemoryConfig, reset_memory
+
+
+@router.get('/memory/config')
+def get_reply_memory_config():
+    from ..services.llm_client import load_ai_config
+    return ReplyMemoryConfig.model_validate(load_ai_config().get('reply_memory') or {}).model_dump()
+
+
+@router.get('/reply-prompt-template')
+def get_reply_prompt_template():
+    from ..services.reply_contact_context import DEFAULT_REPLY_REQUIREMENTS
+    return {'prompt': DEFAULT_REPLY_REQUIREMENTS}
+
+
+@router.put('/memory/config')
+def set_reply_memory_config(payload: ReplyMemoryConfig):
+    from ..services.llm_client import load_ai_config, save_ai_config
+    conf = load_ai_config()
+    conf['reply_memory'] = payload.model_dump()
+    save_ai_config(conf)
+    return conf['reply_memory']
+
+
+@router.post('/memory/reset')
+def reset_reply_memory(payload: dict, db: Session = Depends(get_db)):
+    chat_id = str(payload.get('chat_id') or '').strip()
+    if not chat_id or len(chat_id) > 255:
+        raise HTTPException(422, '请提供需要重置记忆的聊天 ID')
+    return {'status': 'ok', 'after_message_id': reset_memory(db, chat_id), 'history_deleted': False}
+
+
+@router.get('/memory/inspect')
+def inspect_reply_memory(chat_id: str, sender_id: str = '', db: Session = Depends(get_db)):
+    """Inspect the exact context window without AI invocation or message sending."""
+    from ..services.llm_client import load_ai_config
+    from ..services.reply_memory import build_reply_memory
+    chat_id = chat_id.strip()
+    if not chat_id or len(chat_id) > 255:
+        raise HTTPException(422, '请提供聊天 ID')
+    conf = load_ai_config()
+    if (chat_id.endswith('@chatroom') and not sender_id.strip()
+            and ReplyMemoryConfig.model_validate(conf.get('reply_memory') or {}).group_sender_only):
+        raise HTTPException(422, '群聊按发送人隔离时，请提供发送者 ID')
+    history, info = build_reply_memory(db, conf=conf, chat_id=chat_id,
+                                      sender_id=sender_id.strip() or chat_id)
+    return {'chat_id': chat_id, 'memory': info,
+            'history': [{'speaker': '我方' if turn['role'] == 'assistant' else '对方',
+                         'timestamp': turn['timestamp'],
+                         'text': turn['content']} for turn in history]}
+
+
+@router.get("/device-health")
+def get_wechat_device_health(db: Session = Depends(get_db)):
+    cfg = load_config(db)
+    client = WechatApiClient(base_url=cfg["base_url"], token=cfg["token"],
+                             header_name=cfg["header_name"], app_id=cfg["app_id"])
+    try:
+        result = client.check_online()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"status": "ok", "online": result.get("data") is True,
+            "listener": get_wechat_device_status()}
 
 
 @router.post("/config")
@@ -190,8 +255,55 @@ def get_wechat_gateway_trigger_rules(db: Session = Depends(get_db)):
 def set_wechat_gateway_trigger_rules(payload: dict, db: Session = Depends(get_db)):
     if not isinstance(payload, dict):
         return {"status": "error", "error": "invalid payload"}
-    rules = save_trigger_rules(db, payload)
+    try:
+        rules = save_trigger_rules(db, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"status": "ok", "rules": rules}
+
+
+@router.get("/robot-activity")
+def get_robot_activity(db: Session = Depends(get_db)):
+    rows = (db.query(Message)
+            .filter(Message.meta["robot_result"]["status"].as_string().isnot(None))
+            .order_by(Message.id.desc()).limit(40).all())
+    return {"items": [{"message_id": row.id, "chat_id": row.chat_id,
+                       "name": row.talker_name or row.sender_name or row.chat_id,
+                       "text": str(row.content_text or "")[:300],
+                       **row.meta["robot_result"]} for row in rows]}
+
+
+@router.post("/robot-simulate")
+def simulate_robot(payload: dict, db: Session = Depends(get_db)):
+    """Pure rule inspection: no ingestion, AI request, queue or outbound call."""
+    draft = payload.get("rules")
+    if draft is not None and not isinstance(draft, dict):
+        raise HTTPException(422, "rules 必须为规则对象")
+    try:
+        rules = validate_trigger_rules({**load_trigger_rules(db), **(draft or {})})
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+    chat_id = str(payload.get("chat_id") or "simulation_private")
+    is_group = chat_id.endswith("@chatroom")
+    meta = {"raw": {"Wxid": "simulation_bot", "Data": {
+        "MsgSource": "<msgsource><atuserlist>simulation_bot</atuserlist></msgsource>"
+        if payload.get("mentioned") else ""}}}
+    result = evaluate_auto_reply_rules(
+        db, chat_id=chat_id, sender_id=str(payload.get("sender_id") or chat_id),
+        text=str(payload.get("text") or ""), is_group=is_group,
+        message_meta=meta, rules_override=rules,
+    )
+    config = load_config(db)
+    result["gateway_enabled"] = config["enabled"]
+    result["outbound_enabled"] = config["outbound_enabled"]
+    result["reply_preview"] = rules.get("fixed_reply_text") if result["allowed"] and rules.get("reply_mode") == "fixed" else None
+    if result["reply_preview"] and rules["max_reply_chars"] and len(result["reply_preview"]) > rules["max_reply_chars"]:
+        result.update(allowed=False, reason="reply_too_long", reply_preview=None)
+    if result.get('reply_preview') and any(word.casefold() in result['reply_preview'].casefold() for word in rules['blocked_reply_keywords']):
+        result.update(allowed=False, reason='output_keyword_blocked', reply_preview=None)
+    result["simulation_scope"] = "draft" if draft is not None else "saved"
+    result["sends_message"] = False
+    return result
 
 
 @router.post("/evaluate-reply")
@@ -232,14 +344,26 @@ def bind_wechat_gateway_callback(db: Session = Depends(get_db)):
 
 
 @router.post("/callback")
-def receive_wechat_gateway_callback(payload: dict, response: Response, db: Session = Depends(get_db)):
-    result = ingest_callback_event(db, payload if isinstance(payload, dict) else {})
-    if result.get("stored") and not result.get("duplicate"):
-        message_id = int(result.get("message_id") or 0)
-        message = db.get(Message, message_id) if message_id else None
-        if message and message.direction == "in" and str(message.type or "") == "text":
-            _auto_reply_executor.submit(_run_auto_reply_for_message, message_id)
-            result["auto_reply"] = {"status": "queued", "message_id": message_id}
+async def receive_wechat_gateway_callback(
+    payload: dict,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    data = payload if isinstance(payload, dict) else {}
+    # The dependency provides the correct engine (including temporary test DBs), but
+    # this request-level Session never performs I/O or checks out a pool connection.
+    callback_session_factory = sessionmaker(
+        bind=db.get_bind(),
+        autocommit=False,
+        autoflush=False,
+        expire_on_commit=False,
+    )
+    result = await asyncio.get_running_loop().run_in_executor(
+        _callback_ingest_executor,
+        _ingest_callback_payload,
+        data,
+        callback_session_factory,
+    )
     response.status_code = 200
     return result
 
@@ -301,6 +425,7 @@ def agent_send_wechat_text(payload: dict, db: Session = Depends(get_db)):
 @router.post("/agent-event")
 def receive_agent_wechat_event(payload: dict, response: Response, db: Session = Depends(get_db)):
     result = ingest_agent_wechat_event(db, payload if isinstance(payload, dict) else {})
+    _queue_contact_prediction_refresh(db, result)
     response.status_code = 200
     return result
 

@@ -112,11 +112,11 @@ func RootCause(err error) error {
 
 func Err(c *gin.Context, err error) {
 	if appErr, ok := err.(*Error); ok {
-		c.JSON(appErr.Code, appErr.Error())
+		c.JSON(appErr.Code, gin.H{"error": appErr.Error()})
 		return
 	}
 
-	c.JSON(http.StatusInternalServerError, err.Error())
+	c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 }
 
 func Is(err, target error) bool {

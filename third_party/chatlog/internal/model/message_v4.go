@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/md5"
 	"encoding/hex"
+	"encoding/xml"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -34,15 +35,17 @@ import (
 // WCDB_CT_source INTEGER DEFAULT NULL
 // )
 type MessageV4 struct {
-	LocalID        int64  `json:"local_id"`         // 本地唯一 ID
-	SortSeq        int64  `json:"sort_seq"`         // 消息序号，10位时间戳 + 3位序号
-	ServerID       int64  `json:"server_id"`        // 消息 ID，用于关联 voice
-	LocalType      int64  `json:"local_type"`       // 消息类型
-	UserName       string `json:"user_name"`        // 发送人，通过 Join Name2Id 表获得
-	CreateTime     int64  `json:"create_time"`      // 消息创建时间，10位时间戳
-	MessageContent []byte `json:"message_content"`  // 消息内容，文字聊天内容 或 zstd 压缩内容
-	PackedInfoData []byte `json:"packed_info_data"` // 额外数据，类似 proto，格式与 v3 有差异
-	Status         int    `json:"status"`           // 消息状态，2 是已发送，4 是已接收，可以用于判断 IsSender（FIXME 不准, 需要判断 UserName）
+	LocalID         int64  `json:"local_id"`         // 本地唯一 ID
+	SortSeq         int64  `json:"sort_seq"`         // 消息序号，10位时间戳 + 3位序号
+	ServerID        int64  `json:"server_id"`        // 消息 ID，用于关联 voice
+	LocalType       int64  `json:"local_type"`       // 消息类型
+	UserName        string `json:"user_name"`        // 发送人，通过 Join Name2Id 表获得
+	CreateTime      int64  `json:"create_time"`      // 消息创建时间，10位时间戳
+	MessageContent  []byte `json:"message_content"`  // 消息内容，文字聊天内容 或 zstd 压缩内容
+	CompressContent []byte `json:"-"`                // 旧格式 <msg><atuserlist><item>...
+	Source          []byte `json:"-"`                // WeChat 4.x <msgsource><atuserlist>...，可能 zstd 压缩
+	PackedInfoData  []byte `json:"packed_info_data"` // 额外数据，类似 proto，格式与 v3 有差异
+	Status          int64  `json:"status"`           // 消息状态；仅在缺少可用 sender 信息时作为方向兜底
 }
 
 func (m *MessageV4) Wrap(talker string) *Message {
@@ -51,6 +54,8 @@ func (m *MessageV4) Wrap(talker string) *Message {
 	_m := &Message{
 		Seq:        uniqueID,
 		ID:         uniqueID,
+		DBLocalID:  m.LocalID,
+		ServerID:   m.ServerID,
 		Time:       time.Unix(m.CreateTime, 0),
 		Talker:     talker,
 		IsChatRoom: strings.HasSuffix(talker, "@chatroom"),
@@ -60,8 +65,13 @@ func (m *MessageV4) Wrap(talker string) *Message {
 		Version:    WeChatV4,
 	}
 
-	// FIXME 后续通过 UserName 判断是否是自己发送的消息，目前可能不准确
-	_m.IsSelf = m.Status == 2 || (!_m.IsChatRoom && talker != m.UserName)
+	// 私聊方向以实际 sender 为准，避免 status=2 的历史/同步状态把收到的
+	// 消息误判为自己发送。群聊尚无稳定的当前账号字段，只能保留状态兜底。
+	if !_m.IsChatRoom && strings.TrimSpace(m.UserName) != "" {
+		_m.IsSelf = talker != m.UserName
+	} else {
+		_m.IsSelf = m.Status == 2
+	}
 
 	content := ""
 	if bytes.HasPrefix(m.MessageContent, []byte{0x28, 0xb5, 0x2f, 0xfd}) {
@@ -73,18 +83,23 @@ func (m *MessageV4) Wrap(talker string) *Message {
 	}
 
 	if _m.IsChatRoom {
-		split := strings.SplitN(content, ":\n", 2)
-		if len(split) == 2 {
-			_m.Sender = split[0]
-			content = split[1]
+		if sender, body, ok := splitChatRoomSenderPrefix(content, m.UserName); ok {
+			_m.Sender = sender
+			content = body
 		}
 	}
 
-	_m.ParseMediaInfo(content)
+	if err := _m.ParseMediaInfo(content); err != nil {
+		// Schema-compatible rows can still contain unknown or partially
+		// written XML. Preserve the database payload in the API instead of
+		// silently returning an empty content field.
+		_m.Content = content
+	}
 
 	// 语音消息
 	if _m.Type == 34 {
 		_m.Contents["voice"] = fmt.Sprint(m.ServerID)
+		_m.Contents["voice_local_id"] = fmt.Sprint(m.LocalID)
 	}
 
 	if len(m.PackedInfoData) != 0 {
@@ -101,7 +116,100 @@ func (m *MessageV4) Wrap(talker string) *Message {
 		}
 	}
 
+	_m.RefreshProxyFields()
+	if _m.IsChatRoom {
+		// WeChat 4.x source is authoritative. Only fall back to the legacy
+		// compress_content path when source is absent or cannot be parsed.
+		_m.AtUserList = parseAtUserListFromSource(m.Source)
+		if len(_m.AtUserList) == 0 {
+			_m.AtUserList = parseAtUserListFromCompressContent(m.CompressContent)
+		}
+	}
 	return _m
+}
+
+func splitChatRoomSenderPrefix(content, sender string) (string, string, bool) {
+	// WeChat sometimes stores group payloads as "sender:\nbody". The sender is
+	// also available through real_sender_id, so require an exact match before
+	// stripping the prefix. Splitting on the first ":\n" unconditionally
+	// corrupts ordinary text, system XML and quoted messages containing that
+	// character sequence later in their payload.
+	if strings.TrimSpace(sender) == "" {
+		return "", content, false
+	}
+	prefix, body, ok := strings.Cut(content, ":\n")
+	if !ok || prefix != sender {
+		return "", content, false
+	}
+	return prefix, body, true
+}
+
+type atUserListEnvelope struct {
+	AtUserList struct {
+		Text  string   `xml:",chardata"`
+		Items []string `xml:"item"`
+	} `xml:"atuserlist"`
+}
+
+func parseAtUserListFromSource(src []byte) []string {
+	return parseAtUserListXML(src)
+}
+
+func parseAtUserListFromCompressContent(content []byte) []string {
+	return parseAtUserListXML(content)
+}
+
+func parseAtUserListXML(raw []byte) []string {
+	payload, ok := decodeMessageMetadata(raw)
+	if !ok {
+		return nil
+	}
+	var envelope atUserListEnvelope
+	if err := xml.Unmarshal(payload, &envelope); err != nil {
+		return nil
+	}
+	values := envelope.AtUserList.Items
+	if len(values) == 0 {
+		values = strings.Split(envelope.AtUserList.Text, ",")
+	}
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func decodeMessageMetadata(raw []byte) ([]byte, bool) {
+	if len(raw) == 0 {
+		return nil, false
+	}
+	payload := raw
+	if bytes.HasPrefix(payload, []byte{0x28, 0xb5, 0x2f, 0xfd}) {
+		decoded, err := zstd.Decompress(payload)
+		if err != nil {
+			return nil, false
+		}
+		payload = decoded
+	}
+	payload = bytes.TrimSpace(payload)
+	start := bytes.IndexByte(payload, '<')
+	end := bytes.LastIndexByte(payload, '>')
+	if start < 0 || end < start {
+		return nil, false
+	}
+	return payload[start : end+1], true
 }
 
 func ParsePackedInfo(b []byte) *wxproto.PackedInfo {

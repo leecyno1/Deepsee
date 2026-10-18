@@ -6,7 +6,7 @@ from datetime import datetime
 from ..db import SessionLocal
 from ..models import Message, Chat, Contact
 from ..schemas import ChatlogWebhookBody
-from ..services.sync_service import _build_chatlog_media_url, _extract_contents_dict
+from ..services.wechat_message_normalizer import normalize_wechat_message
 
 
 router = APIRouter(prefix="/hooks", tags=["hooks"])
@@ -47,6 +47,11 @@ def chatlog_webhook(body: ChatlogWebhookBody, db: Session = Depends(get_db)):
         except Exception:
             pass
 
+        normalized = normalize_wechat_message(
+            msg_type=m.type,
+            content=m.content,
+            contents=m.contents,
+        )
         msg = Message(
             chat_id=m.talker,
             sender_id=m.sender,
@@ -54,10 +59,14 @@ def chatlog_webhook(body: ChatlogWebhookBody, db: Session = Depends(get_db)):
             talker_name=m.talkerName,
             timestamp=ts,
             direction="in" if not m.isSelf else "out",
-            type=str(m.type),
-            content_text=m.content,
-            media_url=_build_chatlog_media_url(m.type, _extract_contents_dict(m.contents)),
-            meta={"subType": m.subType, **({"contents": m.contents} if isinstance(m.contents, dict) else {})},
+            type=normalized.message_type,
+            content_text=normalized.content_text,
+            media_url=normalized.media_url,
+            meta={
+                "subType": m.subType,
+                **({"contents": normalized.contents} if normalized.contents else {}),
+                **({"display_title": normalized.display_title} if normalized.display_title else {}),
+            },
         )
         db.add(msg)
         new_count += 1

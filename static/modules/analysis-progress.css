@@ -1,0 +1,28 @@
+#analysisJobProgress { margin: 12px 0 18px; padding: 14px 16px; border: 1px solid var(--border-color, #dfe5e8); border-radius: 12px; background: var(--surface-elevated, #fff); }
+.analysis-job-heading { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; font-size: 13px; }
+.analysis-job-heading span, .analysis-job-note { color: var(--text-secondary, #65717d); font-size: 12px; }
+#analysisJobProgress progress { display: block; width: 100%; height: 5px; margin: 12px 0; accent-color: #168479; }
+.analysis-job-modules { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px; }
+.analysis-job-module { display: grid; grid-template-columns: 1fr auto; gap: 5px 8px; padding: 9px 10px; border: 1px solid var(--border-color, #e3e8ec); border-radius: 8px; font-size: 12px; }
+.analysis-job-module b { font-size: 11px; font-weight: 500; color: #74808a; }
+.analysis-job-module[data-state=running] { border-color: #72b7b0; }
+.analysis-job-module[data-state=running] b, .analysis-job-module[data-state=done] b { color: #168479; }
+.analysis-job-module[data-state=failed] b { color: #b4493b; }
+.analysis-job-module small { grid-column: 1 / -1; color: var(--text-secondary, #65717d); font-size: 11px; line-height: 1.5; }
+.analysis-job-module button { grid-column: 1 / -1; justify-self: start; border: 0; background: transparent; padding: 3px 0; color: #14796f; cursor: pointer; }
+.analysis-job-module button:disabled { opacity: .45; cursor: default; }
+.analysis-job-note { display: block; margin-top: 10px; }
+@media (max-width: 1100px) {
+    #ai-summary .analysis-titlebar { flex-wrap: wrap; border-radius: 12px; gap: 10px; }
+    #ai-summary .analysis-toolbar { flex: 1 1 100%; flex-wrap: wrap; }
+    #ai-summary .toolbar-primary { flex: 1 1 100%; width: 100%; flex-wrap: wrap; min-width: 0; gap: 8px; }
+    #ai-summary .analysis-buttons { flex: 1 1 100%; max-width: 100%; min-width: 0; flex-wrap: wrap; }
+    #ai-summary .advanced-options { margin-left: 0; flex: 1 1 100%; }
+    #ai-summary .analysis-status { margin-left: 0; max-width: 100%; white-space: normal; }
+}
+@media (max-width: 480px) {
+    #ai-summary .ai-summary-container { padding: 10px; }
+    #analysisJobProgress { padding: 10px; }
+    .analysis-job-modules { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .analysis-job-heading span { font-size: 11px; }
+}

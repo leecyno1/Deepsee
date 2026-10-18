@@ -24,10 +24,13 @@ import "time"
 // )
 type SessionV4 struct {
 	Username              string `json:"username"`
+	UnreadCount           int64  `json:"unread_count"`
 	Summary               string `json:"summary"`
-	LastTimestamp         int    `json:"last_timestamp"`
+	LastTimestamp         int64  `json:"last_timestamp"`
 	LastMsgSender         string `json:"last_msg_sender"`
 	LastSenderDisplayName string `json:"last_sender_display_name"`
+	LastMsgType           int64  `json:"last_msg_type"`
+	LastMsgSubType        int64  `json:"last_msg_sub_type"`
 
 	// Type                     int    `json:"type"`
 	// UnreadCount              int    `json:"unread_count"`
@@ -44,11 +47,62 @@ type SessionV4 struct {
 }
 
 func (s *SessionV4) Wrap() *Session {
+	content := s.Summary
+	if content == "" {
+		switch s.LastMsgType {
+		case MessageTypeImage:
+			content = "[图片]"
+		case MessageTypeVoice:
+			content = "[语音]"
+		case MessageTypeVideo:
+			content = "[视频]"
+		case MessageTypeLocation:
+			content = "[位置]"
+		case MessageTypeAnimation:
+			content = "[表情]"
+		case MessageTypeVOIP:
+			content = "[语音通话]"
+		case MessageTypeCard:
+			content = "[名片]"
+		case MessageTypeShare:
+			switch s.LastMsgSubType {
+			case MessageSubTypeFile:
+				content = "[文件]"
+			case MessageSubTypeFileUploading:
+				content = "[文件发送中]"
+			case MessageSubTypeRealtimeLocation:
+				content = "[实时位置共享]"
+			case MessageSubTypeLink, MessageSubTypeLink2:
+				content = "[链接]"
+			case MessageSubTypeMiniProgram, MessageSubTypeMiniProgram2:
+				content = "[小程序]"
+			case MessageSubTypeChannel:
+				content = "[视频号]"
+			case MessageSubTypeMusic:
+				content = "[音乐]"
+			default:
+				content = "[分享]"
+			}
+		case MessageTypeSystem:
+			if s.LastMsgSubType == MessageSubTypePat {
+				content = "[拍一拍]"
+			} else {
+				content = "[系统消息]"
+			}
+		case MessageTypeSystemNotification:
+			content = "[系统通知]"
+		}
+	}
 	return &Session{
-		UserName: s.Username,
-		NOrder:   s.LastTimestamp,
-		NickName: s.LastSenderDisplayName,
-		Content:  s.Summary,
-		NTime:    time.Unix(int64(s.LastTimestamp), 0),
+		UserName:              s.Username,
+		NOrder:                s.LastTimestamp,
+		NickName:              s.LastSenderDisplayName,
+		Content:               content,
+		NTime:                 time.Unix(s.LastTimestamp, 0),
+		UnreadCount:           s.UnreadCount,
+		LastMsgType:           s.LastMsgType,
+		LastMsgSubType:        s.LastMsgSubType,
+		LastMsgSender:         s.LastMsgSender,
+		LastSenderDisplayName: s.LastSenderDisplayName,
 	}
 }

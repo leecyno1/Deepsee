@@ -110,8 +110,9 @@ def test_generate_local_reply_prefers_subsession_prompt_and_route_over_global(tm
         assert result["reply"] == "subsession reply"
         assert result["subsession_id"] == "wechat_gateway_default"
         assert result["prompt_key"] == "reply_da"
-        assert captured["messages"][0]["content"] == "你是 subsession 专属助手，只能按 subsession 规则回答。"
-        assert captured["messages"][1]["content"] == "全局用户模板：ai 请按 subsession 回复"
+        assert captured["messages"][0]["content"].startswith("你是 subsession 专属助手，只能按 subsession 规则回答。")
+        assert '历史聊天记录' in captured["messages"][-2]["content"]
+        assert captured["messages"][-1]["content"] == "【当前消息 · 仅回复这一条】\n全局用户模板：ai 请按 subsession 回复"
         assert captured["kwargs"]["model_override"] == "subsession-model"
         assert captured["kwargs"]["route_kind"] == "tool"
         assert captured["kwargs"]["route_key"] == "reply_subsession"

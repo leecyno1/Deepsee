@@ -123,11 +123,15 @@ def fetch_source(source_id: str, limit: int = 20) -> dict:
             },
         })
 
+    upstream_time = data.get("updatedTime")
+    observed_at = datetime.fromtimestamp(upstream_time / 1000, TZ).isoformat() if isinstance(upstream_time, (int, float)) and upstream_time > 0 else ""
     result = {
         "platform": f"newsnow/{source_id}",
         "source_name": info["name"],
         "category": info["cat"],
         "fetched_at": datetime.now(TZ).isoformat(),
+        "observed_at": observed_at,
+        "cache_status": data["status"],
         "count": len(items),
         "items": items,
     }

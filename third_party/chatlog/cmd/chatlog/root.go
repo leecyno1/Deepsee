@@ -7,31 +7,36 @@ import (
 	"github.com/sjzar/chatlog/internal/chatlog"
 	"github.com/sjzar/chatlog/pkg/process"
 	"github.com/sjzar/chatlog/pkg/util"
+	"github.com/sjzar/chatlog/pkg/version"
 
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 )
 
 func init() {
-	// windows only
 	cobra.MousetrapHelpText = ""
 
 	rootCmd.PersistentFlags().BoolVar(&Debug, "debug", false, "debug")
 	rootCmd.PersistentPreRun = initLog
+	rootCmd.Version = version.Version
+	rootCmd.SetVersionTemplate("{{.Version}}\n")
 }
 
-func Execute() {
-	if err := rootCmd.Execute(); err != nil {
-		log.Err(err).Msg("command execution failed")
-	}
+func Execute() error {
+	defer closeLogFile()
+	return rootCmd.Execute()
 }
 
 var rootCmd = &cobra.Command{
-	Use:     "chatlog",
-	Short:   "chatlog",
-	Long:    `chatlog`,
-	Example: `chatlog`,
-	Args:    cobra.MinimumNArgs(0),
+	Use:   "chatlog",
+	Short: "chatlog",
+	Long:  `chatlog`,
+	Example: `chatlog api catalog
+chatlog api call sessions --param limit=20
+chatlog ops status`,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	Args:          cobra.MinimumNArgs(0),
 	CompletionOptions: cobra.CompletionOptions{
 		HiddenDefaultCmd: true,
 	},

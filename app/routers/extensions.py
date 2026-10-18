@@ -10,7 +10,7 @@ from ..db import SessionLocal
 from ..models import ExtAdapter, AdapterMessage, Message, Contact, Chat
 from ..schemas import ExtAdapterIn, ExtAdapterOut, PaginatedAdapterMessages, AdapterMessageOut
 from ..services.ext_adapter_service import ingest_adapter_logs
-from ..services.sync_service import _build_chatlog_media_url, _extract_contents_dict
+from ..services.wechat_message_normalizer import normalize_wechat_message
 from ..config import settings
 
 
@@ -45,23 +45,14 @@ def _extract_gateway_media_payload(row: Message) -> tuple[dict, str | None]:
     meta = row.meta if isinstance(row.meta, dict) else {}
     raw = meta.get("raw") if isinstance(meta.get("raw"), dict) else {}
     data = raw.get("Data") if isinstance(raw.get("Data"), dict) else {}
-    raw_content = str(data.get("Content") or row.content_text or "")
-    contents: dict[str, str] = {}
-    media_url = row.media_url
-    if raw_content.lstrip().startswith("<"):
-        try:
-            import xml.etree.ElementTree as ET
-            root = ET.fromstring(raw_content)
-            img = root.find("img")
-            if img is not None:
-                for key in ("cdnthumburl", "md5", "aeskey", "cdnmidimgurl"):
-                    val = str(img.attrib.get(key) or "").strip()
-                    if val:
-                        contents[key] = val
-                media_url = media_url or _build_chatlog_media_url(row.type, contents)
-        except Exception:
-            pass
-    return contents, media_url
+    normalized = normalize_wechat_message(
+        msg_type=row.type,
+        content=data.get("Content") or row.content_text,
+        contents=meta.get("contents"),
+        media_url=row.media_url,
+        media_policy="wechatapi",
+    )
+    return normalized.contents, normalized.media_url
 
 
 def _to_adapter_message_out_from_main(db: Session, row: Message) -> AdapterMessageOut:

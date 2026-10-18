@@ -10,9 +10,9 @@ from app.routers import ai
 
 def test_set_ai_config_preserves_existing_unified_key_when_masked(monkeypatch):
     state = {
-        "api_url": "https://df.dawnloadai.com:9888/v1",
+        "api_url": "https://app.watertimber.us/v1",
         "api_key": "existing-key",
-        "model": "deepseek-ai/DeepSeek-V4-Pro",
+        "model": "gpt-5.5",
         "tool_model": "MiniMax-M3",
         "message_filters": {},
         "module_prompts": {},
@@ -30,9 +30,64 @@ def test_set_ai_config_preserves_existing_unified_key_when_masked(monkeypatch):
 
     monkeypatch.setattr(ai, "save_ai_config", _save)
 
-    ai.set_ai_config({"api_key": "", "has_key": True, "api_url": "https://df.dawnloadai.com:9888/v1"})
+    ai.set_ai_config({"api_key": "", "has_key": True, "api_url": "https://app.watertimber.us/v1"})
 
     assert saved["api_key"] == "existing-key"
+
+
+def test_ai_provider_mode_is_saved_and_returned(monkeypatch):
+    state = {
+        "api_url": "https://app.watertimber.us/v1",
+        "api_key": "existing-key",
+        "model": "gpt-5.5",
+        "tool_model": "MiniMax-M3",
+        "message_filters": {},
+        "module_prompts": {},
+        "tool_prompts": {},
+        "derive_defaults": {},
+        "model_router": {"enabled": True, "main_channels": [], "tool_channels": []},
+    }
+    saved = {}
+
+    monkeypatch.setattr(ai, "load_ai_config", lambda: dict(state))
+    monkeypatch.setattr(ai, "save_ai_config", lambda conf: saved.update(conf))
+
+    ai.set_ai_config({"ai_provider_mode": "dasheng"})
+
+    assert saved["ai_provider_mode"] == "dasheng"
+
+    monkeypatch.setattr(ai, "load_ai_config", lambda: dict(saved))
+    payload = ai.get_ai_config()
+    assert payload["ai_provider_mode"] == "dasheng"
+
+
+def test_onepage_image_config_masks_key_and_saves_masked(monkeypatch):
+    state = {
+        "api_url": "https://app.watertimber.us/v1",
+        "api_key": "base-key",
+        "onepage_image_api_url": "https://api.openai.com/v1",
+        "onepage_image_api_key": "image-key",
+        "onepage_image_model": "gpt-image-2",
+        "onepage_output_mode": "auto",
+        "model": "gpt-5.5",
+        "tool_model": "MiniMax-M3",
+        "message_filters": {},
+        "module_prompts": {},
+        "tool_prompts": {},
+        "derive_defaults": {},
+        "model_router": {"enabled": True, "main_channels": [], "tool_channels": []},
+    }
+    saved = {}
+
+    monkeypatch.setattr(ai, "load_ai_config", lambda: dict(state))
+    monkeypatch.setattr(ai, "save_ai_config", lambda conf: saved.update(conf))
+
+    payload = ai.get_ai_config()
+    assert "onepage_image_api_key" not in payload
+    assert payload["onepage_image_has_key"] is True
+
+    ai.set_ai_config({"onepage_image_api_key": "", "onepage_image_has_key": True})
+    assert saved["onepage_image_api_key"] == "image-key"
 
 
 def test_get_ai_config_masks_quan2go_provider_key(monkeypatch):

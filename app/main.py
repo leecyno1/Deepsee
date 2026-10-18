@@ -8,14 +8,33 @@ from starlette.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import FileResponse, Response, JSONResponse
 from .db import init_db
-from .background import start_background_loops
-from .routers import health, messages, chats, contacts, ai, send, hooks, configs, sync, reports, compat, market, email, extensions, news, folo, minutes, tools, media, mp_rss, tasks, recorder, wechat8061, admin, invitations, agent_api, contact_scoring, wechat_gateway, collector_api
-from .routers import news as newsfeed
+from .background import start_background_loops, stop_background_loops
+from .routers import health, messages, chats, contacts, ai, send, hooks, configs, sync, reports, compat, market, email, extensions, news, folo, minutes, tools, media, mp_rss, tasks, recorder, admin, invitations, agent_api, contact_scoring, wechat_gateway, collector_api
 from .db import SessionLocal
 from .models import Message
 from .config import settings
+from .routers import data_api, developer
+from .services.data_api_access import ProjectRateLimiter
 import orjson
 import os
+
+
+VIBEDESK_EMBED_MODULES = frozenset(
+    {
+        "dashboard",
+        "ai-summary",
+        "news-agg",
+        "message-list",
+        "email-messages",
+        "minutes-agg",
+        "folo-agg",
+        "mp-agg",
+        "send-management",
+        "wechat-automation",
+        "contact-management",
+        "function-settings",
+    }
+)
 
 
 def _api_token_auth_enabled() -> bool:
@@ -44,6 +63,8 @@ def _is_api_auth_exempt_path(path: str) -> bool:
         return True
     if path.startswith("/api/agent"):
         return True
+    if path == "/api/v1" or path.startswith("/api/v1/"):
+        return True  # Versioned data routes require their own scoped project key.
     return False
 
 
@@ -70,13 +91,17 @@ def _cors_options() -> dict | None:
 
 @asynccontextmanager
 async def app_lifespan(app: FastAPI):
-    await start_background_loops(app)
-    yield
+    try:
+        await start_background_loops(app)
+        yield
+    finally:
+        await stop_background_loops(app)
 
 
 def create_app() -> FastAPI:
     init_db()
     app = FastAPI(title="Deepsee Personal Information Flow API", lifespan=app_lifespan)
+    app.state.data_api_limiter = ProjectRateLimiter()
 
     cors = _cors_options()
     if cors:
@@ -122,14 +147,13 @@ def create_app() -> FastAPI:
     app.include_router(mp_rss.router)
     app.include_router(tasks.router)
     app.include_router(recorder.router)
-    app.include_router(wechat8061.router)
     app.include_router(wechat_gateway.router)
     app.include_router(admin.router)
     app.include_router(agent_api.router)
     app.include_router(collector_api.router)
-    # News feed aggregation (API-only, no frontend)
-    app.include_router(newsfeed.router)
     app.include_router(market.router)
+    app.include_router(data_api.router)
+    app.include_router(developer.router)
 
     static_dir = os.path.join(os.path.dirname(__file__), "..", "static")
     static_dir = os.path.abspath(static_dir)
@@ -146,6 +170,22 @@ def create_app() -> FastAPI:
         if os.path.exists(index_path):
             # Avoid stale UI after frequent iterations
             return FileResponse(index_path, headers={"Cache-Control": "no-store"})
+        return Response("UI not found", media_type="text/plain", status_code=404)
+
+    @app.get("/embed/{module_id}", include_in_schema=False)
+    async def embedded_module(module_id: str):
+        """Serve one Deepsee panel as an addressable VibeDesk Mod page."""
+        if module_id not in VIBEDESK_EMBED_MODULES:
+            return Response("Unknown Deepsee module", media_type="text/plain", status_code=404)
+        index_path = os.path.join(static_dir, "index.html")
+        if os.path.exists(index_path):
+            return FileResponse(
+                index_path,
+                headers={
+                    "Cache-Control": "no-store",
+                    "X-VibeDesk-Mod": module_id,
+                },
+            )
         return Response("UI not found", media_type="text/plain", status_code=404)
 
     @app.get("/ui/legacy")

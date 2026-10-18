@@ -2,52 +2,26 @@ package wechat
 
 import (
 	"context"
-	"runtime"
 
 	"github.com/sjzar/chatlog/internal/errors"
+	"github.com/sjzar/chatlog/internal/wechat/backend"
 	"github.com/sjzar/chatlog/internal/wechat/model"
 	"github.com/sjzar/chatlog/internal/wechat/process"
 )
 
-var DefaultManager *Manager
-
-func init() {
-	DefaultManager = NewManager()
-	DefaultManager.Load()
-}
-
-func Load() error {
-	return DefaultManager.Load()
-}
-
-func GetAccount(name string) (*Account, error) {
-	return DefaultManager.GetAccount(name)
-}
-
-func GetProcess(name string) (*model.Process, error) {
-	return DefaultManager.GetProcess(name)
-}
-
-func GetAccounts() []*Account {
-	return DefaultManager.GetAccounts()
-}
-
-// GetAllProcesses 获取所有微信进程
-func GetAllProcesses() ([]*model.Process, error) {
-	return DefaultManager.GetAllProcesses()
-}
-
 // Manager 微信管理器
 type Manager struct {
 	detector   process.Detector
+	backend    backend.Backend
 	accounts   []*Account
 	processMap map[string]*model.Process
 }
 
 // NewManager 创建新的微信管理器
-func NewManager() *Manager {
+func NewManager(platform backend.Backend) *Manager {
 	return &Manager{
-		detector:   process.NewDetector(runtime.GOOS),
+		detector:   platform.Detector(),
+		backend:    platform,
 		accounts:   make([]*Account, 0),
 		processMap: make(map[string]*model.Process),
 	}
@@ -66,7 +40,7 @@ func (m *Manager) Load() error {
 	processMap := make(map[string]*model.Process, len(processes))
 
 	for _, p := range processes {
-		account := NewAccount(p)
+		account := newAccount(p, m)
 
 		accounts = append(accounts, account)
 		if account.Name != "" {
@@ -86,7 +60,7 @@ func (m *Manager) GetAccount(name string) (*Account, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewAccount(p), nil
+	return newAccount(p, m), nil
 }
 
 func (m *Manager) GetProcess(name string) (*model.Process, error) {

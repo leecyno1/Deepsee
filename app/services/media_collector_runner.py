@@ -25,8 +25,15 @@ def _collector_dir() -> Path:
     return _project_root() / "media-collector"
 
 
+def _collector_data_dir() -> Path:
+    env = os.getenv("COLLECTOR_DATA_DIR", "").strip()
+    if env:
+        return Path(env).expanduser().resolve()
+    return (_project_root() / "data").resolve()
+
+
 def _runs_dir() -> Path:
-    path = _project_root() / "data" / "collector_runs"
+    path = _collector_data_dir() / "collector_runs"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -58,7 +65,14 @@ def _script_timeout(timeout_seconds: int | None = None) -> int:
         return 240
 
 
-def _run_script(name: str, script: str, *, timeout_seconds: int, pretty: bool = False) -> dict[str, Any]:
+def _run_script(
+    name: str,
+    script: str,
+    *,
+    timeout_seconds: int,
+    pretty: bool = False,
+    env_overrides: dict[str, str] | None = None,
+) -> dict[str, Any]:
     collector_dir = _collector_dir()
     script_path = collector_dir / script
     if not script_path.exists():
@@ -74,6 +88,8 @@ def _run_script(name: str, script: str, *, timeout_seconds: int, pretty: bool = 
     started_at = _utc_now()
     env = os.environ.copy()
     env.setdefault("PYTHONUNBUFFERED", "1")
+    if env_overrides:
+        env.update(env_overrides)
     args = ["bash", str(script_path)]
     if pretty:
         args.append("--pretty")
@@ -195,31 +211,35 @@ def run_media_collector_once(
     started_at = _utc_now()
     timeout = _script_timeout(timeout_seconds)
     try:
-        tasks: list[tuple[str, str]] = []
+        data_dir = _collector_data_dir()
+        tasks: list[tuple[str, str, dict[str, str]]] = []
         if hot:
-            tasks.append(("hot", "collect.sh"))
+            tasks.append(("hot", "collect.sh", {"OUTPUT_BASE": str(data_dir / "hot")}))
         if search:
-            tasks.append(("search", "batch_search.sh"))
+            tasks.append(("search", "batch_search.sh", {"OUTPUT_BASE": str(data_dir / "search")}))
         if authors:
-            tasks.append(("authors", "batch_author_search.sh"))
+            tasks.append(("authors", "batch_author_search.sh", {"OUTPUT_BASE": str(data_dir / "authors")}))
 
         _set_current_run({
             "running": True,
             "started_at": started_at,
-            "tasks": [name for name, _ in tasks],
+            "tasks": [name for name, _, _ in tasks],
             "message": "自媒体采集中",
         })
         results = [
-            _run_script(name, script, timeout_seconds=timeout, pretty=pretty)
-            for name, script in tasks
+            _run_script(name, script, timeout_seconds=timeout, pretty=pretty, env_overrides=env_overrides)
+            for name, script, env_overrides in tasks
         ]
+        if hot or search:
+            from .social_sources import collect_sources
+            results.append({"name": "extended_sources", **collect_sources()})
         ok = all(bool(item.get("ok")) for item in results) if results else True
         payload: dict[str, Any] = {
             "ok": ok,
             "running": False,
             "started_at": started_at,
             "finished_at": _utc_now(),
-            "tasks": [name for name, _ in tasks],
+            "tasks": [name for name, _, _ in tasks],
             "results": results,
             "status": get_collector_status(),
         }

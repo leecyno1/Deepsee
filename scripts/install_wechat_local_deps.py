@@ -10,6 +10,7 @@ import stat
 import subprocess
 import sys
 import urllib.request
+import venv
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -18,6 +19,8 @@ ROOT = Path(__file__).resolve().parents[1]
 DEPS_FILE = ROOT / "deps" / "wechat-local-deps.json"
 INSTALL_ROOT = ROOT / ".local" / "wechat-local"
 VENDORED_CHATLOG_SOURCE = ROOT / "third_party" / "chatlog"
+CHATLOG_FRIDA_ENV = ROOT / ".local" / "chatlog-frida"
+CHATLOG_VERSION = "vendored-cc281cc"
 
 
 def detect_key() -> str:
@@ -123,8 +126,10 @@ def build_vendored_chatlog(platform_key: str) -> Path:
         go_bin,
         "build",
         "-trimpath",
+        "-tags",
+        "sqlite_fts5",
         "-ldflags",
-        "-s -w -X github.com/sjzar/chatlog/pkg/version.Version=vendored-bfb031f",
+        f"-s -w -X github.com/sjzar/chatlog/pkg/version.Version={CHATLOG_VERSION}",
         "-o",
         str(executable),
         "./main.go",
@@ -136,6 +141,25 @@ def build_vendored_chatlog(platform_key: str) -> Path:
     (tool_dir / "BIN_PATH").write_text(str(executable), encoding="utf-8")
     print(f"installed chatlog_alpha: {executable}")
     return executable
+
+
+def install_chatlog_frida() -> Path:
+    python = CHATLOG_FRIDA_ENV / "bin" / "python3"
+    if not python.exists():
+        print(f"create chatlog Frida environment: {CHATLOG_FRIDA_ENV}")
+        venv.EnvBuilder(with_pip=True).create(CHATLOG_FRIDA_ENV)
+    probe = subprocess.run(
+        [str(python), "-c", "import frida; print(frida.__version__)"],
+        capture_output=True,
+        text=True,
+    )
+    if probe.returncode != 0:
+        print("install Frida runtime for macOS key extraction")
+        subprocess.run(
+            [str(python), "-m", "pip", "install", "--disable-pip-version-check", "frida-tools"],
+            check=True,
+        )
+    return python
 
 
 def main() -> int:
@@ -151,6 +175,8 @@ def main() -> int:
         try:
             if tool == "chatlog_alpha":
                 installed[tool] = str(build_vendored_chatlog(args.platform))
+                if platform.system().lower() == "darwin":
+                    installed["chatlog_frida_python"] = str(install_chatlog_frida())
             else:
                 installed[tool] = str(install_asset(tool, spec, args.platform))
         except Exception as exc:

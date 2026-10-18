@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -19,8 +19,7 @@ from ..schemas import (
     SendUploadOut,
     TaskOut,
 )
-from ..services.llm_client import load_ai_config
-from ..services.n8n_client import N8NClient
+from ..services.link_preview import fetch_link_preview
 from ..services.send_dispatcher import (
     build_item_payload,
     dispatch_send_item,
@@ -31,7 +30,6 @@ from ..services.send_dispatcher import (
     render_text_fallback,
     save_send_upload,
 )
-from ..services.wechatpad_client import WeChatPadClient
 
 
 router = APIRouter(prefix="/api", tags=["send"])
@@ -161,10 +159,11 @@ def send(body: SendRequest, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(task)
 
-    client = N8NClient()
     try:
-        result = client.send(ctx)
-        task.status = "done"
+        result = dispatch_send_items(body.items)
+        rows = result.get("results") if isinstance(result, dict) else []
+        failed = [row for row in (rows or []) if isinstance(row, dict) and not row.get("ok")]
+        task.status = "failed" if failed else "done"
         task.result = result
         db.add(task)
         db.commit()
@@ -204,35 +203,24 @@ def get_send_capabilities():
     return {
         "current": SendCapabilityOut(**current),
         "providers": [
-            SendCapabilityOut(**provider_capabilities("wechatpad_direct")),
             SendCapabilityOut(**provider_capabilities("wechatapi_gateway")),
         ],
     }
 
 
-@router.post("/send/wechatpad")
-def send_wechatpad(body: SendRequest, request: Request):
-    client = WeChatPadClient()
-    if not client.configured():
-        return {"status": "error", "error": "WeChatPadPro base not configured"}
-    enriched = [{**item.model_dump(), "provider_override": "wechatpad_direct"} for item in body.items]
-    res = dispatch_send_items(enriched, request=request)
-    for idx, it in enumerate(res.get("results", [])):
-        try:
-            item = body.items[idx].model_dump()
-            it["target"] = item.get("target") or item.get("chat_id")
-        except Exception:
-            pass
-    return res
+@router.get("/send/link-preview")
+def get_send_link_preview(url: str = Query(..., min_length=8, max_length=4096)):
+    try:
+        return fetch_link_preview(url)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"链接解析失败：{exc}") from exc
 
 
 @router.post("/send/out")
 def send_out(body: SendRequest, request: Request):
-    """Dispatch send via configured provider while remaining backward-compatible."""
-    conf = load_ai_config()
-    provider = str(conf.get("send_provider") or "").strip()
-    if provider not in {"wechatpad_direct", "wechatapi_gateway"}:
-        return {"status": "error", "error": f"removed or unknown send_provider: {provider or 'unset'}"}
+    """Dispatch all WeChat sends through the configured WeChatAPI account."""
     return dispatch_send_items(body.items, request=request)
 
 

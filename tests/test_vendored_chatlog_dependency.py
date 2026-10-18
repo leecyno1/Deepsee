@@ -30,6 +30,12 @@ def test_chatlog_installer_builds_vendored_source_instead_of_downloading_it():
     assert '"$ROOT_DIR/scripts/build_chatlog.sh"' in runner
     assert "configured CHATLOG_BIN is unavailable, falling back to vendored source" in runner
     assert deps["chatlog_alpha"]["source"] == "third_party/chatlog"
+    assert deps["chatlog_alpha"]["imported_commit"].startswith("cc281cc")
+    assert "ops server-start" in runner
+    assert "api/v1/sessions" in sidecar
+    assert 'CHATLOG_CONFIG_DIR:-$HOME/.chatlog' in sidecar
+    assert 'ops database-key --pid "$wechat_pid"' in sidecar
+    assert 'env CHATLOG_DIR="$CHATLOG_CONFIG_DIR"' in runner
 
 
 def test_chatlog_build_output_stays_outside_vendored_source():

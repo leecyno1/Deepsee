@@ -18,7 +18,7 @@ router = APIRouter(prefix="/api/minutes", tags=["minutes"])
 
 
 TEXT_EXTS = {".txt", ".md", ".markdown"}
-AUDIO_EXTS = {".mp3", ".m4a", ".wav", ".aac", ".ogg", ".opus", ".flac"}
+AUDIO_EXTS = {".mp3", ".m4a", ".wav", ".aac", ".ogg", ".opus", ".flac", ".webm", ".mp4"}
 
 
 def _default_minutes_dirs() -> list[str]:
@@ -253,6 +253,18 @@ def _collect_minutes_items(refresh: bool = False, limit: int = 500) -> list[dict
                         "file_mtime": int(st.st_mtime),
                     },
                 }
+                if is_audio:
+                    from pathlib import Path
+                    from ..services.meeting_capture import read_state
+                    capture = read_state(Path(path))
+                    if capture:
+                        item["meta"]["capture_filename"] = Path(path).name
+                        item["meta"]["transcript_status"] = capture.get("status")
+                        item["meta"]["processing_error"] = capture.get("error", "")
+                        if capture.get("minutes"):
+                            item["content_refined"] = capture["minutes"]
+                            item["summary"] = capture["minutes"]
+                            item["summary_origin"] = "shared_ai"
                 items.append(item)
                 if len(items) >= limit:
                     break
@@ -281,10 +293,14 @@ def list_minutes(
             base_items = [it for it in base_items if (ql in (it.get("sender_name") or "").lower()) or (ql in (it.get("content_text") or "").lower()) or (ql in (os.path.basename(it.get("path") or "")).lower())]
         # 工具模型摘要（可选）
         conf = load_ai_config()
-        has_key = bool(conf.get("api_key"))
+        from ..services.ai_execution import ai_available
+        has_key = ai_available(conf, "tool")
         to_summarize: list[dict] = []
         out: list[dict] = []
         for it in base_items:
+            if it.get("summary_origin") == "shared_ai":
+                out.append(it)
+                continue
             cache_key = f"minutes:{it['id']}"
             cached = _cache_get(db, cache_key)
             if cached and isinstance(cached, dict):
@@ -302,8 +318,9 @@ def list_minutes(
                     it["derived"]["tone"] = cached.get("tone") or it["derived"].get("tone")
                     it["derived"]["key_points"] = cached.get("key_points") or it["derived"].get("key_points") or []
                     it["derived"]["comment"] = cached.get("comment") or it["derived"].get("comment") or ""
-                    out.append(it)
-                    continue
+                    if it["summary_origin"] == "tool":
+                        out.append(it)
+                        continue
             to_summarize.append({"id": it["id"], "time": it["time"], "sender": it["sender_name"], "content": it["content_text"]})
             out.append(it)
         # 调用小模型生成会议摘要（<=500字）
@@ -316,8 +333,8 @@ def list_minutes(
                     model_ovr = conf.get("tool_model_messages") or conf.get("tool_model")
                     feats = extract_message_features(
                         to_summarize,
-                        batch_size=1,
-                        concurrency=4,
+                        batch_size=50,
+                        concurrency=3,
                         temperature=0.1,
                         prompt_key="minutes_summary",
                         model_override=model_ovr,
@@ -326,6 +343,7 @@ def list_minutes(
                     for it in out:
                         fid = str(it["id"])
                         f = feats.get(fid) or {}
+                        feature_origin = "fallback" if f.get("summary_origin") == "fallback" else "tool"
                         summ = (f.get("summary") or "").strip()
                         if summ and not summ.lower().startswith("ai:"):
                             summ = "ai: " + summ
@@ -335,13 +353,13 @@ def list_minutes(
                             if len(txt) > 520:
                                 txt = txt[:500] + "…"
                             it["summary"] = txt
-                            it["summary_origin"] = "tool"
+                            it["summary_origin"] = feature_origin
                             it["derived"]["tone"] = f.get("tone") or it["derived"].get("tone")
                             it["derived"]["key_points"] = f.get("key_points") or []
                             it["derived"]["comment"] = f.get("comment") or ""
                             _cache_set(db, f"minutes:{it['id']}", {
                                 "summary": txt,
-                                "summary_origin": "tool",
+                                "summary_origin": feature_origin,
                                 "tone": it["derived"]["tone"],
                                 "key_points": it["derived"]["key_points"],
                                 "comment": it["derived"]["comment"],
@@ -474,8 +492,9 @@ def refine_minutes(payload: dict) -> dict:
             return {"ok": False, "error": "no transcript"}
 
         conf = load_ai_config()
-        if not conf.get("api_key"):
-            return {"ok": False, "error": "SILICONFLOW_API_KEY not configured"}
+        from ..services.ai_execution import ai_available
+        if not ai_available(conf, "tool"):
+            return {"ok": False, "error": "请先配置 Agent 或独立模型"}
 
         trimmed = _truncate_for_llm(text, max_chars=20000)
         model_ovr = conf.get("tool_model_messages") or conf.get("tool_model")

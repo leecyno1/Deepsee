@@ -8,6 +8,15 @@ GRAY_PID_FILE="$ROOT_DIR/.chatlog-gray.pid"
 GRAY_LOG_FILE="${CHATLOG_GRAY_LOG_FILE:-$LOG_DIR/chatlog_5031.log}"
 LAUNCHD_LABEL="${CHATLOG_LAUNCHD_LABEL:-com.deepsee.chatlog.5031}"
 LAUNCHD_PLIST="$HOME/Library/LaunchAgents/$LAUNCHD_LABEL.plist"
+FRIDA_ENV="$ROOT_DIR/.local/chatlog-frida"
+
+chatlog_config_dir() {
+  printf '%s\n' "${CHATLOG_CONFIG_DIR:-$HOME/.chatlog}"
+}
+
+run_chatlog() {
+  env CHATLOG_DIR="$(chatlog_config_dir)" "$CHATLOG_BIN_RESOLVED" "$@"
+}
 
 load_env() {
   if [[ -f "$ENV_FILE" ]]; then
@@ -15,6 +24,9 @@ load_env() {
     # shellcheck disable=SC1090
     source "$ENV_FILE"
     set +a
+  fi
+  if [[ -x "$FRIDA_ENV/bin/python3" ]]; then
+    export PATH="$FRIDA_ENV/bin:$PATH"
   fi
 }
 
@@ -55,7 +67,7 @@ from urllib.request import urlopen
 
 base = sys.argv[1].rstrip("/")
 timeout = float(sys.argv[2])
-url = f"{base}/api/v1/session"
+url = f"{base}/api/v1/sessions?limit=1"
 t0 = time.perf_counter()
 try:
     with urlopen(url, timeout=timeout) as resp:
@@ -82,6 +94,13 @@ build_v031() {
   info "从仓库内置源码编译 chatlog"
   "$ROOT_DIR/scripts/build_chatlog.sh"
   ok "完成: $ROOT_DIR/.local/chatlog/bin/chatlog"
+}
+
+install_frida() {
+  info "安装 Chatlog macOS 密钥提取运行环境"
+  python3 "$ROOT_DIR/scripts/install_wechat_local_deps.py" --tool chatlog_alpha
+  export PATH="$FRIDA_ENV/bin:$PATH"
+  ok "Frida 运行环境已就绪"
 }
 
 pid_on_port() {
@@ -125,6 +144,37 @@ require_start_config() {
     err "缺少 CHATLOG_WORK_DIR 或 CHATLOG_DIR。它应指向 chatlog 解密后的工作目录。"
     return 2
   fi
+  CHATLOG_ACCOUNT="${CHATLOG_ACCOUNT:-$(basename "$CHATLOG_DATA_DIR")}"
+}
+
+configure_upstream() {
+  local bind="$1"
+  run_chatlog ops config-set \
+    --http-addr "$bind" \
+    --work-dir "$CHATLOG_WORK_DIR" \
+    --data-dir "$CHATLOG_DATA_DIR" >>"$GRAY_LOG_FILE" 2>&1
+}
+
+current_wechat_pid() {
+  pgrep -x WeChat 2>/dev/null | head -n1 || true
+}
+
+extract_key() {
+  require_start_config
+  if ! python3 -c 'import frida' >/dev/null 2>&1; then
+    err "Frida 未安装；先运行: bash scripts/chatlog_sidecar.sh install-frida"
+    return 2
+  fi
+  mkdir -p "$(dirname "$GRAY_LOG_FILE")" "$CHATLOG_WORK_DIR"
+  configure_upstream "127.0.0.1:${CHATLOG_GRAY_PORT:-5031}"
+  local wechat_pid
+  wechat_pid="$(current_wechat_pid)"
+  if [[ -z "$wechat_pid" ]]; then
+    err "未检测到已登录的微信主进程"
+    return 2
+  fi
+  info "开始提取数据库密钥；Chatlog 会重启微信，请保持登录并打开任意聊天"
+  run_chatlog ops database-key --pid "$wechat_pid"
 }
 
 start_gray() {
@@ -138,25 +188,10 @@ start_gray() {
     return 0
   fi
   mkdir -p "$(dirname "$GRAY_LOG_FILE")" "$CHATLOG_WORK_DIR"
-  local args=(
-    server
-    --addr "$bind"
-    --platform "${CHATLOG_PLATFORM:-darwin}"
-    --version "${CHATLOG_VERSION:-4}"
-    --data-dir "$CHATLOG_DATA_DIR"
-    --work-dir "$CHATLOG_WORK_DIR"
-  )
-  if [[ -n "${CHATLOG_DATA_KEY:-}" ]]; then
-    args+=(--data-key "$CHATLOG_DATA_KEY")
-  fi
-  if [[ -n "${CHATLOG_IMG_KEY:-}" ]]; then
-    args+=(--img-key "$CHATLOG_IMG_KEY")
-  fi
-  if [[ "${CHATLOG_AUTO_DECRYPT:-0}" == "1" || "${CHATLOG_AUTO_DECRYPT:-false}" == "true" ]]; then
-    args+=(--auto-decrypt)
-  fi
+  configure_upstream "$bind"
   info "启动 chatlog 灰度服务: $bind"
-  nohup "$CHATLOG_BIN_RESOLVED" "${args[@]}" >>"$GRAY_LOG_FILE" 2>&1 &
+  nohup env CHATLOG_DIR="$(chatlog_config_dir)" "$CHATLOG_BIN_RESOLVED" \
+    ops server-start --account "$CHATLOG_ACCOUNT" >>"$GRAY_LOG_FILE" 2>&1 &
   echo $! > "$GRAY_PID_FILE"
   local deadline="${CHATLOG_STARTUP_TIMEOUT_SECONDS:-45}"
   local elapsed=0
@@ -256,6 +291,8 @@ load_env
 cmd="${1:-status}"
 case "$cmd" in
   build|build-v031) build_v031 ;;
+  install-frida) install_frida ;;
+  extract-key) extract_key ;;
   probe) http_probe "${2:-${CHATLOG_HTTP_BASE:-http://127.0.0.1:5030}}" "${3:-${CHATLOG_HTTP_SESSION_TIMEOUT_SECONDS:-5}}" ;;
   status) status ;;
   start-gray) start_gray ;;
@@ -275,6 +312,8 @@ commands:
   status        同时探测主链路 5030 与灰度链路 5031
   probe [url]   探测指定 chatlog HTTP 地址
   build         从仓库内置源码编译 chatlog（build-v031 为兼容别名）
+  install-frida 安装 macOS 数据库密钥提取所需的 Frida 环境
+  extract-key   通过上游 Frida 链路重新提取数据库密钥
   start-gray    启动 5031 灰度服务，不影响 5030
   stop-gray     停止 5031 灰度服务
   restart-gray  重启 5031 灰度服务

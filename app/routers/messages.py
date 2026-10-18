@@ -3,23 +3,30 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy import select, func, text, or_
 from sqlalchemy.orm import Session
-from typing import Optional
+from typing import Optional, Literal
 import threading
 from ..db import session_scope, SessionLocal
-from ..models import Message, Interaction, InteractionExt, Contact
+from ..models import Message, Interaction, InteractionExt, Contact, Chat
 from ..schemas import PaginatedMessages, MessageOut, UpDownVoteResult, TagUpdateIn, MessageDeriveRequest
 from ..config import settings
 from ..services.ai_tools import ensure_message_features, populate_fallback_derived
-from ..services.sync_service import _build_chatlog_media_url
+from ..services.wechat_message_normalizer import (
+    extract_app_message_fields,
+    extract_image_fields,
+    extract_wechat_xml_payload,
+    is_file_app_message,
+    normalize_message_type,
+    normalize_wechat_message,
+)
 from ..services.wechatapi_client import WechatApiClient
 from ..services.llm_client import load_ai_config
 from ..services.message_filters import filter_effective_messages, WECHAT_NOISE_SENDER_IDS, WECHAT_NOISE_CHAT_IDS
-from starlette.responses import FileResponse, Response, RedirectResponse
+from starlette.responses import FileResponse, Response, RedirectResponse, StreamingResponse
 from typing import Dict, Any, List
 import csv, hashlib, io, html, json, mimetypes, re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urljoin
 import requests
 
 
@@ -51,11 +58,11 @@ _DROP_META_KEYS = {
 
 def _contact_display_name(contact_id: Any, alias: Any = None, name: Any = None, fallback: Any = None) -> str:
     contact_key = str(contact_id or "").strip()
-    for value in (alias, name, fallback, contact_key):
+    for value in (alias, name, fallback):
         text_value = str(value or "").strip()
-        if text_value:
+        if text_value and text_value != contact_key:
             return text_value
-    return ""
+    return contact_key
 
 
 def _load_contact_display_names(db: Session, sender_ids: list[Any]) -> dict[str, str]:
@@ -74,9 +81,17 @@ def _load_contact_display_names(db: Session, sender_ids: list[Any]) -> dict[str,
         if not contact_key:
             continue
         display_name = _contact_display_name(contact_key, alias=alias, name=name)
-        if display_name:
+        if display_name and display_name != contact_key:
             display_names[contact_key] = display_name
     return display_names
+
+
+def _load_talker_display_names(db: Session, chat_ids: list[Any], contacts: dict[str, str]) -> dict[str, str]:
+    ids = {str(value or "").strip() for value in chat_ids if value}
+    rows = db.execute(select(Chat.id, Chat.title).where(Chat.id.in_(ids))).all() if ids else []
+    names = {chat_id: title for chat_id, title in rows if title and title != chat_id}
+    names.update({chat_id: contacts[chat_id] for chat_id in ids if contacts.get(chat_id)})
+    return names
 
 
 def _compose_message_display_summary(d: dict | None) -> str:
@@ -229,19 +244,8 @@ def _find_url_deep(value: Any) -> str:
 
 
 def _is_file_appmsg(appmsg: dict[str, Any] | None) -> bool:
-    if not isinstance(appmsg, dict):
-        return False
-    appmsg_type = str(appmsg.get("appmsg_type") or "").strip()
-    if appmsg_type == "6":
-        return True
-    if appmsg_type == "24" and (
-        appmsg.get("cdn_dataurl")
-        or appmsg.get("cdndataurl")
-        or appmsg.get("datatitle")
-        or appmsg.get("datafmt")
-    ):
-        return True
-    return False
+    """Compatibility wrapper for legacy callers."""
+    return is_file_app_message(appmsg)
 
 
 def _parse_file_size(*values: Any) -> int | None:
@@ -407,133 +411,19 @@ def _coerce_json_field(v: Any) -> Any:
     return v
 
 
-def _wechat_gateway_content_string(value: Any) -> str:
-    if isinstance(value, str):
-        return value
-    if isinstance(value, dict):
-        for key in ("string", "content", "Content", "text"):
-            found = _wechat_gateway_content_string(value.get(key))
-            if found:
-                return found
-    return ""
-
-
 def _extract_wechat_xml_payload(content: Any) -> str:
-    text_value = _wechat_gateway_content_string(content) or str(content or "")
-    text_value = text_value.strip()
-    if not text_value:
-        return ""
-    positions = [
-        pos for pos in (
-            text_value.find("<?xml"),
-            text_value.lower().find("<msg"),
-            text_value.lower().find("<appmsg"),
-        )
-        if pos >= 0
-    ]
-    if positions:
-        text_value = text_value[min(positions):].strip()
-    return text_value
+    """Compatibility wrapper for legacy callers."""
+    return extract_wechat_xml_payload(content)
 
 
 def _extract_wechat_appmsg(content: Any) -> dict[str, str]:
-    text_value = _extract_wechat_xml_payload(content)
-    if not text_value or "<appmsg" not in text_value.lower():
-        return {}
-    try:
-        import xml.etree.ElementTree as ET
-        root = ET.fromstring(text_value)
-    except Exception:
-        return {}
-
-    def find_text(*paths: str) -> str:
-        for path in paths:
-            try:
-                value = root.findtext(path)
-            except Exception:
-                value = None
-            value = str(value or "").strip()
-            if value:
-                return value
-        return ""
-
-    record_root = None
-    record_text = find_text(".//appmsg/recorditem", ".//recorditem", ".//appmsg/announcement", ".//announcement")
-    if record_text and "<" in record_text:
-        try:
-            import xml.etree.ElementTree as ET
-            record_root = ET.fromstring(record_text)
-        except Exception:
-            record_root = None
-
-    def find_record_text(*paths: str) -> str:
-        if record_root is None:
-            return ""
-        for path in paths:
-            try:
-                value = record_root.findtext(path)
-            except Exception:
-                value = None
-            value = str(value or "").strip()
-            if value:
-                return value
-        return ""
-
-    appmsg_type = find_text(".//appmsg/type", ".//type")
-    return {
-        "appmsg_type": appmsg_type,
-        "title": find_text(".//appmsg/title", ".//title"),
-        "desc": find_text(".//appmsg/des", ".//appmsg/description", ".//des"),
-        "url": find_text(".//appmsg/url", ".//url"),
-        "sourceusername": find_text(".//appmsg/sourceusername", ".//sourceusername"),
-        "sourcedisplayname": find_text(".//appmsg/sourcedisplayname", ".//sourcedisplayname"),
-        "thumburl": find_text(".//appmsg/thumburl", ".//thumburl", ".//weappinfo/weappiconurl"),
-        "attachid": find_text(".//appmsg/appattach/attachid", ".//appattach/attachid"),
-        "cdnattachurl": find_text(".//appmsg/appattach/cdnattachurl", ".//appattach/cdnattachurl"),
-        "aeskey": find_text(".//appmsg/appattach/aeskey", ".//appattach/aeskey"),
-        "fileext": find_text(".//appmsg/appattach/fileext", ".//appattach/fileext"),
-        "totallen": find_text(".//appmsg/appattach/totallen", ".//appattach/totallen"),
-        "md5": find_text(".//appmsg/md5", ".//md5"),
-        "cdn_dataurl": find_record_text(".//dataitem/cdn_dataurl", ".//dataitem/cdndataurl"),
-        "cdndataurl": find_record_text(".//dataitem/cdndataurl", ".//dataitem/cdn_dataurl"),
-        "cdndatakey": find_record_text(".//dataitem/cdn_datakey", ".//dataitem/cdndatakey"),
-        "datatitle": find_record_text(".//dataitem/datatitle"),
-        "datadesc": find_record_text(".//dataitem/datadesc"),
-        "datafmt": find_record_text(".//dataitem/datafmt"),
-        "datasize": find_record_text(".//dataitem/datasize", ".//dataitem/fullsize"),
-    }
+    """Compatibility wrapper for legacy callers."""
+    return extract_app_message_fields(content)
 
 
 def _extract_wechat_img(content: Any) -> dict[str, str]:
-    text_value = _extract_wechat_xml_payload(content)
-    if not text_value or "<img" not in text_value.lower():
-        return {}
-    try:
-        import xml.etree.ElementTree as ET
-        root = ET.fromstring(text_value)
-    except Exception:
-        return {}
-    img = root.find(".//img")
-    if img is None:
-        return {}
-    out: dict[str, str] = {}
-    for key in (
-        "cdnthumburl",
-        "cdnmidimgurl",
-        "cdnbigimgurl",
-        "cdnthumbaeskey",
-        "aeskey",
-        "md5",
-        "length",
-        "hdlength",
-        "cdnthumblength",
-        "cdnthumbheight",
-        "cdnthumbwidth",
-    ):
-        value = str(img.attrib.get(key) or "").strip()
-        if value:
-            out[key] = value
-    return out
+    """Compatibility wrapper for legacy callers."""
+    return extract_image_fields(content)
 
 
 def _is_wechat_mp_message(sender_id: Any, chat_id: Any, meta: Any = None) -> bool:
@@ -548,110 +438,70 @@ def _is_wechat_mp_message(sender_id: Any, chat_id: Any, meta: Any = None) -> boo
         ])
     return any(value.startswith("gh_") for value in ids if value)
 
+
 def _normalize_message_type_value(msg_type: Any) -> Any:
-    mapping = {
-        0: 'text',
-        1: 'text',
-        3: 'image',
-        34: 'voice',
-        43: 'video',
-        47: 'emoji',
-        48: 'location',
-        49: 'link',
-        10000: 'system',
-        10002: 'system',
-    }
     if msg_type is None:
         return None
     text_value = str(msg_type).strip()
     if not text_value:
         return None
-    lowered = text_value.lower()
-    if lowered in {'text', 'image', 'voice', 'video', 'emoji', 'location', 'link', 'file', 'system', 'app', 'other'}:
-        if lowered == 'app':
-            return 'link'
-        return lowered
-    try:
-        return mapping.get(int(text_value), text_value)
-    except Exception:
-        return text_value
+    return normalize_message_type(msg_type)
 
 
-
-def _normalize_wechat_gateway_message_fields(sender_id: Any, sender_name: Any, chat_id: Any, talker_name: Any, msg_type: Any, content_text: Any, media_url: Any, meta: Any, db: Session | None = None) -> dict[str, Any]:
+def _normalize_wechat_gateway_message_fields(
+    sender_id: Any,
+    sender_name: Any,
+    chat_id: Any,
+    talker_name: Any,
+    msg_type: Any,
+    content_text: Any,
+    media_url: Any,
+    meta: Any,
+    db: Session | None = None,
+) -> dict[str, Any]:
     meta_obj = _coerce_json_field(meta) if meta is not None else None
     meta_obj = meta_obj if isinstance(meta_obj, dict) else {}
     out_sender_name = sender_name or meta_obj.get('sender_name') or meta_obj.get('sender')
     out_talker_name = talker_name or meta_obj.get('talker_name') or meta_obj.get('chat_name') or meta_obj.get('room_name')
-    out_type = _normalize_message_type_value(msg_type)
-    out_media_url = media_url
     out_meta = dict(meta_obj) if isinstance(meta_obj, dict) else {}
     contents = out_meta.get('contents') if isinstance(out_meta.get('contents'), dict) else {}
 
-    # chatlog / wx-cli imported messages may keep WeChat XML in content_text while meta is empty.
-    # Parse it here as well, so file/app messages can be rendered and clicked from the list.
-    raw_content_from_text = _extract_wechat_xml_payload(content_text)
-    if raw_content_from_text and "<appmsg" in raw_content_from_text.lower():
-        appmsg = _extract_wechat_appmsg(raw_content_from_text)
-        if appmsg:
-            extracted = dict(contents)
-            for key, val in appmsg.items():
-                if val:
-                    extracted[key] = val
-            out_meta['contents'] = extracted
-            contents = extracted
-            is_file_appmsg = _is_file_appmsg(appmsg)
-            out_type = 'file' if is_file_appmsg else 'link'
-            if appmsg.get('title'):
-                out_meta['display_title'] = appmsg.get('title')
-            elif is_file_appmsg and (appmsg.get("datatitle") or appmsg.get("datafmt")):
-                out_meta['display_title'] = appmsg.get("datatitle") or appmsg.get("datafmt")
+    raw = out_meta.get('raw') if isinstance(out_meta.get('raw'), dict) else {}
+    data = raw.get('Data') if isinstance(raw.get('Data'), dict) else {}
+    content_payload = content_text
+    content_xml = _extract_wechat_xml_payload(content_text)
+    raw_xml = _extract_wechat_xml_payload(data.get('Content'))
+    content_lower = content_xml.lower()
+    raw_lower = raw_xml.lower()
+    if not any(marker in content_lower for marker in ('<msg', '<appmsg', '<img')) and any(
+        marker in raw_lower for marker in ('<msg', '<appmsg', '<img')
+    ):
+        content_payload = raw_xml
+
+    normalized = normalize_wechat_message(
+        msg_type=msg_type,
+        content=content_payload,
+        contents=contents,
+        media_url=media_url,
+        media_policy=(
+            "wechatapi"
+            if str(out_meta.get('source') or '').strip() == 'wechat_gateway'
+            else "chatlog"
+        ),
+    )
+    has_xml_fields = bool(extract_app_message_fields(content_payload) or extract_image_fields(content_payload))
+    out_type = (
+        None
+        if (msg_type is None or not str(msg_type).strip()) and not has_xml_fields
+        else normalized.message_type
+    )
+    out_media_url = normalized.media_url
+    if normalized.contents:
+        out_meta['contents'] = normalized.contents
+    if normalized.display_title and not str(out_meta.get('display_title') or '').strip():
+        out_meta['display_title'] = normalized.display_title
 
     if str(out_meta.get('source') or '').strip() == 'wechat_gateway':
-        raw = out_meta.get('raw') if isinstance(out_meta.get('raw'), dict) else {}
-        data = raw.get('Data') if isinstance(raw.get('Data'), dict) else {}
-        raw_content = _extract_wechat_xml_payload(data.get('Content')) or _extract_wechat_xml_payload(content_text)
-        if raw_content:
-            appmsg = _extract_wechat_appmsg(raw_content)
-            if appmsg:
-                extracted = dict(contents)
-                for key, val in appmsg.items():
-                    if val:
-                        extracted[key] = val
-                out_meta['contents'] = extracted
-                contents = extracted
-                is_file_appmsg = _is_file_appmsg(appmsg)
-                out_type = 'file' if is_file_appmsg else 'link'
-                if appmsg.get('title'):
-                    out_meta['display_title'] = appmsg.get('title')
-                elif is_file_appmsg and (appmsg.get("datatitle") or appmsg.get("datafmt")):
-                    out_meta['display_title'] = appmsg.get("datatitle") or appmsg.get("datafmt")
-            try:
-                import xml.etree.ElementTree as ET
-                img_fields = _extract_wechat_img(raw_content)
-                if img_fields:
-                    extracted = dict(contents)
-                    for key in (
-                        'cdnthumburl',
-                        'cdnmidimgurl',
-                        'cdnbigimgurl',
-                        'cdnthumbaeskey',
-                        'md5',
-                        'aeskey',
-                        'length',
-                        'hdlength',
-                        'cdnthumblength',
-                    ):
-                        val = str(img_fields.get(key) or '').strip()
-                        if val:
-                            extracted[key] = val
-                    out_meta['contents'] = extracted
-                    contents = extracted
-                    out_type = 'image'
-                    out_media_url = out_media_url or _build_chatlog_media_url('image', extracted)
-            except Exception:
-                pass
-
         sender_id_text = str(sender_id or '').strip()
         sender_name_text = str(out_sender_name or '').strip()
         talker_id_text = str(chat_id or '').strip()
@@ -781,9 +631,9 @@ def _prepare_derive_request(body: MessageDeriveRequest) -> tuple[MessageDeriveRe
         dd = {}
     payload = body.model_dump()
     if payload.get("batch_size") is None:
-        payload["batch_size"] = int(dd.get("batch_size", 20))
+        payload["batch_size"] = int(dd.get("batch_size", 100))
     if payload.get("concurrency") is None:
-        payload["concurrency"] = int(dd.get("concurrency", 8))
+        payload["concurrency"] = int(dd.get("concurrency", 3))
     if payload.get("temperature") is None:
         payload["temperature"] = float(dd.get("temperature", 0.1))
     if payload.get("force") is None:
@@ -859,7 +709,7 @@ def _derive_messages_internal(
         return {"status": "ok", "updated": 0}
 
     if progress_key:
-        bs = max(1, int(body.batch_size or 20))
+        bs = max(1, min(100, int(body.batch_size or 100)))
         idx = 0
         errs: list[str] = []
         debs: list[dict] = []
@@ -1132,6 +982,47 @@ def resolve_image_media(
     return RedirectResponse(url=candidates[0], status_code=302)
 
 
+@router.get("/media/local")
+def resolve_local_media(message_id: int, db: Session = Depends(get_db)):
+    """Serve retained Chatlog audio/video on the same origin as the UI."""
+    message = db.get(Message, message_id)
+    if message is None or message.type not in {"voice", "video", "emoji"}:
+        raise HTTPException(404, "本地媒体记录不存在")
+    url = str(message.media_url or "")
+    parsed, base = urlsplit(url), urlsplit(settings.CHATLOG_HTTP_BASE or "")
+    if (not base.netloc or parsed.scheme not in {"http", "https"}
+            or (parsed.scheme, parsed.netloc) != (base.scheme, base.netloc)
+            or not parsed.path.startswith(("/voice/", "/video/", "/image/", "/emoji/"))):
+        raise HTTPException(404, "此记录未保留可访问的本地媒体")
+    try:
+        response = requests.get(url, stream=True, allow_redirects=False, timeout=(5, 30))
+        if response.status_code in {301, 302, 303, 307, 308}:
+            target = urljoin(url, response.headers.get("location", ""))
+            destination = urlsplit(target)
+            response.close()
+            # Chatlog redirects retained videos/thumbnails to its local data directory.
+            if ((destination.scheme, destination.netloc) != (base.scheme, base.netloc)
+                    or not destination.path.startswith("/data/msg/")):
+                raise HTTPException(502, "Chatlog 返回了非本地媒体地址")
+            response = requests.get(target, stream=True, allow_redirects=False, timeout=(5, 30))
+    except requests.RequestException:
+        raise HTTPException(502, "Chatlog 本地媒体服务不可用") from None
+    content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
+    if response.status_code != 200 or not content_type.startswith(("audio/", "video/", "image/")):
+        status = 404 if response.status_code == 404 else 502
+        response.close()
+        raise HTTPException(status, "本地媒体未留存或无法解码")
+
+    def chunks():
+        try:
+            yield from response.iter_content(chunk_size=64 * 1024)
+        finally:
+            response.close()
+
+    return StreamingResponse(chunks(), media_type=content_type,
+                             headers={"Cache-Control": "private, max-age=300", "X-Content-Type-Options": "nosniff"})
+
+
 @router.get("/media/file")
 def resolve_file_media(
     message_id: int | None = Query(default=None),
@@ -1175,7 +1066,8 @@ def resolve_file_media(
         contents.get("datasize"),
         contents.get("fullsize"),
     )
-    candidates = _build_file_candidates(host=host, md5=md5, path=path, direct_url=url, contents=contents)
+    direct_url = url or (message.media_url if message else None) or contents.get("media_url")
+    candidates = _build_file_candidates(host=host, md5=md5, path=path, direct_url=direct_url, contents=contents)
     for candidate in candidates:
         served = _serve_or_cache_small_file(candidate, filename, expected_size=expected_size)
         if served is not None:
@@ -1236,6 +1128,7 @@ def resolve_file_media(
 @router.get("", response_model=PaginatedMessages)
 def list_messages(
     q: Optional[str] = Query(default=None, description="full text query"),
+    search_mode: Literal["fts", "contains"] = "fts",
     chat_id: Optional[str] = None,
     sender_id: Optional[str] = None,
     type: Optional[str] = Query(default=None, alias="msg_type"),
@@ -1247,6 +1140,7 @@ def list_messages(
     fast: bool = Query(default=False, description="Skip expensive total count; total will be len(items)."),
     include_meta: bool = Query(default=True, description="Include meta payload (pruned) for list rendering."),
     include_mp_messages: bool = Query(default=False, description="Include WeChat official-account gh_ messages in WeChat list."),
+    exclude_system_messages: bool = False,
     content_max_chars: int = Query(default=4000, ge=0, le=20000, description="Truncate content_text to avoid huge payloads."),
     db: Session = Depends(get_db),
 ):
@@ -1259,7 +1153,7 @@ def list_messages(
     if direction and direction not in {"in", "out"}:
         direction = None
 
-    if q:
+    if q and search_mode == "fts":
         # Use FTS5 when q exists. IMPORTANT: apply the same filters as non-FTS path
         # so search respects chat_id/sender_id/type/time/direction consistently.
         def _parse_dt(v: Optional[str]) -> Optional[datetime]:
@@ -1288,6 +1182,8 @@ def list_messages(
         if type:
             clauses.append("m.type = :type")
             params["type"] = type
+        if exclude_system_messages:
+            clauses.append("(m.type != 'system' OR m.type IS NULL)")
         # direction: keep historic compatibility where NULL/'' treated as inbound
         if direction == "in":
             clauses.append("(m.direction = 'in' OR m.direction IS NULL OR m.direction = '')")
@@ -1327,7 +1223,10 @@ def list_messages(
             if fast
             else (db.execute(count_sql, {k: v for k, v in params.items() if k != "limit" and k != "offset"}).scalar() or 0)
         )
-        contact_display_names = _load_contact_display_names(db, [row.get("sender_id") for row in items])
+        contact_display_names = _load_contact_display_names(
+            db, [value for row in items for value in (row.get("sender_id"), row.get("chat_id"))],
+        )
+        talker_display_names = _load_talker_display_names(db, [row.get("chat_id") for row in items], contact_display_names)
         data = []
         for row in items:
             rd = dict(row)
@@ -1350,6 +1249,7 @@ def list_messages(
             sender_key = str(rd.get("sender_id") or "").strip()
             if sender_key and contact_display_names.get(sender_key):
                 rd["sender_name"] = contact_display_names[sender_key]
+            rd["talker_name"] = talker_display_names.get(str(rd.get("chat_id") or "")) or rd["talker_name"]
             msg_id = rd.get("id")
             if msg_id in derived_map:
                 rd["derived"] = derived_map[msg_id]
@@ -1409,12 +1309,21 @@ def list_messages(
         return {"total": int(total), "items": data}
 
     query = select(Message)
+    if q and search_mode == "contains":
+        matching_contacts = select(Contact.id).where(or_(
+            Contact.alias.icontains(q, autoescape=True), Contact.name.icontains(q, autoescape=True)))
+        matching_chats = select(Chat.id).where(Chat.title.icontains(q, autoescape=True))
+        query = query.where(or_(Message.content_text.icontains(q, autoescape=True),
+            Message.sender_name.icontains(q, autoescape=True), Message.talker_name.icontains(q, autoescape=True),
+            Message.sender_id.in_(matching_contacts), Message.chat_id.in_(matching_chats)))
     if chat_id:
         query = query.where(Message.chat_id == chat_id)
     if sender_id:
         query = query.where(Message.sender_id == sender_id)
     if type:
         query = query.where(Message.type == type)
+    if exclude_system_messages:
+        query = query.where(or_(Message.type != "system", Message.type == None))
     if direction:
         if direction == "in":
             # 兼容历史数据：direction 为空/NULL 视作 "in"
@@ -1459,7 +1368,7 @@ def list_messages(
     if dt_to:
         query = query.where(Message.timestamp <= dt_to)
 
-    items = db.execute(query.order_by(Message.timestamp.desc()).limit(size).offset((page - 1) * size)).scalars().all()
+    items = db.execute(query.order_by(Message.timestamp.desc(), Message.id.desc()).limit(size).offset((page - 1) * size)).scalars().all()
     total = len(items) if fast else (db.execute(select(func.count()).select_from(query.subquery())).scalar() or 0)
     # 同理：列表接口不做派生，避免阻塞首屏。/derive 负责派生。
     # try:
@@ -1469,7 +1378,8 @@ def list_messages(
     # except Exception:
     #     concurrency = 8
     # ensure_message_features(db, list(items), concurrency=concurrency)
-    contact_display_names = _load_contact_display_names(db, [item.sender_id for item in items])
+    contact_display_names = _load_contact_display_names(db, [value for item in items for value in (item.sender_id, item.chat_id)])
+    talker_display_names = _load_talker_display_names(db, [item.chat_id for item in items], contact_display_names)
     compat_items: list[MessageOut] = []
     for i in items:
         normalized = _normalize_wechat_gateway_message_fields(i.sender_id, i.sender_name, i.chat_id, i.talker_name, i.type, i.content_text, i.media_url, i.meta, db=db)
@@ -1480,7 +1390,7 @@ def list_messages(
             chat_id=i.chat_id,
             sender_id=i.sender_id,
             sender_name=sender_display_name,
-            talker_name=normalized['talker_name'],
+            talker_name=talker_display_names.get(str(i.chat_id or "")) or normalized['talker_name'],
             timestamp=i.timestamp,
             direction=i.direction,
             type=normalized['type'],
@@ -1963,10 +1873,14 @@ def get_messages_by_ids(ids: str, db: Session = Depends(get_db)):
     rows = db.execute(select(Message).where(Message.id.in_(id_list))).scalars().all()
     # keep same order
     rows.sort(key=lambda m: (m.timestamp or datetime.min), reverse=True)
+    contact_names = _load_contact_display_names(db, [value for row in rows for value in (row.sender_id, row.chat_id)])
+    talker_names = _load_talker_display_names(db, [row.chat_id for row in rows], contact_names)
 
     items: list[MessageOut] = []
     for i in rows:
         out = MessageOut.model_validate(i)
+        out.sender_name = contact_names.get(str(i.sender_id or "")) or out.sender_name
+        out.talker_name = talker_names.get(str(i.chat_id or "")) or out.talker_name
         try:
             d = dict(out.derived or {})
             if (d.get("summary_full") or d.get("summary")) and not d.get("key_info"):

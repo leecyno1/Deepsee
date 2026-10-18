@@ -24,6 +24,16 @@ except Exception:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
+CLI_BATCH_LIMITS = {
+    "message_summary": 100,
+    "email_message_summary": 50,
+    "minutes_summary": 50,
+    "minutes_refine": 50,
+    "media_content_summary": 10,
+    "mp_content_summary": 10,
+}
+MAX_CLI_BATCH_CHARS = 80_000
+
 
 # ----------------------------- helpers -----------------------------
 
@@ -56,18 +66,32 @@ def _commit_with_retry(
     if last_exc is not None:
         raise last_exc
 
-def _batched(iterable: Iterable[Dict[str, Any]], size: int) -> Iterable[List[Dict[str, Any]]]:
+def _batched(
+    iterable: Iterable[Dict[str, Any]],
+    size: int,
+    *,
+    max_chars: int = MAX_CLI_BATCH_CHARS,
+) -> Iterable[List[Dict[str, Any]]]:
     batch: List[Dict[str, Any]] = []
+    batch_chars = 0
     for item in iterable:
-        batch.append(item)
-        if len(batch) >= size:
+        item_chars = len(str(item.get("content") or ""))
+        if batch and (len(batch) >= size or batch_chars + item_chars > max_chars):
             yield batch
             batch = []
+            batch_chars = 0
+        batch.append(item)
+        batch_chars += item_chars
     if batch:
         yield batch
 
 
-def _tool_prompt_payload(messages: List[Dict[str, Any]], prompt_conf: Dict[str, str]) -> List[Dict[str, str]]:
+def _tool_prompt_payload(
+    messages: List[Dict[str, Any]],
+    prompt_conf: Dict[str, str],
+    *,
+    prompt_key: str = "message_summary",
+) -> List[Dict[str, str]]:
     """Build JSON payload for the tool model with defensive normalization.
 
     Some callers may pass `datetime` objects (e.g., from DB) in the `time` field,
@@ -106,8 +130,17 @@ def _tool_prompt_payload(messages: List[Dict[str, Any]], prompt_conf: Dict[str, 
         user_content = user_template.replace("{{messages_json}}", payload_json)
     else:
         user_content = user_template + "\n\n数据：\n" + payload_json
+    exact_count_rule = (
+        f"输入共 {len(norm_messages)} 条。必须返回 {len(norm_messages)} 个结果，"
+        "每个结果保留对应输入 id；不得合并、遗漏、改写 id；只返回 JSON 数组。"
+    )
+    if prompt_key == "minutes_refine":
+        exact_count_rule += (
+            " 每个数组元素包含 id、summary、refined；refined 保存对应逐字稿的整理结果。"
+            " 即使只有一条输入，也必须返回单元素 JSON 数组，不要返回单个对象。"
+        )
     return [
-        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": f"{system_prompt}\n\n{exact_count_rule}"},
         {"role": "user", "content": user_content},
     ]
 
@@ -116,8 +149,8 @@ def _tool_prompt_payload(messages: List[Dict[str, Any]], prompt_conf: Dict[str, 
 
 def extract_message_features(
     messages: List[Dict[str, Any]],
-    batch_size: int = 20,
-    concurrency: int = 8,
+    batch_size: int = 50,
+    concurrency: int = 3,
     temperature: float = 0.1,
     *,
     prompt_key: str = "message_summary",
@@ -130,9 +163,7 @@ def extract_message_features(
         concurrency = 1
     if batch_size < 1:
         batch_size = 1
-    # Message-summary extraction is sensitive to malformed multi-item JSON output.
-    # Keep batches small to improve success rate for WeChat short-form traffic.
-    batch_size = min(batch_size, 6)
+    batch_size = min(batch_size, CLI_BATCH_LIMITS.get(prompt_key, 50))
 
     conf = load_ai_config()
     tool_prompt_conf = (conf.get("tool_prompts") or {}).get(prompt_key) or DEFAULT_TOOL_PROMPTS.get(prompt_key) or DEFAULT_TOOL_PROMPTS["message_summary"]
@@ -144,11 +175,18 @@ def extract_message_features(
         msg_id = str(msg_id)
         if not msg_id:
             continue
+        content = str(msg.get("content") or msg.get("content_text") or msg.get("text") or "")
+        # Short messages can fill a 50-item batch. Long meeting documents retain
+        # more context and are split earlier by the total-character limit.
+        item_limit = 8_000 if prompt_key in {"minutes_summary", "minutes_refine"} else 1_600
+        if len(content) > item_limit:
+            head_len = int(item_limit * 0.75)
+            content = f"{content[:head_len]}\n...\n{content[-(item_limit - head_len):]}"
         prepared.append({
             "id": msg_id,
             "time": msg.get("time") or msg.get("timestamp"),
             "sender": msg.get("sender") or msg.get("sender_name"),
-            "content": msg.get("content") or msg.get("content_text") or msg.get("text"),
+            "content": content,
         })
 
     errors: List[str] = []
@@ -338,14 +376,20 @@ def extract_message_features(
             "keywords": item.get("keywords") if isinstance(item.get("keywords"), list) else [],
             "platform": str(item.get("platform") or item.get("meeting_platform") or "").strip(),
             "category": str(item.get("category") or "").strip(),
+            "summary_origin": str(item.get("summary_origin") or "tool").strip(),
         }
 
-    def _process_batch(batch: List[Dict[str, Any]], *, allow_single_fallback: bool = True) -> tuple[Dict[str, Dict[str, Any]], List[Dict[str, Any]]]:
+    def _process_batch(batch: List[Dict[str, Any]]) -> tuple[Dict[str, Dict[str, Any]], List[Dict[str, Any]]]:
         batch_ids = [str(x.get("id") or "").strip() for x in batch]
         batch_tag = ",".join(batch_ids[:3]) + ("..." if len(batch_ids) > 3 else "")
         content = None
+        source = "model"
         try:
-            prompt = _tool_prompt_payload(batch, tool_prompt_conf)
+            prompt = _tool_prompt_payload(
+                batch,
+                tool_prompt_conf,
+                prompt_key=prompt_key,
+            )
             content = siliconflow_tool_chat(
                 prompt,
                 temperature=temperature,
@@ -369,56 +413,33 @@ def extract_message_features(
 
             out: Dict[str, Dict[str, Any]] = {}
             for idx, it in enumerate(items):
-                fallback_id = batch_ids[idx] if idx < len(batch_ids) else (batch_ids[0] if len(batch_ids) == 1 else "")
+                raw_id = str(it.get("id") or "").strip() if isinstance(it, dict) else ""
+                fallback_id = batch_ids[idx] if len(items) == len(batch_ids) and idx < len(batch_ids) else ""
+                if len(batch_ids) == 1:
+                    fallback_id = batch_ids[0]
                 norm = _normalize_item(it, fallback_id)
-                rid = str(norm.get("id") or "").strip() or fallback_id
-                if len(batch_ids) == 1 and fallback_id:
-                    rid = fallback_id
-                if not rid:
+                rid = raw_id if raw_id in batch_ids and raw_id not in out else fallback_id
+                if not rid or rid not in batch_ids or rid in out:
                     continue
                 norm["id"] = rid
                 out[rid] = {k: v for k, v in norm.items() if k != "id"}
 
-            if allow_single_fallback and len(batch_ids) > 1:
-                missing_ids = [bid for bid in batch_ids if bid and bid not in out]
-                if missing_ids:
-                    for item in batch:
-                        bid = str(item.get("id") or "").strip()
-                        if not bid or bid not in missing_ids:
-                            continue
-                        sub_res, sub_dbg = _process_batch([item], allow_single_fallback=False)
-                        out.update(sub_res)
-                        debug.extend(sub_dbg)
-
-            if len(batch_ids) == 1 and batch_ids[0] not in out:
-                # 单条消息场景，若模型漏回 id，兜底绑定回该条
-                out[batch_ids[0]] = {
-                    "summary": "ai: 信息有限",
-                    "meeting_number": "",
-                    "tone": "neutral",
-                    "confidence": 0.5,
-                    "refined": "",
-                    "keywords": [],
-                    "platform": "",
-                    "category": "",
-                }
-
+            returned_count = len(items)
+            matched_count = len(out)
+            missing_ids = [bid for bid in batch_ids if bid and bid not in out]
             dbg = [{
                 "id": bid,
                 "ok": (bid in out),
+                "source": source,
+                "input_count": len(batch_ids),
+                "returned_count": returned_count,
+                "matched_count": matched_count,
+                "missing_count": len(missing_ids),
+                "local_fallback": False,
                 "raw": (content[:500] if isinstance(content, str) else str(type(content))),
             } for bid in batch_ids]
             return out, dbg
         except Exception as exc:
-            if allow_single_fallback and len(batch) > 1:
-                merged: Dict[str, Dict[str, Any]] = {}
-                merged_dbg: List[Dict[str, Any]] = []
-                for item in batch:
-                    sub_res, sub_dbg = _process_batch([item], allow_single_fallback=False)
-                    merged.update(sub_res)
-                    merged_dbg.extend(sub_dbg)
-                if merged:
-                    return merged, merged_dbg
             raw_preview = None
             try:
                 if content:
@@ -434,11 +455,22 @@ def extract_message_features(
                     str(exc),
                     raw_preview[:800] if raw_preview else "(无返回内容)",
                 )
-            dbg = [{"id": bid, "ok": False, "error": str(exc)} for bid in batch_ids]
+            fallback_out: Dict[str, Dict[str, Any]] = {}
+            dbg = [{
+                "id": bid,
+                "ok": bid in fallback_out,
+                "source": source,
+                "input_count": len(batch_ids),
+                "returned_count": 0,
+                "matched_count": 0,
+                "missing_count": len(batch_ids),
+                "local_fallback": bid in fallback_out,
+                "error": str(exc),
+            } for bid in batch_ids]
             if raw_preview:
                 for d in dbg[:1]:
                     d["raw"] = raw_preview[:1000]
-            return {}, dbg
+            return fallback_out, dbg
 
     results: Dict[str, Dict[str, Any]] = {}
 
@@ -458,7 +490,8 @@ def extract_message_features(
     if errors:
         results["__errors__"] = errors
     results["__debug__"] = debug
-    logger.warning("小模型提取失败 (部分): %s", "; ".join(errors[:5]))  # 只记录前5个错误
+    if errors:
+        logger.warning("批量摘要部分失败: %s", "; ".join(errors[:5]))
 
     return results
 
@@ -500,9 +533,10 @@ def ensure_message_features(
     days_to_keep: int = 7,
     *,
     force: bool = False,
-    batch_size: int = 20,
+    batch_size: int = 50,
     concurrency: int = 3,
     temperature: float = 0.1,
+    commit: bool = True,
 ) -> dict:
     """Overlay tool-model outputs onto Message.derived.
 
@@ -576,7 +610,7 @@ def ensure_message_features(
         })
 
     if not to_extract:
-        if updated:
+        if updated and commit:
             db.commit()
         return {"updated": 0, "errors": []}
 
@@ -676,13 +710,14 @@ def ensure_message_features(
             body = re.sub(rf"^\s*{re.escape(platform)}\s*[:：|]?\s*", "", body).strip()
         display_summary = f"ai: {body}".strip() if body else "ai:"
 
+        summary_origin = "fallback" if data.get("summary_origin") == "fallback" else "tool"
         new_part: Dict[str, Any] = {
             "summary": display_summary,
             "meeting_number": meeting_number,
             "platform": platform,
             "tone": tone,
             "confidence": confidence,
-            "summary_origin": "tool",
+            "summary_origin": summary_origin,
             "key_points": key_points,
             "comment": comment,
             # 兼容字段（保持向后兼容）
@@ -702,12 +737,12 @@ def ensure_message_features(
             applied.append({
                 "id": int(getattr(msg, 'id')),
                 "summary": summary_text,
-                "origin": "tool",
+                "origin": summary_origin,
             })
         except Exception:
             pass
 
-    if updated:
+    if updated and commit:
         _commit_with_retry(db)
     return {"updated": updated_count, "errors": tool_errors or [], "debug": tool_debug or [], "applied": applied}
 
@@ -719,6 +754,7 @@ def populate_fallback_derived(
     *,
     force: bool = False,
     summary_limit: int = 50,
+    commit: bool = True,
 ) -> int:
     """Write fallback snapshot first for instant UI.
 
@@ -911,7 +947,7 @@ def populate_fallback_derived(
             db.add(msg)
             changed += 1
 
-    if changed:
+    if changed and commit:
         _commit_with_retry(db)
     return changed
 # ---------------------- lightweight entity dictionary ----------------------

@@ -370,7 +370,7 @@ def test_static_index_contains_contact_scoring_hooks():
     html = open(os.path.join(PROJECT_ROOT, "static", "index.html"), "r", encoding="utf-8").read()
     assert "refreshContactScoring" in html
     assert "openContactScorecard" in html
-    assert "/api/contact-scoring/run" in html
+    assert "/api/contact-scoring/refresh" in html
     assert "/scorecard" in html
     assert "市场数据配置" in html
     assert "loadMarketDataConfig" in html
@@ -411,6 +411,9 @@ def test_static_index_contains_router_batch_test_hooks():
     assert "routerBatchTestStatus" in html
     assert "router-status-dot" in html
     assert "/api/ai/test-all-models" in html
+    assert "previewRouterRoute" in html
+    assert "validateRouterConfigFromUi" in html
+    assert "/api/ai/route-preview" in html
 
 
 def test_list_contacts_omits_labels_unless_requested():
@@ -625,3 +628,34 @@ def test_ai_router_batch_connectivity_endpoint(monkeypatch):
     assert payload["lanes"]["main"][0]["status"] == "ok"
     assert payload["lanes"]["mid"][0]["status"] == "ok"
     assert payload["lanes"]["tool"][0]["status"] == "ok"
+
+
+def test_ai_route_preview_uses_resolved_targets_without_secrets(monkeypatch):
+    monkeypatch.setattr(
+        ai,
+        "load_ai_config",
+        lambda: {
+            "api_url": "https://base.example/v1",
+            "api_key": "base-key",
+            "model": "base-main",
+            "tool_model": "base-tool",
+            "model_router": {
+                "enabled": True,
+                "prefer_router": True,
+                "main_channels": [
+                    {"id": "main-a", "model": "model-a", "api_url": "https://a.example/v1", "api_key": "ka", "enabled": True},
+                ],
+                "main_module_channels": {"market": ["main-a"], "default": ["main-a"]},
+            },
+        },
+    )
+
+    payload = ai.route_preview(route_kind="main", route_key="market")
+
+    assert payload["status"] == "ok"
+    assert payload["route_kind"] == "main"
+    assert payload["route_key"] == "market"
+    assert payload["targets"][0]["channel_id"] == "main-a"
+    assert payload["targets"][0]["model"] == "model-a"
+    assert payload["targets"][0]["has_api_key"] is True
+    assert "api_key" not in payload["targets"][0]

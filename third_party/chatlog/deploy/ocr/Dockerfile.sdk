@@ -1,0 +1,20 @@
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Official full pipeline (PP-DocLayout-V3 + OCR client) and Flask service.
+# Model inference itself is provided by the adjacent vLLM service.
+RUN python -m pip install --upgrade pip \
+    && python -m pip install "transformers>=5.3.0" "glmocr[selfhosted,server]"
+
+COPY config.vllm.yaml /etc/glmocr/config.yaml
+
+EXPOSE 8081
+
+CMD ["python", "-m", "glmocr.server", "--config", "/etc/glmocr/config.yaml"]

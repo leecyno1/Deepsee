@@ -1,4 +1,5 @@
 import os
+import subprocess
 import sys
 import tempfile
 from datetime import datetime
@@ -11,6 +12,28 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from app.db import Base
+
+
+def test_app_startup_does_not_eagerly_import_heavy_market_fallbacks():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; import app.main; "
+                "print(int('akshare' in sys.modules), int('tushare' in sys.modules))"
+            ),
+        ],
+        cwd=PROJECT_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stdout
+    assert result.stdout.strip().endswith("0 0"), result.stdout
 
 
 def _make_session():
@@ -75,6 +98,65 @@ def test_fetch_market_series_prefers_tushare_then_falls_back_to_akshare(monkeypa
     assert calls == [("tushare", "000300.SH"), ("akshare", "sh000300")]
 
 
+def test_fetch_market_series_defaults_to_embedded_a_stock_direct(monkeypatch):
+    from app.services import market_data
+
+    calls = []
+
+    def fake_direct(normalized, start_date, end_date):
+        calls.append(("a_stock_direct", normalized["prefixed_code"]))
+        return [{"date": "2026-07-01", "close": 25.11}]
+
+    monkeypatch.setattr(market_data, "_fetch_a_stock_direct_series", fake_direct)
+
+    rows = market_data.fetch_market_series(
+        "stock",
+        "601899",
+        datetime(2026, 6, 1),
+        datetime(2026, 7, 1),
+        config={},
+    )
+
+    assert rows == [{"date": "2026-07-01", "close": 25.11}]
+    assert calls == [("a_stock_direct", "sh601899")]
+    assert market_data.market_data_provider_order({})[0] == "a_stock_direct"
+
+
+def test_fetch_market_series_falls_back_from_embedded_direct_to_akshare(monkeypatch):
+    from app.services import market_data
+
+    calls = []
+
+    def fake_direct(normalized, start_date, end_date):
+        calls.append("a_stock_direct")
+        return []
+
+    def fake_akshare(normalized, start_date, end_date):
+        calls.append("akshare")
+        return [{"date": "2026-07-01", "close": 4958.98}]
+
+    monkeypatch.setattr(market_data, "HAS_AKSHARE", True)
+    monkeypatch.setattr(market_data, "_fetch_a_stock_direct_series", fake_direct)
+    monkeypatch.setattr(market_data, "_fetch_akshare_series", fake_akshare)
+
+    rows = market_data.fetch_market_series(
+        "index",
+        "sh000300",
+        datetime(2026, 6, 1),
+        datetime(2026, 7, 1),
+        config={
+            "provider_preference": "a_stock_first",
+            "enable_a_stock_direct": True,
+            "enable_tushare": False,
+            "enable_akshare": True,
+            "tushare_token": "",
+        },
+    )
+
+    assert rows == [{"date": "2026-07-01", "close": 4958.98}]
+    assert calls == ["a_stock_direct", "akshare"]
+
+
 def test_market_data_config_persists_and_masks_tushare_token():
     from app.routers import configs
 
@@ -83,7 +165,8 @@ def test_market_data_config_persists_and_masks_tushare_token():
         with TestingSession() as db:
             saved = configs.set_market_data_config(
                 {
-                    "provider_preference": "tushare_first",
+                    "provider_preference": "a_stock_first",
+                    "enable_a_stock_direct": True,
                     "enable_tushare": True,
                     "enable_akshare": True,
                     "tushare_token": "secret-token",
@@ -94,10 +177,13 @@ def test_market_data_config_persists_and_masks_tushare_token():
             assert saved["status"] == "ok"
 
             ui = configs.get_market_data_config(db=db)
-            assert ui["provider_preference"] == "tushare_first"
+            assert ui["provider_preference"] == "a_stock_first"
+            assert ui["enable_a_stock_direct"] is True
+            assert ui["enable_tushare_lookup"] is False
             assert ui["has_tushare_token"] is True
             assert ui["tushare_token"] == ""
             assert ui["default_benchmark"] == "sh000300"
+            assert ui["providers"]["a_stock_direct_installed"] is True
     finally:
         try:
             os.remove(path)
@@ -136,6 +222,7 @@ def test_load_asset_lookup_entries_keeps_curated_aliases_when_tushare_duplicates
         {
             "provider_preference": "tushare_first",
             "enable_tushare": True,
+            "enable_tushare_lookup": True,
             "enable_akshare": True,
             "tushare_token": "token",
         }

@@ -4,12 +4,17 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 ENV_FILE="$ROOT_DIR/.env"
 LOG_FILE="${CHATLOG_GRAY_LOG_FILE:-/private/tmp/chatlog_5031.log}"
+FRIDA_ENV="$ROOT_DIR/.local/chatlog-frida"
 
 if [[ -f "$ENV_FILE" ]]; then
   set -a
   # shellcheck disable=SC1090
   source "$ENV_FILE"
   set +a
+fi
+
+if [[ -x "$FRIDA_ENV/bin/python3" ]]; then
+  export PATH="$FRIDA_ENV/bin:$PATH"
 fi
 
 if [[ -n "${CHATLOG_BIN:-}" && ! -x "$CHATLOG_BIN" ]]; then
@@ -36,9 +41,11 @@ if [[ -z "${CHATLOG_BIN:-}" ]]; then
 fi
 CHATLOG_DATA_DIR="${CHATLOG_DATA_DIR:-}"
 CHATLOG_WORK_DIR="${CHATLOG_WORK_DIR:-${CHATLOG_DIR:-}}"
+CHATLOG_CONFIG_DIR="${CHATLOG_CONFIG_DIR:-$HOME/.chatlog}"
 CHATLOG_GRAY_PORT="${CHATLOG_GRAY_PORT:-5031}"
 CHATLOG_PLATFORM="${CHATLOG_PLATFORM:-darwin}"
 CHATLOG_VERSION="${CHATLOG_VERSION:-4}"
+CHATLOG_ACCOUNT="${CHATLOG_ACCOUNT:-$(basename "$CHATLOG_DATA_DIR")}"
 
 if [[ ! -x "$CHATLOG_BIN" ]]; then
   echo "chatlog binary not found: $CHATLOG_BIN" >> "$LOG_FILE"
@@ -51,23 +58,10 @@ fi
 
 mkdir -p "$CHATLOG_WORK_DIR" "$(dirname "$LOG_FILE")"
 
-args=(
-  server
-  --addr "127.0.0.1:$CHATLOG_GRAY_PORT"
-  --platform "$CHATLOG_PLATFORM"
-  --version "$CHATLOG_VERSION"
-  --data-dir "$CHATLOG_DATA_DIR"
-  --work-dir "$CHATLOG_WORK_DIR"
-)
+env CHATLOG_DIR="$CHATLOG_CONFIG_DIR" "$CHATLOG_BIN" ops config-set \
+  --http-addr "127.0.0.1:$CHATLOG_GRAY_PORT" \
+  --work-dir "$CHATLOG_WORK_DIR" \
+  --data-dir "$CHATLOG_DATA_DIR" >> "$LOG_FILE" 2>&1
 
-if [[ -n "${CHATLOG_DATA_KEY:-}" ]]; then
-  args+=(--data-key "$CHATLOG_DATA_KEY")
-fi
-if [[ -n "${CHATLOG_IMG_KEY:-}" ]]; then
-  args+=(--img-key "$CHATLOG_IMG_KEY")
-fi
-if [[ "${CHATLOG_AUTO_DECRYPT:-0}" == "1" || "${CHATLOG_AUTO_DECRYPT:-false}" == "true" ]]; then
-  args+=(--auto-decrypt)
-fi
-
-exec "$CHATLOG_BIN" "${args[@]}" >> "$LOG_FILE" 2>&1
+exec env CHATLOG_DIR="$CHATLOG_CONFIG_DIR" "$CHATLOG_BIN" \
+  ops server-start --account "$CHATLOG_ACCOUNT" >> "$LOG_FILE" 2>&1

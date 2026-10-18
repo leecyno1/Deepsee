@@ -6,19 +6,21 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 
-	"github.com/sjzar/chatlog/internal/errors"
 	"github.com/sjzar/chatlog/internal/model"
-	v4 "github.com/sjzar/chatlog/internal/wechatdb/datasource/v4"
 )
 
 type DataSource interface {
 
 	// 消息
 	GetMessages(ctx context.Context, startTime, endTime time.Time, talker string, sender string, keyword string, limit, offset int) ([]*model.Message, error)
+	GetMessagesAfter(ctx context.Context, talker string, cursor model.MessageCursor, limit int) ([]*model.Message, error)
 	GetMessage(ctx context.Context, talker string, seq int64) (*model.Message, error)
 
 	// 联系人
 	GetContacts(ctx context.Context, key string, limit, offset int) ([]*model.Contact, error)
+
+	// 企业微信（@openim）corp_id → 企业名映射（来自 contact.db.openim_wording 表）
+	GetOpenimWordings(ctx context.Context) ([]*model.OpenimWording, error)
 
 	// 群聊
 	GetChatRooms(ctx context.Context, key string, limit, offset int) ([]*model.ChatRoom, error)
@@ -28,6 +30,7 @@ type DataSource interface {
 
 	// 媒体
 	GetMedia(ctx context.Context, _type string, key string) (*model.Media, error)
+	GetMediaByName(ctx context.Context, _type string, name string, size int64) (*model.Media, error)
 
 	// 朋友圈
 	GetSNSTimeline(ctx context.Context, username string, limit, offset int) ([]map[string]interface{}, error)
@@ -44,18 +47,14 @@ type DataSource interface {
 
 	// 获取指定表的数据
 	GetTableData(group, file, table string, limit, offset int, keyword string) ([]map[string]interface{}, error)
+	StreamTableData(ctx context.Context, group, file, table, keyword string, visit func(columns []string, values []interface{}) error) (int64, error)
 
 	// 执行 SQL 查询
 	ExecuteSQL(group, file, query string) ([]map[string]interface{}, error)
+	StreamSQL(ctx context.Context, group, file, query string, visit func(columns []string, values []interface{}) error) (int64, error)
+
+	// 全局搜索所有数据库中可搜索的文本列
+	SearchAll(keyword string, limit int, deep bool) ([]map[string]interface{}, error)
 
 	Close() error
-}
-
-func New(path string, platform string, version int, walEnabled bool) (DataSource, error) {
-	switch {
-	case (platform == "windows" || platform == "darwin") && version == 4:
-		return v4.New(path, walEnabled)
-	default:
-		return nil, errors.PlatformUnsupported(platform, version)
-	}
 }

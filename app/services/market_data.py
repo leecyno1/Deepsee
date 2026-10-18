@@ -1,36 +1,76 @@
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import json
+import re
 import threading
-from datetime import datetime
+import time
+from pathlib import Path
+from datetime import datetime, timedelta
 from typing import Any
 
+import requests
 from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..models import SyncState
 
-try:  # pragma: no cover - optional dependency
-    import akshare as ak  # type: ignore
 
-    HAS_AKSHARE = True
-except Exception:  # pragma: no cover
-    ak = None  # type: ignore
-    HAS_AKSHARE = False
+# These providers pull in pandas/numpy and materially increase API startup RSS.
+# Detect availability without importing them; load only when a fallback is used.
+HAS_AKSHARE = importlib.util.find_spec("akshare") is not None
+HAS_TUSHARE = importlib.util.find_spec("tushare") is not None
+ak: Any | None = None
+ts: Any | None = None
+_OPTIONAL_IMPORT_LOCK = threading.Lock()
 
-try:  # pragma: no cover - optional dependency
-    import tushare as ts  # type: ignore
 
-    HAS_TUSHARE = True
-except Exception:  # pragma: no cover
-    ts = None  # type: ignore
-    HAS_TUSHARE = False
+def _load_akshare() -> Any | None:
+    global ak, HAS_AKSHARE
+    if ak is not None:
+        return ak
+    if not HAS_AKSHARE:
+        return None
+    with _OPTIONAL_IMPORT_LOCK:
+        if ak is not None:
+            return ak
+        try:
+            ak = importlib.import_module("akshare")
+        except Exception:
+            HAS_AKSHARE = False
+            ak = None
+    return ak
+
+
+def _load_tushare() -> Any | None:
+    global ts, HAS_TUSHARE
+    if ts is not None:
+        return ts
+    if not HAS_TUSHARE:
+        return None
+    with _OPTIONAL_IMPORT_LOCK:
+        if ts is not None:
+            return ts
+        try:
+            ts = importlib.import_module("tushare")
+        except Exception:
+            HAS_TUSHARE = False
+            ts = None
+    return ts
 
 
 MARKET_DATA_CONFIG_KEY = "market_data_config"
 MASKED_SECRET_VALUE = "*** 已配置 ***"
 DEFAULT_BENCHMARK_CODE = "sh000300"
-PROVIDER_PREFERENCES = {"tushare_first", "akshare_first", "tushare_only", "akshare_only"}
+PROVIDER_PREFERENCES = {
+    "a_stock_first",
+    "tushare_first",
+    "akshare_first",
+    "a_stock_only",
+    "tushare_only",
+    "akshare_only",
+}
 STOCK_PREFIX_TO_EXCHANGE = {
     "600": "SH",
     "601": "SH",
@@ -122,6 +162,26 @@ _TUSHARE_CLIENT: Any | None = None
 _TUSHARE_TOKEN_CACHE = ""
 _LOOKUP_CACHE_LOCK = threading.Lock()
 _ASSET_LOOKUP_CACHE: dict[str, list[dict[str, Any]]] = {}
+_TUSHARE_REQUEST_LOCK = threading.Lock()
+_TUSHARE_LAST_REQUEST = 0.0
+_TENCENT_RETRY_AFTER = 0.0
+
+
+def _tushare_call(client, name, **kwargs):
+    global _TUSHARE_LAST_REQUEST
+    with _TUSHARE_REQUEST_LOCK:
+        time.sleep(max(0, 0.35 - (time.monotonic() - _TUSHARE_LAST_REQUEST)))
+        _TUSHARE_LAST_REQUEST = time.monotonic()
+    return getattr(client, name)(**kwargs)
+
+
+class MarketSeries(list):
+    """List-compatible prices with provenance, without altering the row contract."""
+    def __init__(self, rows, *, source: str, adjustment: str):
+        super().__init__(rows)
+        self.provenance = {"source": source, "adjustment": adjustment,
+                           "currency": "CNY", "frequency": "daily",
+                           "retrieved_at": datetime.now().isoformat()}
 
 CURATED_ASSET_ALIASES: list[dict[str, Any]] = [
     {"asset_type": "index", "asset_code": "sh000300", "asset_name": "沪深300", "aliases": ["沪深300", "hs300"]},
@@ -150,8 +210,10 @@ CURATED_ASSET_ALIASES: list[dict[str, Any]] = [
 def _default_market_data_config() -> dict[str, Any]:
     token = str(getattr(settings, "TUSHARE_TOKEN", "") or "").strip()
     return {
-        "provider_preference": "tushare_first" if token else "akshare_first",
+        "provider_preference": "a_stock_first",
+        "enable_a_stock_direct": True,
         "enable_tushare": bool(token),
+        "enable_tushare_lookup": False,
         "enable_akshare": True,
         "tushare_token": token,
         "default_benchmark": DEFAULT_BENCHMARK_CODE,
@@ -185,12 +247,16 @@ def normalize_market_data_config(payload: dict[str, Any] | None, *, existing: di
         preference = _default_market_data_config()["provider_preference"]
 
     token = str(merged.get("tushare_token") or "").strip()
+    enable_a_stock_direct = bool(merged.get("enable_a_stock_direct", True))
     enable_tushare = bool(merged.get("enable_tushare", bool(token)))
+    enable_tushare_lookup = bool(merged.get("enable_tushare_lookup", False))
     enable_akshare = bool(merged.get("enable_akshare", True))
     benchmark = str(merged.get("default_benchmark") or DEFAULT_BENCHMARK_CODE).strip() or DEFAULT_BENCHMARK_CODE
     return {
         "provider_preference": preference,
+        "enable_a_stock_direct": enable_a_stock_direct,
         "enable_tushare": enable_tushare,
+        "enable_tushare_lookup": enable_tushare_lookup,
         "enable_akshare": enable_akshare,
         "tushare_token": token,
         "default_benchmark": benchmark,
@@ -207,12 +273,15 @@ def sanitize_market_data_config_for_ui(config: dict[str, Any] | None) -> dict[st
     token = str(cfg.get("tushare_token") or "").strip()
     return {
         "provider_preference": cfg["provider_preference"],
+        "enable_a_stock_direct": bool(cfg["enable_a_stock_direct"]),
         "enable_tushare": bool(cfg["enable_tushare"]),
+        "enable_tushare_lookup": bool(cfg["enable_tushare_lookup"]),
         "enable_akshare": bool(cfg["enable_akshare"]),
         "default_benchmark": cfg["default_benchmark"],
         "has_tushare_token": bool(token),
         "tushare_token": "",
         "providers": {
+            "a_stock_direct_installed": True,
             "akshare_installed": HAS_AKSHARE,
             "tushare_installed": HAS_TUSHARE,
         },
@@ -235,18 +304,25 @@ def save_market_data_config(db: Session, payload: dict[str, Any]) -> dict[str, A
 def market_data_provider_order(config: dict[str, Any] | None = None) -> list[str]:
     cfg = normalize_market_data_config(config or {})
     preference = cfg["provider_preference"]
-    if preference == "tushare_only":
+    if preference == "a_stock_only":
+        order = ["a_stock_direct"]
+    elif preference == "tushare_only":
         order = ["tushare"]
     elif preference == "akshare_only":
         order = ["akshare"]
+    elif preference == "a_stock_first":
+        order = ["a_stock_direct", "tushare", "akshare"]
     elif preference == "akshare_first":
-        order = ["akshare", "tushare"]
+        order = ["akshare", "tushare", "a_stock_direct"]
     else:
-        order = ["tushare", "akshare"]
+        order = ["tushare", "akshare", "a_stock_direct"]
 
     out: list[str] = []
     for provider in order:
-        if provider == "tushare":
+        if provider == "a_stock_direct":
+            if cfg.get("enable_a_stock_direct", True):
+                out.append(provider)
+        elif provider == "tushare":
             if cfg.get("enable_tushare") and str(cfg.get("tushare_token") or "").strip() and HAS_TUSHARE:
                 out.append(provider)
         elif provider == "akshare":
@@ -371,12 +447,15 @@ def _get_tushare_client(token: str) -> Any | None:
     global _TUSHARE_CLIENT, _TUSHARE_TOKEN_CACHE
     if not token or not HAS_TUSHARE:
         return None
+    ts_module = _load_tushare()
+    if ts_module is None:
+        return None
     with _TUSHARE_LOCK:
         if _TUSHARE_CLIENT is not None and _TUSHARE_TOKEN_CACHE == token:
             return _TUSHARE_CLIENT
         try:
-            ts.set_token(token)
-            _TUSHARE_CLIENT = ts.pro_api(token)
+            ts_module.set_token(token)
+            _TUSHARE_CLIENT = ts_module.pro_api(token, timeout=8)
             _TUSHARE_TOKEN_CACHE = token
         except Exception:
             _TUSHARE_CLIENT = None
@@ -386,7 +465,7 @@ def _get_tushare_client(token: str) -> Any | None:
 
 def _lookup_cache_key(config: dict[str, Any]) -> str:
     token = str(config.get("tushare_token") or "").strip()
-    return f"{int(bool(token and config.get('enable_tushare')))}:{token[:12]}"
+    return f"{int(bool(token and config.get('enable_tushare_lookup')))}:{token[:12]}"
 
 
 def _build_lookup_entry(asset_type: str, asset_code: str, asset_name: str, aliases: list[str] | None = None) -> dict[str, Any]:
@@ -462,7 +541,13 @@ def load_asset_lookup_entries(config: dict[str, Any] | None = None) -> list[dict
             return cached
 
     entries = [dict(item) for item in CURATED_ASSET_ALIASES]
-    if cfg.get("enable_tushare") and str(cfg.get("tushare_token") or "").strip() and HAS_TUSHARE:
+    try:
+        stock_rows = json.loads(Path("data/market_stock_names.json").read_text())
+        entries.extend(_build_lookup_entry("stock", row["code"], row["zwjc"]) for row in stock_rows
+                       if row.get("category") == "A股" and len(row.get("zwjc", "")) >= 3)
+    except (OSError, ValueError):
+        pass
+    if cfg.get("enable_tushare_lookup") and str(cfg.get("tushare_token") or "").strip() and HAS_TUSHARE:
         dynamic = _fetch_tushare_lookup_entries(cfg)
         if dynamic:
             dedup: dict[tuple[str, str], dict[str, Any]] = {}
@@ -488,6 +573,49 @@ def load_asset_lookup_entries(config: dict[str, Any] | None = None) -> list[dict
     with _LOOKUP_CACHE_LOCK:
         _ASSET_LOOKUP_CACHE[key] = entries
     return entries
+
+
+def refresh_stock_name_directory() -> int:
+    """Download public security names only; private chat text never leaves the app."""
+    response = requests.get("https://www.cninfo.com.cn/new/data/szse_stock.json", timeout=20)
+    response.raise_for_status()
+    rows = response.json()["stockList"]
+    target = Path("data/market_stock_names.json")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+    with _LOOKUP_CACHE_LOCK:
+        _ASSET_LOOKUP_CACHE.clear()
+    return len(rows)
+
+
+def build_asset_text_resolver(config: dict[str, Any] | None = None):
+    aliases = {}
+    codes = {}
+    for item in load_asset_lookup_entries(config):
+        codes[item["asset_code"]] = item
+        for alias in item.get("aliases") or []:
+            if len(alias) >= 3:
+                aliases[alias] = item
+    pattern = re.compile("|".join(re.escape(a) for a in sorted(aliases, key=len, reverse=True)))
+
+    def resolve(text):
+        coded = [codes[code] for code in re.findall(r"(?<!\d)(\d{6})(?!\d)", text) if code in codes]
+        if coded:
+            return coded[0]
+        matches = []
+        brokers = {"国泰海通", "国联民生", "申万宏源", "中信建投", "中信证券", "长江证券", "浙商证券", "东方证券",
+                   "国海证券", "招商证券", "兴业证券", "广发证券", "华泰证券", "中金公司", "东吴证券", "国金证券",
+                   "财通证券", "天风证券", "方正证券", "华安证券", "光大证券", "中泰证券", "山西证券", "东北证券"}
+        ambiguous = {"机器人", "农产品", "驱动力", "陆家嘴", "张江高科", "中国中期", "动力新科"}
+        for match in pattern.finditer(text):
+            name = match.group()
+            if name in ambiguous:
+                continue  # Common sector/place words are not sufficient security evidence.
+            if name in brokers and not re.search(r"(?:看好|推荐|配置|增持|减持|回避|买入|卖出).{0,6}$", text[max(0, match.start()-16):match.start()]):
+                continue  # Research institution / author attribution, not the investment target.
+            matches.append(aliases[name])
+        return next((m for m in matches if m["asset_type"] != "index"), matches[0] if matches else None)
+    return resolve
 
 
 def search_asset_in_text(text: str, config: dict[str, Any] | None = None) -> dict[str, Any] | None:
@@ -549,7 +677,6 @@ def _fetch_tushare_series(normalized: dict[str, Any], start_date: datetime, end_
     else:
         try_specs = [
             ("daily", {"ts_code": ts_code, "start_date": start_s, "end_date": end_s, "fields": "trade_date,close"}),
-            ("fund_daily", {"ts_code": ts_code, "start_date": start_s, "end_date": end_s, "fields": "trade_date,close"}),
         ]
 
     for func_name, kwargs in try_specs:
@@ -557,10 +684,21 @@ def _fetch_tushare_series(normalized: dict[str, Any], start_date: datetime, end_
             fn = getattr(client, func_name, None)
             if not fn:
                 continue
-            df = fn(**kwargs)
+            df = _tushare_call(client, func_name, **kwargs)
             records = _records_from_df(df)
             if records:
-                return _clip_records(records, start_date, end_date)
+                records = _clip_records(records, start_date, end_date)
+                if asset_type == "index":
+                    return MarketSeries(records, source="Tushare index_daily", adjustment="none")
+                factor_api = "fund_adj" if asset_type in {"etf", "fund"} else "adj_factor"
+                factors = _tushare_call(client, factor_api, ts_code=ts_code, start_date=start_s, end_date=end_s,
+                                       fields="trade_date,adj_factor")
+                factor_map = {str(r["trade_date"]): float(r["adj_factor"]) for r in factors.to_dict("records")}
+                if not factor_map or any(row["date"].replace("-", "") not in factor_map for row in records):
+                    return []  # Never treat splits/dividends as investment losses.
+                last_factor = factor_map[max(factor_map)]
+                adjusted = [{"date": row["date"], "close": round(row["close"] * factor_map[row["date"].replace("-", "")] / last_factor, 6)} for row in records]
+                return MarketSeries(adjusted, source=f"Tushare {func_name} + {factor_api}", adjustment="qfq")
         except Exception:
             continue
     return []
@@ -569,7 +707,10 @@ def _fetch_tushare_series(normalized: dict[str, Any], start_date: datetime, end_
 def _fetch_akshare_open_fund(symbol: str, start_date: datetime, end_date: datetime) -> list[dict[str, Any]]:
     if not HAS_AKSHARE:
         return []
-    fn = getattr(ak, "fund_open_fund_info_em", None)
+    ak_module = _load_akshare()
+    if ak_module is None:
+        return []
+    fn = getattr(ak_module, "fund_open_fund_info_em", None)
     if not fn:
         return []
     for indicator in ("单位净值走势", "累计净值走势"):
@@ -585,6 +726,9 @@ def _fetch_akshare_open_fund(symbol: str, start_date: datetime, end_date: dateti
 
 def _fetch_akshare_series(normalized: dict[str, Any], start_date: datetime, end_date: datetime) -> list[dict[str, Any]]:
     if not HAS_AKSHARE:
+        return []
+    ak_module = _load_akshare()
+    if ak_module is None:
         return []
 
     digits = str(normalized.get("digits") or "").strip()
@@ -610,9 +754,10 @@ def _fetch_akshare_series(normalized: dict[str, Any], start_date: datetime, end_
 
     for func_name, kwargs in try_specs:
         try:
-            fn = getattr(ak, func_name, None)
+            fn = getattr(ak_module, func_name, None)
             if not fn:
                 continue
+            time.sleep(1)
             df = fn(**kwargs)
             records = _records_from_df(df)
             if records:
@@ -622,6 +767,80 @@ def _fetch_akshare_series(normalized: dict[str, Any], start_date: datetime, end_
 
     if asset_type in {"fund", "etf"}:
         return _fetch_akshare_open_fund(digits, start_date, end_date)
+    return []
+
+
+def _tencent_symbol(normalized: dict[str, Any]) -> str:
+    digits = str(normalized.get("digits") or "").strip()
+    exchange = str(normalized.get("exchange") or "").strip().upper()
+    if not digits or exchange not in {"SH", "SZ", "BJ"}:
+        return ""
+    return f"{exchange.lower()}{digits}"
+
+
+def _records_from_tencent_kline_payload(payload: dict[str, Any], symbol: str) -> list[dict[str, Any]]:
+    data = payload.get("data") or {}
+    block = data.get(symbol) or data.get(symbol.lower()) or data.get(symbol.upper()) or {}
+    if not isinstance(block, dict):
+        return []
+    rows = block.get("qfqday") or block.get("day") or block.get("hfqday") or []
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, (list, tuple)) or len(row) < 3:
+            continue
+        dt = str(row[0] or "").strip()[:10]
+        try:
+            close = float(row[2])
+        except Exception:
+            continue
+        if dt:
+            out.append({"date": dt, "close": close})
+    out.sort(key=lambda item: str(item.get("date") or ""))
+    return out
+
+
+def _fetch_a_stock_direct_series(normalized: dict[str, Any], start_date: datetime, end_date: datetime) -> list[dict[str, Any]]:
+    """Fetch daily A-share/index/ETF K-line data from Tencent's public endpoint.
+
+    This embeds the lightweight no-key route recommended by the a-stock-data skill.
+    It is intentionally narrow: contact scoring only needs date/close series.
+    """
+    global _TENCENT_RETRY_AFTER
+    if time.monotonic() < _TENCENT_RETRY_AFTER:
+        return []
+    symbol = _tencent_symbol(normalized)
+    if not symbol:
+        return []
+    asset_type = str(normalized.get("asset_type") or "stock")
+    natural_days = max(10, (end_date.date() - start_date.date()).days + 45)
+    limit = min(max(natural_days, 90), 1600)
+    endpoint = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Referer": "https://gu.qq.com/",
+    }
+    adjust_candidates = [""] if asset_type == "index" else ["qfq", ""]
+    for adjust in adjust_candidates:
+        try:
+            params = {"param": f"{symbol},day,,,{limit},{adjust}"}
+            resp = requests.get(endpoint, params=params, headers=headers, timeout=10)
+            if resp.status_code in {403, 429, 501}:
+                _TENCENT_RETRY_AFTER = time.monotonic() + 1800
+                return []
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            if int(data.get("code", -1)) != 0:
+                continue
+            records = _records_from_tencent_kline_payload(data, symbol)
+            clipped = _clip_records(records, start_date - timedelta(days=3), end_date + timedelta(days=3))
+            if clipped:
+                block = (data.get("data") or {}).get(symbol) or {}
+                actual_adjustment = "qfq" if block.get("qfqday") else "hfq" if block.get("hfqday") and not block.get("day") else "none"
+                return MarketSeries(clipped, source="Tencent public K-line / fqkline",
+                                    adjustment=actual_adjustment)
+        except Exception:
+            continue
     return []
 
 
@@ -641,12 +860,17 @@ def fetch_market_series(
         return []
 
     for provider in market_data_provider_order(cfg):
-        if provider == "tushare":
+        if provider == "a_stock_direct":
+            records = _fetch_a_stock_direct_series(normalized, start_date, end_date)
+        elif provider == "tushare":
             records = _fetch_tushare_series(normalized, start_date, end_date, cfg)
         else:
             records = _fetch_akshare_series(normalized, start_date, end_date)
         if records:
-            return records
+            if hasattr(records, "provenance"):
+                return records
+            adjustment = "none" if provider == "tushare" or normalized["asset_type"] == "index" else "provider_default"
+            return MarketSeries(records, source=provider, adjustment=adjustment)
     return []
 
 
@@ -656,6 +880,11 @@ def market_provider_health(config: dict[str, Any] | None = None) -> dict[str, An
     return {
         "provider_preference": cfg["provider_preference"],
         "providers": {
+            "a_stock_direct": {
+                "enabled": bool(cfg.get("enable_a_stock_direct", True)),
+                "installed": True,
+                "source": "A Stock Data / Tencent public K-line",
+            },
             "akshare": {
                 "enabled": bool(cfg.get("enable_akshare")),
                 "installed": HAS_AKSHARE,
@@ -664,6 +893,7 @@ def market_provider_health(config: dict[str, Any] | None = None) -> dict[str, An
                 "enabled": bool(cfg.get("enable_tushare")),
                 "installed": HAS_TUSHARE,
                 "has_token": bool(token),
+                "lookup_enabled": bool(cfg.get("enable_tushare_lookup")),
             },
         },
         "effective_order": market_data_provider_order(cfg),

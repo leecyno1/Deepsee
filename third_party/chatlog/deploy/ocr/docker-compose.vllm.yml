@@ -1,0 +1,39 @@
+services:
+  vllm:
+    image: vllm/vllm-openai:v0.19.0-ubuntu2404
+    entrypoint: ["vllm", "serve"]
+    command:
+      - zai-org/GLM-OCR
+      - --port
+      - "8080"
+      - --served-model-name
+      - glm-ocr
+      - --max-model-len
+      - "8192"
+      - --gpu-memory-utilization
+      - "0.85"
+      - --speculative-config
+      - '{"method":"mtp","num_speculative_tokens":3}'
+    gpus: all
+    ipc: host
+    shm_size: "8gb"
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - glmocr-huggingface:/root/.cache/huggingface
+    restart: unless-stopped
+
+  sdk:
+    build:
+      context: .
+      dockerfile: Dockerfile.sdk
+    depends_on:
+      - vllm
+    ports:
+      - "127.0.0.1:8081:8081"
+    volumes:
+      - glmocr-huggingface:/root/.cache/huggingface
+    restart: unless-stopped
+
+volumes:
+  glmocr-huggingface:

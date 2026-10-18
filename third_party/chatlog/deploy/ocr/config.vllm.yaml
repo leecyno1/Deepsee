@@ -1,0 +1,60 @@
+server:
+  host: "0.0.0.0"
+  port: 8081
+  debug: false
+
+logging:
+  level: INFO
+
+pipeline:
+  maas:
+    enabled: false
+
+  ocr_api:
+    api_host: vllm
+    api_port: 8080
+    api_path: /v1/chat/completions
+    api_mode: openai
+    model: glm-ocr
+    verify_ssl: false
+    connect_timeout: 30
+    request_timeout: 180
+    retry_max_attempts: 3
+    retry_backoff_base_seconds: 0.5
+    retry_backoff_max_seconds: 8.0
+    connection_pool_size: 32
+
+  # Keep the single GPU dedicated to vLLM. PP-DocLayout-V3 runs on CPU and
+  # sends only detected regions to the OCR model.
+  layout:
+    model_dir: PaddlePaddle/PP-DocLayoutV3_safetensors
+    device: cpu
+    batch_size: 1
+    workers: 1
+    threshold: 0.3
+    use_polygon: false
+
+  max_workers: 8
+  page_maxsize: 32
+  region_maxsize: 512
+
+  page_loader:
+    max_tokens: 8192
+    temperature: 0.0
+    top_p: 0.00001
+    top_k: 1
+    repetition_penalty: 1.1
+    image_expect_length: 6144
+    image_format: JPEG
+    min_pixels: 12544
+    max_pixels: 71372800
+    task_prompt_mapping:
+      text: "Text Recognition:"
+      table: "Table Recognition:"
+      formula: "Formula Recognition:"
+
+  result_formatter:
+    output_format: both
+    enable_merge_formula_numbers: true
+    enable_merge_text_blocks: true
+    enable_format_bullet_points: true

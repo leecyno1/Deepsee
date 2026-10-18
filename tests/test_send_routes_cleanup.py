@@ -39,8 +39,16 @@ def test_send_langbot_routes_are_absent_from_app():
     assert "/api/sync/langbot" not in paths
 
 
-def test_send_out_rejects_removed_langbot_provider(monkeypatch):
-    monkeypatch.setattr(send, "load_ai_config", lambda: {"send_provider": "langbot_gateway"})
+def test_send_out_ignores_removed_provider_config_and_uses_wechatapi(monkeypatch):
+    monkeypatch.setattr(
+        send,
+        "dispatch_send_items",
+        lambda items, request=None: {
+            "status": "ok",
+            "provider": "wechatapi_gateway",
+            "results": [{"ok": True, "target": items[0].target}],
+        },
+    )
 
     client = TestClient(create_app())
     response = client.post(
@@ -51,5 +59,5 @@ def test_send_out_rejects_removed_langbot_provider(monkeypatch):
 
     assert response.status_code == 200
     body = response.json()
-    assert body["status"] == "error"
-    assert "langbot_gateway" in body["error"]
+    assert body["status"] == "ok"
+    assert body["provider"] == "wechatapi_gateway"

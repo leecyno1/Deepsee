@@ -1,0 +1,124 @@
+#deepsee-developer { --dev-accent: #226653; --dev-ink:#226653; --dev-soft:color-mix(in srgb,var(--dev-accent) 8%,var(--panel)); max-width: 1360px; margin: auto; }
+#deepsee-developer .dev-head { border-bottom: 2px solid var(--dev-accent); padding: 10px 0 24px; margin-bottom: 24px; }
+#deepsee-developer .dev-kicker { font: 11px/1.5 monospace; letter-spacing: 2px; color: var(--dev-accent); }
+#deepsee-developer h3 { margin: 8px 0; font-size: 25px; }
+#deepsee-developer p { color: var(--text-muted); line-height: 1.7; font-size: 13px; }
+#deepsee-developer .dev-layout { display: grid; grid-template-columns: minmax(245px, 1fr) minmax(0, 2fr); gap: 20px; align-items: start; }
+#deepsee-developer .dev-box { background: var(--surface-elevated); border: 1px solid var(--border-color); border-radius: 12px; padding: 20px; margin-bottom: 18px; min-width: 0; }
+#deepsee-developer h4 { margin: 0 0 16px; font-size: 15px; }
+#deepsee-developer label.dev-field { display: grid; gap: 7px; margin: 14px 0; font-size: 12px; }
+#deepsee-developer input:not([type=checkbox]) { width: 100%; box-sizing: border-box; padding: 9px 10px; border: 1px solid var(--border-color); border-radius: 6px; color: var(--text-primary); background: var(--surface-elevated); }
+#deepsee-developer .dev-scopes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 14px 0; }
+#deepsee-developer .dev-scopes label { font-size: 12px; display: flex; gap: 6px; align-items: center; }
+#deepsee-developer button { padding: 8px 12px; border-radius: 7px; border: 1px solid var(--border-color); background: var(--surface-elevated); color: var(--text-primary); cursor: pointer; }
+#deepsee-developer button.dev-primary { background: var(--dev-accent); color: white; border-color: var(--dev-accent); }
+#deepsee-developer button:disabled { opacity: .5; cursor: wait; }
+#deepsee-developer .dev-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+#deepsee-developer .dev-project { padding: 16px 0; border-bottom: 1px solid var(--border-color); }
+#deepsee-developer .dev-project:last-child { border-bottom: 0; }
+#deepsee-developer .dev-project strong { font-size: 14px; }
+#deepsee-developer small { display: block; color: var(--text-muted); margin-top: 7px; overflow-wrap: anywhere; }
+#deepsee-developer code { font: 12px/1.7 monospace; overflow-wrap: anywhere; }
+#deepsee-developer .dev-status { min-height: 22px; font-size: 13px; color: var(--dev-accent); }
+#deepsee-developer .dev-log { overflow-x: auto; }
+#deepsee-developer table { width: 100%; font-size: 12px; border-collapse: collapse; }
+#deepsee-developer th, #deepsee-developer td { text-align: left; padding: 9px 8px; border-bottom: 1px solid var(--border-color); white-space: nowrap; }
+#deepsee-developer dialog { width: min(520px, 85vw); border: 1px solid var(--border-color); border-radius: 12px; background: var(--surface-elevated); color: var(--text-primary); padding: 25px; }
+#deepsee-developer dialog::backdrop { background: #10251f88; }
+#deepsee-developer textarea { width: 100%; box-sizing: border-box; min-height: 90px; font: 13px/1.6 monospace; padding: 12px; }
+@media (max-width: 760px) { #deepsee-developer .dev-layout { grid-template-columns: 1fr; } }
+/* Compact data-access workbench, shared by standalone and Desk. */
+html[data-theme="dark"] #deepsee-developer, html.dark #deepsee-developer, body.theme-hacker #deepsee-developer { --dev-ink:#81c9ad; }
+#deepsee-developer * { box-sizing:border-box; }
+#deepsee-developer [hidden] { display:none!important; }
+#deepsee-developer .dev-head { display:flex;align-items:center;justify-content:space-between;gap:18px;padding:8px 0 18px;margin:0;border:0; }
+#deepsee-developer .dev-kicker { font:10px "Avenir Next",sans-serif;letter-spacing:.16em;color:var(--dev-ink); }
+#deepsee-developer h3 { margin:9px 0;font-size:23px;font-weight:650;letter-spacing:-.03em; }
+#deepsee-developer p { color:var(--text-muted);line-height:1.75;font-size:12px;margin:9px 0; }
+#deepsee-developer .dev-head p { margin:0; }
+#deepsee-developer .dev-address { display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding:11px 14px;border:1px solid var(--border-color);border-radius:9px;background:var(--surface-elevated); }
+#deepsee-developer .dev-address > span:last-child { margin-left:auto;font-size:11px;color:var(--text-muted); }
+#deepsee-developer .dev-address code { flex:1;min-width:150px; }
+#deepsee-developer .dev-badge { display:inline-block;font-size:10px;font-weight:500;color:var(--dev-ink);background:var(--dev-soft);padding:5px 8px;border-radius:5px;white-space:nowrap; }
+#deepsee-developer .dev-badge[data-enabled="false"] { color:var(--text-muted);background:var(--panel-muted); }
+#deepsee-developer .dev-metrics { display:grid;grid-template-columns:repeat(4,minmax(0,1fr));margin:16px 0 4px;gap:12px; }
+#deepsee-developer .dev-metrics > div { padding:16px 18px;border:1px solid var(--border-color);background:var(--surface-elevated);border-radius:10px;display:flex;flex-direction:column;gap:6px; }
+#deepsee-developer .dev-metrics b { font:600 27px "Avenir Next",sans-serif;letter-spacing:-.04em; }
+#deepsee-developer .dev-metrics span { font-size:11px;color:var(--text-muted); }
+#deepsee-developer .dev-status { min-height:30px;padding:7px 0;font-size:11px;color:var(--text-secondary); }
+#deepsee-developer .dev-tabs { display:flex;gap:5px;border-bottom:1px solid var(--border-color);padding:0 0 10px;margin-bottom:18px; }
+#deepsee-developer .dev-tabs button { border-color:transparent;background:transparent;padding:10px 18px;color:var(--text-muted); }
+#deepsee-developer .dev-tabs button[aria-selected="true"] { color:var(--dev-ink);background:var(--dev-soft);font-weight:650; }
+#deepsee-developer .dev-guide { display:flex;align-items:center;flex-wrap:wrap;gap:7px 14px;font-size:11px;margin-bottom:18px;color:var(--text-muted); }
+#deepsee-developer .dev-guide b { color:var(--text-secondary);font-weight:500; }
+#deepsee-developer .dev-guide span:not(:last-child) { margin-right:12px; }
+#deepsee-developer .dev-layout { grid-template-columns:minmax(290px,.9fr) minmax(0,1.5fr);gap:16px; }
+#deepsee-developer .dev-explorer-layout { display:grid;grid-template-columns:245px minmax(0,1fr);gap:16px;align-items:start; }
+#deepsee-developer .dev-box { border-radius:11px;padding:18px;margin-bottom:0; }
+#deepsee-developer h4 { margin:0;font-size:14px;font-weight:650; }
+#deepsee-developer .dev-section-head { display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:12px; }
+#deepsee-developer .dev-section-head > span { font-size:11px;color:var(--text-muted); }
+#deepsee-developer label.dev-field { gap:6px;min-width:0; }
+#deepsee-developer input:not([type=checkbox]), #deepsee-developer select, #deepsee-developer textarea { width:100%;min-width:0;padding:8px 10px;border:1px solid var(--border-color);border-radius:6px;color:var(--text-primary);background:var(--panel);font:inherit;font-size:12px; }
+#deepsee-developer input[type=checkbox] { appearance:auto;position:static;width:14px;height:14px;margin:0;accent-color:var(--dev-accent);flex:none; }
+#deepsee-developer .dev-scope-fieldset { border:0;padding:0;margin:18px 0 0; }
+#deepsee-developer legend { font-size:12px; }
+#deepsee-developer .dev-scopes { gap:7px;margin:10px 0; }
+#deepsee-developer .dev-scopes label { font-size:11px;gap:7px;padding:9px 7px;border:1px solid var(--border-color);border-radius:6px;cursor:pointer; }
+#deepsee-developer .dev-scopes label:has(input:checked) { background:var(--dev-soft);border-color:color-mix(in srgb,var(--dev-ink) 50%,var(--border-color)); }
+#deepsee-developer button { font:inherit;font-size:12px;line-height:1.4;padding:7px 11px;background:var(--panel); }
+#deepsee-developer button:hover:not(:disabled) { border-color:var(--dev-ink); }
+#deepsee-developer button:disabled { cursor:default; }
+#deepsee-developer :is(button,input,select,textarea,summary):focus-visible { outline:2px solid var(--dev-ink);outline-offset:3px; }
+#deepsee-developer .dev-actions { align-items:center; }
+#deepsee-developer .dev-actions select { width:auto;max-width:240px; }
+#deepsee-developer .dev-section-head .dev-actions { margin:0; }
+#deepsee-developer .dev-project:first-child { padding-top:5px; }
+#deepsee-developer .dev-project:last-child { padding-bottom:0; }
+#deepsee-developer .dev-project strong { overflow-wrap:anywhere; }
+#deepsee-developer .dev-project > .dev-badge { margin-left:10px; }
+#deepsee-developer small { font-size:11px;line-height:1.6; }
+#deepsee-developer code { font:11px/1.7 "SFMono-Regular",Consolas,monospace; }
+#deepsee-developer table { font-size:11px; }
+#deepsee-developer th, #deepsee-developer td { padding:11px 9px; }
+#deepsee-developer th { color:var(--text-muted);font-weight:500;background:var(--panel-muted); }
+#deepsee-developer td[data-error="true"] { color:#c67d4d;font-weight:650; }
+#deepsee-developer td[data-error="false"] { color:var(--dev-ink); }
+#deepsee-developer dialog { width:min(560px,90vw);padding:24px; }
+#deepsee-developer dialog::backdrop { background:#07171199;backdrop-filter:blur(3px); }
+#deepsee-developer .dev-endpoints { display:flex;flex-direction:column;gap:4px;max-height:590px;overflow:auto;margin-bottom:16px; }
+#deepsee-developer .dev-endpoints button { text-align:left;border-color:transparent;background:transparent;font-size:12px;padding:9px; }
+#deepsee-developer .dev-endpoints button code { display:block;font-size:10px;color:var(--text-muted);margin-top:4px; }
+#deepsee-developer .dev-endpoints button[aria-pressed="true"] { background:var(--dev-soft);color:var(--dev-ink);border-color:var(--border-color); }
+#deepsee-developer .dev-params { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 14px; }
+#deepsee-developer .dev-params .dev-field { margin:10px 0; }
+#deepsee-developer .dev-params small { margin:0; }
+#deepsee-developer .dev-code { white-space:pre-wrap;overflow-wrap:anywhere;background:var(--panel-muted);border:1px solid var(--border-color);border-radius:8px;padding:14px;font:11px/1.8 "SFMono-Regular",Consolas,monospace;color:var(--text-secondary);margin:10px 0 18px; }
+#deepsee-developer .dev-result { max-height:400px;overflow:auto; }
+#deepsee-developer .dev-example-head { border-top:1px solid var(--border-color);padding-top:18px;margin-top:18px; }
+#deepsee-developer .dev-note { font-size:11px; }
+#deepsee-developer .dev-help { padding:12px 0;border-top:1px solid var(--border-color);border-bottom:1px solid var(--border-color);margin-bottom:18px; }
+#deepsee-developer .dev-help summary { cursor:pointer;font-size:12px; }
+#deepsee-developer #dev-log-state { font-size:11px;color:var(--text-muted); }
+@media(max-width:1000px) { #deepsee-developer .dev-layout { grid-template-columns:minmax(270px,1fr) minmax(0,1fr); } #deepsee-developer .dev-explorer-layout { grid-template-columns:200px minmax(0,1fr); } }
+@media(max-width:760px) {
+ #function-settings:has(#settings-developer.active-settings-section) { padding:8px; }
+ #function-settings .settings-layout:has(#settings-developer.active-settings-section) { flex-direction:column;max-height:none;overflow:visible; }
+ #function-settings .settings-layout:has(#settings-developer.active-settings-section) .settings-sidebar { display:flex;gap:4px;width:100%;min-width:0;max-height:64px;position:static;overflow-x:auto;border-right:0;border-bottom:1px solid var(--border-color); }
+ #function-settings .settings-layout:has(#settings-developer.active-settings-section) .settings-nav-group { display:none; }
+ #function-settings .settings-layout:has(#settings-developer.active-settings-section) .settings-nav-item { flex:none;font-size:11px; }
+ #function-settings .settings-layout:has(#settings-developer.active-settings-section) .settings-content { width:100%;min-width:0;padding:8px;overflow:visible; }
+ #function-settings #settings-developer { padding:8px; }
+ #deepsee-developer .dev-layout, #deepsee-developer .dev-explorer-layout { grid-template-columns:1fr; }
+ #deepsee-developer .dev-metrics { grid-template-columns:repeat(2,minmax(0,1fr));gap:8px; }
+ #deepsee-developer .dev-metrics > div { padding:12px; }
+ #deepsee-developer .dev-head { align-items:flex-start; }
+ #deepsee-developer h3 { font-size:20px; }
+ #deepsee-developer .dev-head > button { flex:none;font-size:10px;padding:6px; }
+ #deepsee-developer .dev-box { padding:14px; }
+ #deepsee-developer .dev-address > span:last-child { margin-left:0; }
+ #deepsee-developer .dev-endpoints { max-height:220px; }
+ #deepsee-developer .dev-tabs button { flex:1;padding:10px 4px; }
+ #deepsee-developer .dev-guide { display:grid;grid-template-columns:auto 1fr; }
+ #deepsee-developer .dev-params { grid-template-columns:1fr; }
+}

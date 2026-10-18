@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 from datetime import datetime, timedelta
@@ -240,8 +241,54 @@ def test_extract_message_features_falls_back_to_single_item_retry(monkeypatch):
     )
     assert out["1"]["summary"].startswith("ai:")
     assert out["2"]["summary"].startswith("ai:")
+    assert calls["n"] == 1
 
 
+def test_minutes_refine_prompt_requires_batch_json_array(monkeypatch):
+    from app.services import ai_tools
+
+    calls = []
+
+    monkeypatch.setattr(
+        ai_tools,
+        "load_ai_config",
+        lambda: {
+            "tool_prompts": {
+                "minutes_refine": {
+                    "system": "旧配置：输出单个 JSON 对象。",
+                    "user": "旧配置：只处理单条。数据：{{messages_json}}",
+                }
+            }
+        },
+    )
+    def _fake_chat(prompt, **_kwargs):
+        calls.append(prompt)
+        return json.dumps(
+            [
+                {"id": item_id, "summary": "ai: ok", "refined": "整理结果"}
+                for item_id in ("m1", "m2")
+            ],
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(ai_tools, "siliconflow_tool_chat", _fake_chat)
+
+    out = ai_tools.extract_message_features(
+        [
+            {"id": "m1", "content": "第一条会议逐字稿，包含足够内容。"},
+            {"id": "m2", "content": "第二条会议逐字稿，包含足够内容。"},
+        ],
+        batch_size=50,
+        concurrency=1,
+        prompt_key="minutes_refine",
+    )
+
+    assert len(calls) == 1
+    prompt_text = "\n".join(item["content"] for item in calls[0])
+    assert "必须返回 2 个结果" in prompt_text
+    assert "必须返回单元素 JSON 数组" in prompt_text
+    assert out["m1"]["refined"] == "整理结果"
+    assert out["m2"]["refined"] == "整理结果"
 def test_extract_message_features_parses_concatenated_json_objects_without_retry(monkeypatch):
     from app.services import ai_tools
 

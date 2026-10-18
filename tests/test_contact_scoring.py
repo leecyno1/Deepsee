@@ -123,6 +123,39 @@ def test_extract_prediction_events_can_resolve_named_assets_without_numeric_code
     assert events[1]["asset_code"] == "512480"
 
 
+def test_extract_prediction_events_selects_board_specific_benchmarks():
+    from app.services import contact_scoring as scoring
+
+    now = datetime(2026, 4, 13, 9, 30, 0)
+    messages = [
+        {
+            "id": 1,
+            "sender_id": "wxid_focus",
+            "sender_name": "张三",
+            "timestamp": now,
+            "content_text": "继续看好688111，未来一个月表现有望继续走强。",
+        },
+        {
+            "id": 2,
+            "sender_id": "wxid_focus",
+            "sender_name": "张三",
+            "timestamp": now,
+            "content_text": "继续看好300750，未来一个月表现有望继续走强。",
+        },
+        {
+            "id": 3,
+            "sender_id": "wxid_focus",
+            "sender_name": "张三",
+            "timestamp": now,
+            "content_text": "继续看好430047，未来一个月表现有望继续走强。",
+        },
+    ]
+
+    events = scoring.extract_prediction_events(messages, focus_contact_ids={"wxid_focus"})
+
+    assert [event["benchmark_code"] for event in events] == ["sh000688", "sz399006", "bj899050"]
+
+
 def test_extract_prediction_events_assigns_event_kind_topic_key_and_risk_alert_defaults():
     from app.services import contact_scoring as scoring
 
@@ -182,6 +215,39 @@ def test_extract_prediction_events_marks_roadshow_invite_as_non_actionable():
     assert len(events) == 1
     assert events[0]["event_kind"] == "roadshow_invite"
     assert events[0]["is_actionable"] is False
+    assert events[0]["direction"] == "neutral"
+
+
+def test_extract_prediction_events_to_db_inserts_neutral_roadshow_invites():
+    from app.models import ContactPredictionEvent
+    from app.services import contact_scoring as scoring
+
+    path, TestingSession = _make_session()
+    try:
+        with TestingSession() as db:
+            db.add(Contact(id="wxid_research", name="张三", alias="银行研究员", rating=70))
+            db.add(
+                Message(
+                    sender_id="wxid_research",
+                    sender_name="张三",
+                    timestamp=datetime(2026, 6, 24, 9, 30, 0),
+                    content_text="下周有招商银行600036路演交流，欢迎报名参加。",
+                )
+            )
+            db.commit()
+
+            result = scoring.extract_prediction_events_to_db(db, contact_ids={"wxid_research"})
+            event = db.query(ContactPredictionEvent).one()
+
+            assert result["inserted"] == 1
+            assert event.event_kind == "roadshow_invite"
+            assert event.is_actionable is False
+            assert event.direction == "neutral"
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 
 def test_extract_prediction_events_skips_sales_contacts_by_default():
@@ -220,6 +286,70 @@ def test_sales_contact_detector_uses_contact_identity_not_view_text():
     assert not scoring.is_sales_contact_payload({"name": "张三", "alias": "地产销售数据研究"})
 
 
+def test_get_focus_contact_ids_auto_selects_recent_research_contacts_when_unconfigured():
+    from app.services import contact_scoring as scoring
+
+    path, TestingSession = _make_session()
+    try:
+        with TestingSession() as db:
+            now = datetime.utcnow()
+            db.add_all(
+                [
+                    Contact(id="wxid_research_recent", name="陈晨国海证券能源", alias="能源研究员", rating=66),
+                    Contact(id="wxid_sales_recent", name="程一天", alias="中信证券销售", rating=90),
+                    Contact(id="gh_media", name="公众号", alias="公众号", rating=80),
+                ]
+            )
+            db.commit()
+            for idx in range(4):
+                db.add(
+                    Message(
+                        sender_id="wxid_research_recent",
+                        sender_name="陈晨国海证券能源",
+                        timestamp=now - timedelta(days=idx),
+                        content_text="继续看好紫金矿业，未来三个月有望跑赢。",
+                    )
+                )
+            for idx in range(6):
+                db.add(
+                    Message(
+                        sender_id="wxid_sales_recent",
+                        sender_name="程一天中信证券销售",
+                        timestamp=now - timedelta(days=idx),
+                        content_text="转发路演邀请，欢迎报名。",
+                    )
+                )
+            db.add(
+                Message(
+                    sender_id="gh_media",
+                    sender_name="公众号",
+                    timestamp=now,
+                    content_text="公众号推送",
+                )
+            )
+            db.add(
+                Message(
+                    sender_id="12345@chatroom",
+                    sender_name="群聊",
+                    timestamp=now,
+                    content_text="群聊消息",
+                )
+            )
+            db.commit()
+
+            ids = scoring.get_focus_contact_ids(db)
+
+            assert "wxid_research_recent" in ids
+            assert "wxid_sales_recent" not in ids
+            assert "gh_media" not in ids
+            assert "12345@chatroom" not in ids
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 def test_summarize_contact_score_aggregates_hits_excess_and_manual_weight():
     from app.services import contact_scoring as scoring
 
@@ -236,9 +366,9 @@ def test_summarize_contact_score_aggregates_hits_excess_and_manual_weight():
     )
 
     assert summary["sample_size"] == 3
-    assert summary["hit_rate_overall"] == 2 / 3
-    assert round(summary["accuracy_by_horizon"]["1m"], 4) == 1.0
-    assert round(summary["accuracy_by_horizon"]["1y"], 4) == 0.0
+    assert summary["hit_rate_overall"] == 4 / 7
+    assert round(summary["accuracy_by_horizon"]["1m"], 4) == 0.6
+    assert round(summary["accuracy_by_horizon"]["1y"], 4) == 0.4
     assert summary["auto_rating"] > 50
     assert summary["final_rating"] >= 50
     assert summary["manual_rating"] == 62
@@ -304,8 +434,8 @@ def test_summarize_contact_score_ignores_non_actionable_events_for_accuracy():
     )
 
     assert summary["sample_size"] == 1
-    assert round(summary["hit_rate_overall"], 4) == 1.0
-    assert summary["accuracy_score"] > 60
+    assert round(summary["hit_rate_overall"], 4) == 0.6
+    assert summary["accuracy_score"] > 55
 
 
 def test_summarize_contact_score_computes_service_value_from_event_mix():
@@ -503,6 +633,58 @@ def test_evaluate_prediction_event_skips_unmatured_horizons_without_fetch():
     assert calls == []
 
 
+def test_evaluate_prediction_events_to_db_skips_non_actionable_roadshows(monkeypatch):
+    from app.models import ContactPredictionEvaluation, ContactPredictionEvent
+    from app.services import contact_scoring as scoring
+
+    calls = []
+
+    def fake_fetch_market_series(*args, **kwargs):
+        calls.append(args)
+        return [{"date": "2026-01-01", "close": 10.0}, {"date": "2026-02-02", "close": 11.0}]
+
+    monkeypatch.setattr(scoring, "fetch_market_series", fake_fetch_market_series)
+
+    path, TestingSession = _make_session()
+    try:
+        with TestingSession() as db:
+            db.add(Contact(id="wxid_research", name="张三", alias="银行研究员", rating=70))
+            db.add(
+                ContactPredictionEvent(
+                    contact_id="wxid_research",
+                    source_time=datetime(2026, 1, 1, 9, 0, 0),
+                    asset_type="stock",
+                    asset_code="600036",
+                    asset_name="招商银行",
+                    direction="neutral",
+                    benchmark_code="sh000300",
+                    confidence=0.45,
+                    horizon_flags={"1m": True, "3m": False, "1y": False},
+                    event_kind="roadshow_invite",
+                    is_actionable=False,
+                    raw_text="招商银行路演交流，欢迎报名参加。",
+                    normalized_text="招商银行路演交流，欢迎报名参加。",
+                    status="extracted",
+                )
+            )
+            db.commit()
+
+            result = scoring.evaluate_prediction_events_to_db(
+                db,
+                contact_ids={"wxid_research"},
+                as_of=datetime(2026, 2, 5, 9, 0, 0),
+            )
+
+            assert result["evaluated"] == 0
+            assert db.query(ContactPredictionEvaluation).count() == 0
+            assert calls == []
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 def test_evaluate_prediction_event_marks_risk_alert_hit_when_drawdown_is_large():
     from app.services import contact_scoring as scoring
 
@@ -627,6 +809,44 @@ def test_backfill_prediction_event_metadata_updates_legacy_rows():
             pass
 
 
+def test_backfill_prediction_event_metadata_updates_benchmark_code():
+    from app.models import ContactPredictionEvent
+    from app.services import contact_scoring as scoring
+
+    path, TestingSession = _make_session()
+    try:
+        with TestingSession() as db:
+            db.add(Contact(id="wxid_benchmark", name="张三", alias="科创研究员", rating=70))
+            legacy = ContactPredictionEvent(
+                contact_id="wxid_benchmark",
+                source_time=datetime(2026, 1, 5, 9, 0, 0),
+                asset_type="stock",
+                asset_code="688111",
+                asset_name="金山办公",
+                direction="bullish",
+                benchmark_code="sh000300",
+                confidence=0.72,
+                horizon_flags={"1m": True, "3m": False, "1y": False},
+                raw_text="继续看好688111，未来一个月表现有望继续走强。",
+                normalized_text="继续看好688111，未来一个月表现有望继续走强。",
+                status="extracted",
+            )
+            db.add(legacy)
+            db.commit()
+            db.refresh(legacy)
+
+            result = scoring.backfill_prediction_event_metadata(db, contact_ids={"wxid_benchmark"})
+            refreshed = db.get(ContactPredictionEvent, legacy.id)
+
+            assert result["updated"] == 1
+            assert refreshed.benchmark_code == "sh000688"
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 def test_contact_scorecard_endpoint_returns_predictions_and_curve_data():
     from app.models import ContactPredictionEvent, ContactPredictionEvaluation, ContactScoreSnapshot
 
@@ -672,6 +892,23 @@ def test_contact_scorecard_endpoint_returns_predictions_and_curve_data():
             db.commit()
             db.refresh(event)
 
+            pending_event = ContactPredictionEvent(
+                contact_id="wxid_focus",
+                source_time=datetime.utcnow() - timedelta(days=10),
+                asset_type="stock",
+                asset_code="300750",
+                asset_name="宁德时代",
+                direction="bullish",
+                benchmark_code="sz399006",
+                confidence=0.76,
+                horizon_flags={"1m": True, "3m": False, "1y": False},
+                raw_text="继续看好宁德时代，一个月内景气改善。",
+                normalized_text="继续看好宁德时代，一个月内景气改善",
+                status="extracted",
+            )
+            db.add(pending_event)
+            db.commit()
+
             db.add(
                 ContactPredictionEvaluation(
                     event_id=event.id,
@@ -715,10 +952,11 @@ def test_contact_scorecard_endpoint_returns_predictions_and_curve_data():
             assert "accuracy_score" in payload["score"]
             assert "service_value_score" in payload["score"]
             assert "score_breakdown" in payload["score"]
-            assert payload["predictions"][0]["asset_code"] == "601899"
-            assert payload["predictions"][0]["evaluations"][0]["direction_hit"] is True
+            validated_prediction = next(item for item in payload["predictions"] if item["asset_code"] == "601899")
+            assert validated_prediction["evaluations"][0]["direction_hit"] is True
             assert payload["timeline"][0]["score_total"] == 74
-            assert payload["analytics"]["total_predictions"] == 1
+            assert payload["analytics"]["total_predictions"] == 2
+            assert payload["analytics"]["pending_predictions"] == 1
             assert payload["analytics"]["asset_summary"][0]["asset_code"] == "601899"
             assert payload["analytics"]["horizon_summary"][1]["horizon_code"] == "3m"
             assert payload["analytics"]["recent_hits"][0]["direction_hit"] is True
@@ -732,14 +970,19 @@ def test_contact_scorecard_endpoint_returns_predictions_and_curve_data():
             assert "annual_hit_list" in payload["analytics"]
             assert "annual_asset_leaders" in payload["analytics"]
             assert "return_distribution" in payload["analytics"]
+            assert "score_explanation" in payload["analytics"]
+            assert payload["analytics"]["score_explanation"]["drivers"]
+            assert payload["analytics"]["pending_items"][0]["next_verification"]["horizon_code"] == "1m"
+            assert payload["analytics"]["pending_items"][0]["next_verification"]["status"] == "pending"
+            assert payload["analytics"]["pending_items"][0]["benchmark_name"] == "创业板指"
             assert payload["analytics"]["annual_hit_list"][0]["asset_code"] == "601899"
             assert payload["analytics"]["annual_asset_leaders"][0]["asset_code"] == "601899"
             assert payload["analytics"]["return_distribution"]["positive_count"] == 1
             assert payload["analytics"]["case_cards"][0]["case_type"] in {"hit", "miss"}
-            assert payload["predictions"][0]["thesis_card"]["thesis_status"] in {"validated", "mixed", "disproved", "pending"}
-            assert payload["predictions"][0]["thesis_card"]["best_horizon_code"] == "3m"
-            assert payload["predictions"][0]["thesis_card"]["best_score"] == 86
-            assert payload["predictions"][0]["thesis_card"]["latest_excess_return"] == 0.1421
+            assert validated_prediction["thesis_card"]["thesis_status"] in {"validated", "mixed", "disproved", "pending"}
+            assert validated_prediction["thesis_card"]["best_horizon_code"] == "3m"
+            assert validated_prediction["thesis_card"]["best_score"] == 86
+            assert validated_prediction["thesis_card"]["latest_excess_return"] == 0.1421
     finally:
         try:
             os.remove(path)
@@ -891,7 +1134,7 @@ def test_list_contacts_exposes_sales_flag_for_filtering():
             )
             db.commit()
 
-            rows = contacts_router.list_contacts(limit=10, offset=0, include_labels=False, db=db)
+            rows = contacts_router.list_contacts(limit=10, offset=0, include_labels=False, include_score_summary=True, db=db)
             by_id = {row.id: row.model_dump() for row in rows}
 
             assert by_id["wxid_sales"]["role"] == "sales"
@@ -924,7 +1167,7 @@ def test_contact_watch_endpoint_and_summary_fields():
             assert payload["status"] == "watching"
             assert payload["reason"] == "继续观察回撤修复"
 
-            rows = contacts_router.list_contacts(limit=10, offset=0, include_labels=False, db=db)
+            rows = contacts_router.list_contacts(limit=10, offset=0, include_labels=False, include_score_summary=True, db=db)
             assert len(rows) == 1
             assert rows[0].watch["enabled"] is True
             assert rows[0].watch["reason"] == "继续观察回撤修复"
@@ -1060,6 +1303,93 @@ def test_contact_scorecard_includes_multiple_asset_market_curves(monkeypatch):
             codes = [item["asset_code"] for item in payload["market_curves"]]
             assert codes[:2] == ["601899", "300750"]
             assert len(payload["market_curves"]) == 2
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def test_contact_scorecard_prioritizes_latest_pending_assets_and_exposes_market_freshness(monkeypatch):
+    from app.models import ContactPredictionEvent, ContactPredictionEvaluation
+
+    path, TestingSession = _make_session()
+    try:
+        with TestingSession() as db:
+            db.add(Contact(id="wxid_recent_curves", name="周七", alias="周总", rating=86))
+            db.commit()
+
+            old_event = ContactPredictionEvent(
+                contact_id="wxid_recent_curves",
+                source_time=datetime(2026, 2, 1, 9, 0, 0),
+                asset_type="stock",
+                asset_code="601899",
+                asset_name="紫金矿业",
+                direction="bullish",
+                confidence=0.9,
+                horizon_flags={"1m": True},
+                raw_text="长期看好紫金矿业",
+                normalized_text="长期看好紫金矿业",
+                status="evaluated",
+            )
+            db.add(old_event)
+            db.commit()
+            db.refresh(old_event)
+            db.add(
+                ContactPredictionEvaluation(
+                    event_id=old_event.id,
+                    horizon_code="1m",
+                    direction_hit=True,
+                    excess_return=0.2,
+                    event_score=99,
+                )
+            )
+
+            recent_events = [
+                ("300750", "宁德时代", datetime(2026, 7, 12, 10, 0, 0)),
+                ("300750", "宁德时代", datetime(2026, 7, 11, 10, 0, 0)),
+                ("688256", "寒武纪", datetime(2026, 7, 10, 10, 0, 0)),
+            ]
+            for code, name, source_time in recent_events:
+                db.add(
+                    ContactPredictionEvent(
+                        contact_id="wxid_recent_curves",
+                        source_time=source_time,
+                        asset_type="stock",
+                        asset_code=code,
+                        asset_name=name,
+                        direction="bullish",
+                        confidence=0.88,
+                        horizon_flags={"1m": True},
+                        raw_text=f"继续看好{name}",
+                        normalized_text=f"继续看好{name}",
+                        status="extracted",
+                    )
+                )
+            db.commit()
+
+            def fake_fetch(asset_type, asset_code, start_date, end_date, config=None):
+                prices = {"300750": (240.0, 252.5), "688256": (1380.0, 1428.8), "601899": (17.8, 18.6)}
+                first, last = prices[asset_code]
+                return [
+                    {"date": "2026-07-10", "close": first},
+                    {"date": "2026-07-13", "close": last},
+                ]
+
+            monkeypatch.setattr("app.services.contact_scoring.fetch_market_series", fake_fetch)
+
+            payload = contacts_router.get_contact_scorecard("wxid_recent_curves", db=db)
+            curves = payload["market_curves"]
+
+            assert [curve["asset_code"] for curve in curves] == ["300750", "688256", "601899"]
+            assert len({curve["asset_code"] for curve in curves}) == len(curves)
+            assert curves[0]["is_pending"] is True
+            assert curves[0]["latest_recommendation_time"] == "2026-07-12T10:00:00"
+            assert curves[0]["latest_market_date"] == "2026-07-13"
+            assert curves[0]["latest_close"] == 252.5
+            assert isinstance(curves[0]["data_age_days"], int)
+            assert curves[0]["data_age_days"] >= 0
+            assert curves[-1]["is_pending"] is False
     finally:
         try:
             os.remove(path)

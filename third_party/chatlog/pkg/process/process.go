@@ -15,7 +15,7 @@ import (
 // If another instance is found, it prompts the user to force close it.
 // Returns a cleanup function to be called on exit.
 func CheckSingleInstance(workDir string) (func(), error) {
-	if err := os.MkdirAll(workDir, 0755); err != nil {
+	if err := os.MkdirAll(workDir, 0700); err != nil {
 		return nil, fmt.Errorf("failed to create work dir: %w", err)
 	}
 	pidFile := filepath.Join(workDir, "chatlog.pid")
@@ -56,15 +56,15 @@ func CheckSingleInstance(workDir string) (func(), error) {
 
 	// Write current PID
 	currentPID := os.Getpid()
-	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(currentPID)), 0644); err != nil {
+	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(currentPID)), 0600); err != nil {
 		return nil, fmt.Errorf("failed to write pid file: %w", err)
 	}
 
 	// Cleanup function
 	return func() {
-		os.Remove(pidFile)
-	},
-	nil
+			os.Remove(pidFile)
+		},
+		nil
 }
 
 func isSameExecutable(pid int) bool {
@@ -87,8 +87,8 @@ func isSameExecutable(pid int) bool {
 		}
 	}
 	if name, err := p.Name(); err == nil && name != "" {
-		name = strings.TrimSuffix(strings.ToLower(name), ".exe")
-		base := strings.TrimSuffix(currentBase, ".exe")
+		name = strings.ToLower(name)
+		base := currentBase
 		if base != "" && name == base {
 			return true
 		}

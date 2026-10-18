@@ -1,0 +1,59 @@
+stages:
+  - verify
+  - release
+
+variables:
+  GOFLAGS: "-tags=sqlite_fts5"
+  GOTOOLCHAIN: "auto"
+  GITFLIC_API_ROOT: "https://api.gitflic.ru"
+
+verify-macos:
+  stage: verify
+  tags:
+    - chatlog-macos
+  scripts:
+    - |
+      set -euo pipefail
+      export PATH="/usr/local/go/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+      go version
+      go test ./...
+      go test -race ./...
+      go vet ./...
+      for attempt in 1 2 3; do
+        if go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...; then
+          break
+        fi
+        if [ "$attempt" -eq 3 ]; then
+          exit 1
+        fi
+        sleep 5
+      done
+  only:
+    - master
+
+build-and-publish-macos:
+  stage: release
+  tags:
+    - chatlog-macos
+  scripts:
+    - |
+      set -euo pipefail
+      export PATH="/usr/local/go/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+      chmod 755 scripts/build_chatlog_binary.sh
+      chmod 755 scripts/verify_chatlog_binary.sh
+      chmod 755 scripts/build_release_macos.sh
+      chmod 755 scripts/gitflic_publish_release.sh
+      RELEASE_VERSION="build-${CI_COMMIT_SHA}" scripts/build_release_macos.sh
+      if [ -z "${GITFLIC_RELEASE_TOKEN:-}" ]; then
+        keychain_service="${GITFLIC_RELEASE_KEYCHAIN_SERVICE:-chatlog-alpha-gitflic-release}"
+        keychain_account="${GITFLIC_RELEASE_KEYCHAIN_ACCOUNT:-${CI_PROJECT_NAMESPACE}}"
+        export GITFLIC_RELEASE_TOKEN="$(/usr/bin/security find-generic-password \
+          -w \
+          -a "${keychain_account}" \
+          -s "${keychain_service}" \
+          "${HOME}/Library/Keychains/login.keychain-db")"
+      fi
+      test -n "${GITFLIC_RELEASE_TOKEN}"
+      scripts/gitflic_publish_release.sh release
+  only:
+    - master

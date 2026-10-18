@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import re
 import time
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -24,7 +28,7 @@ class NewsSource:
 
 
 NEWS_SOURCES: tuple[NewsSource, ...] = (
-    NewsSource("wallstreetcn-quick", "华尔街见闻", "https://api.wallstreetcn.com/apiv1/content/lives", "cn"),
+    NewsSource("wallstreetcn-quick", "华尔街见闻", "https://api-one.wallstcn.com/apiv1/content/lives", "cn"),
     NewsSource("10jqka-stock", "同花顺", "https://news.10jqka.com.cn/tapp/news/push/stock/", "cn"),
     NewsSource("sina-finance", "新浪财经", "https://rss.sina.com.cn/roll/finance/hot_roll.xml", "cn"),
     NewsSource("stcn", "证券时报", "https://www.stcn.com/rss/gundong.xml", "cn"),
@@ -34,7 +38,7 @@ NEWS_SOURCES: tuple[NewsSource, ...] = (
     NewsSource("reuters-business", "Reuters Business", "https://feeds.reuters.com/reuters/businessNews", "global"),
     NewsSource("bbc-business", "BBC Business", "http://feeds.bbci.co.uk/news/business/rss.xml", "global"),
     NewsSource("cnbc", "CNBC", "https://www.cnbc.com/id/100003114/device/rss/rss.html", "global"),
-    NewsSource("bloomberg-markets", "彭博市场", "https://feeds.bloomberg.com/markets/news.rss", "global"),
+    NewsSource("bloomberg-markets", "彭博市场", "https://www.bloomberg.com/feeds/markets/news.rss", "global"),
     NewsSource("hackernews", "Hacker News", "https://hnrss.org/frontpage", "global", "technology"),
 )
 
@@ -89,6 +93,111 @@ _TOPIC_TERMS = (
     "黄金", "原油", "霍尔木兹", "美联储", "降息", "通胀", "关税", "制裁", "ETF", "股指期货",
     "腾讯", "阿里巴巴", "英伟达", "Nvidia", "Cloudflare", "Datadog", "CoreWeave", "Coinbase",
     "房地产", "医药", "医疗", "消费", "出口", "汇率", "债券", "港股", "A股", "美股",
+)
+
+_ALPHA_THEME_RULES: tuple[dict[str, Any], ...] = (
+    {
+        "theme": "AI 算力与半导体",
+        "keywords": ("AI", "人工智能", "算力", "芯片", "半导体", "服务器", "光模块", "英伟达", "Nvidia"),
+        "positive": {
+            "demand_supply": "下游资本开支与推理需求扩张，先进算力、互联和配套供给的订单能见度提升。",
+            "earnings": "订单量和产品结构改善可向收入、毛利率与经营杠杆传导，先验证收入再验证利润。",
+            "pricing": "市场通常先交易资本开支和订单预期，随后由交付、收入确认与盈利兑现校准估值。",
+        },
+        "negative": {
+            "demand_supply": "资本开支、订单或终端需求转弱，产业链库存和供给消化压力上升。",
+            "earnings": "收入增速、产能利用率和毛利率可能承压，高估值环节对预期下修更敏感。",
+            "pricing": "市场会先压缩高预期环节估值，再等待订单与盈利预期企稳。",
+        },
+        "beneficiaries": ("算力基础设施", "先进制程与存储", "光模块及数据中心配套"),
+        "validation_signals": ("云厂商资本开支指引", "服务器/芯片/光模块订单与交付", "库存、价格与毛利率变化"),
+        "falsifiers": ("资本开支下修或订单延期", "供给快速释放导致价格下行", "收入增长未能转化为利润改善"),
+    },
+    {
+        "theme": "机器人与智能制造",
+        "keywords": ("人形机器人", "机器人", "自动化", "减速器", "丝杠", "伺服"),
+        "positive": {
+            "demand_supply": "样机、量产和自动化改造需求增加，核心零部件进入订单和产能验证阶段。",
+            "earnings": "放量可推动零部件收入增长并摊薄研发与制造成本，但利润兑现依赖良率和客户集中度。",
+            "pricing": "市场先交易量产节奏，再由订单、产能利用率和单机价值量验证。",
+        },
+        "negative": {
+            "demand_supply": "量产节奏或客户验证延后，零部件扩产面临产能闲置风险。",
+            "earnings": "研发投入和折旧先行、收入确认滞后，可能压制利润率与现金流。",
+            "pricing": "主题估值会向可见订单与真实收入收敛。",
+        },
+        "beneficiaries": ("核心零部件", "运动控制与传感器", "工业自动化集成"),
+        "validation_signals": ("量产时间表与订单金额", "核心零部件良率和扩产进度", "客户数量与单机价值量"),
+        "falsifiers": ("量产节点连续推迟", "降本速度不及预期", "订单集中但收入确认弱"),
+    },
+    {
+        "theme": "新能源与电力设备",
+        "keywords": ("新能源", "光伏", "储能", "风电", "锂电", "电网", "电力设备"),
+        "positive": {
+            "demand_supply": "装机、更新或储能需求改善，供需格局有望从去库存转向订单恢复。",
+            "earnings": "出货增长叠加价格企稳可改善收入和单位盈利，现金流取决于回款与库存周转。",
+            "pricing": "市场先交易价格与排产拐点，再验证出货、毛利率和现金流。",
+        },
+        "negative": {
+            "demand_supply": "新增供给、价格竞争或装机不及预期，使去库存周期延长。",
+            "earnings": "产品价格和产能利用率下降将压制毛利率，并放大减值与现金流压力。",
+            "pricing": "估值修复需要价格、库存和排产至少两项同步改善。",
+        },
+        "beneficiaries": ("电网与储能设备", "成本领先制造环节", "高景气细分材料"),
+        "validation_signals": ("产业链价格与库存", "月度排产和装机数据", "毛利率、回款与经营现金流"),
+        "falsifiers": ("价格战再度加剧", "排产改善但库存继续累积", "海外政策或贸易壁垒恶化"),
+    },
+    {
+        "theme": "宏观利率与流动性",
+        "keywords": ("美联储", "降息", "加息", "利率", "通胀", "债券", "流动性"),
+        "positive": {
+            "demand_supply": "融资条件边际宽松，利率敏感需求和风险偏好获得支撑。",
+            "earnings": "融资成本下降可改善高杠杆和长久期行业利润，但传导通常滞后于市场定价。",
+            "pricing": "资产价格先反映利率路径，再由信用扩张、需求和盈利数据验证。",
+        },
+        "negative": {
+            "demand_supply": "通胀或紧缩预期抬升资金成本，压制利率敏感需求和风险偏好。",
+            "earnings": "财务费用与折现率上升，对高杠杆、弱现金流和长久期资产更不利。",
+            "pricing": "市场先调整估值与期限溢价，再观察信用和盈利下修幅度。",
+        },
+        "beneficiaries": ("利率敏感资产", "高股息现金流资产", "券商与交易活跃度相关方向"),
+        "validation_signals": ("通胀与就业数据", "政策利率和国债收益率", "社融、信用利差与成交活跃度"),
+        "falsifiers": ("通胀重新上行", "宽松未带来信用扩张", "盈利下修抵消估值改善"),
+    },
+    {
+        "theme": "大宗商品与资源品",
+        "keywords": ("黄金", "原油", "铜", "煤炭", "有色", "资源", "霍尔木兹"),
+        "positive": {
+            "demand_supply": "供给约束、补库存或避险需求推升价格中枢，资源端议价能力增强。",
+            "earnings": "商品价格高于成本曲线时，价格弹性可较快传导至收入、利润和自由现金流。",
+            "pricing": "市场会同步交易现货价格、库存和期限结构，并用成本与资本开支约束判断持续性。",
+        },
+        "negative": {
+            "demand_supply": "需求走弱或供给恢复使库存累积，商品价格和议价能力承压。",
+            "earnings": "价格回落将直接压缩资源品利润和现金流，高成本产能更敏感。",
+            "pricing": "市场先交易商品价格下行，再等待库存去化和供给收缩。",
+        },
+        "beneficiaries": ("低成本资源龙头", "油气与有色上游", "贵金属及避险相关资产"),
+        "validation_signals": ("现货价格与期限结构", "全球库存和开工率", "成本曲线、资本开支与自由现金流"),
+        "falsifiers": ("需求数据持续下修", "供给恢复快于预期", "价格上涨但库存同步累积"),
+    },
+    {
+        "theme": "政策、关税与地缘风险",
+        "keywords": ("关税", "制裁", "监管", "调查", "冲突", "战争", "地缘", "出口管制"),
+        "positive": {
+            "demand_supply": "政策缓和或限制解除改善贸易与供给预期，受压需求存在修复空间。",
+            "earnings": "成本、交付和海外收入的不确定性下降，有利于订单恢复与风险溢价回落。",
+            "pricing": "市场先修复风险溢价，再验证贸易量、订单和企业指引。",
+        },
+        "negative": {
+            "demand_supply": "贸易限制或地缘冲突扰动供给、物流和终端需求，产业链面临重新定价。",
+            "earnings": "关税、替代采购和交付延迟会侵蚀收入与利润率，并增加营运资金占用。",
+            "pricing": "市场先提高风险溢价，再根据政策范围、持续时间和企业敞口分化定价。",
+        },
+        "beneficiaries": ("国产替代与供应链安全", "低海外敞口行业", "避险与防务相关方向"),
+        "validation_signals": ("政策正式文本与豁免范围", "航运、交付和贸易量", "企业海外收入与成本指引"),
+        "falsifiers": ("政策快速缓和或执行弱于预期", "企业已完成供应链替代", "风险未传导至订单和利润"),
+    },
 )
 
 
@@ -172,6 +281,104 @@ def translate_title_to_zh(title: str) -> str:
     text = re.sub(r"\buntil end of day\b", "直至今日结束", text, flags=re.IGNORECASE)
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+def _local_news_dataset_dir() -> Path:
+    env = os.getenv("NEWS_DATASET_DIR", "").strip()
+    if env:
+        return Path(env).expanduser().resolve()
+    return (Path(__file__).resolve().parent.parent.parent / "data" / "datasets").resolve()
+
+
+def _normalize_local_news_item(raw: dict[str, Any], source_file: Path) -> dict[str, Any] | None:
+    title = _strip_html(str(raw.get("title") or raw.get("content") or raw.get("summary") or ""))
+    if not title:
+        return None
+    source_id = str(raw.get("source_id") or raw.get("source") or "local-news").strip() or "local-news"
+    source_name = str(raw.get("source_name") or raw.get("source") or source_id).strip() or source_id
+    url = str(raw.get("url") or "").strip()
+    raw_ts = raw.get("pub_ts") or raw.get("published_ts") or raw.get("time") or raw.get("published_at")
+    try:
+        pub_ts = int(raw_ts or 0)
+        if pub_ts and pub_ts < 10_000_000_000:
+            pub_ts *= 1000
+    except Exception:
+        pub_ts = _parse_time(str(raw_ts or "")) or int(source_file.stat().st_mtime * 1000)
+    derived_raw = raw.get("derived") if isinstance(raw.get("derived"), dict) else {}
+    category = str(raw.get("category") or derived_raw.get("category") or "finance").strip() or "finance"
+    tone = str(derived_raw.get("tone") or "").strip()
+    if tone not in {"positive", "neutral", "negative"}:
+        tone = _tone(title)
+    summary = _strip_html(str(raw.get("summary") or raw.get("content") or raw.get("description") or title))
+    return {
+        "id": str(raw.get("id") or _item_id(source_id, title, url)),
+        "source_id": source_id,
+        "source_name": source_name,
+        "title": title,
+        "url": url,
+        "pub_ts": pub_ts,
+        "region": str(raw.get("region") or "local"),
+        "category": category,
+        "summary": summary[:1200],
+        "derived": {
+            "key_info": title[:160],
+            "category": category,
+            "tone": tone,
+            "summary_origin": "local_news_snapshot",
+        },
+        "local_source_file": source_file.name,
+        "local_source_mtime": int(source_file.stat().st_mtime),
+    }
+
+
+def _load_local_news_items(
+    *, limit: int, q: str | None = None, source: str | None = None
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    base = _local_news_dataset_dir()
+    if not base.exists():
+        return [], {"ok": False, "reason": "NEWS_DATASET_DIR not found", "dir": str(base)}
+    files = sorted(base.glob("news_snapshot_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not files:
+        files = sorted(base.glob("news_direct_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    ql = str(q or "").strip().lower()
+    out: list[dict[str, Any]] = []
+    for path in files[:12]:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+        except Exception:
+            continue
+        rows = data.get("items") if isinstance(data, dict) else data
+        if not isinstance(rows, list):
+            continue
+        for raw in rows:
+            if not isinstance(raw, dict):
+                continue
+            item = _normalize_local_news_item(raw, path)
+            if not item:
+                continue
+            if source and str(item.get("source_id")) != str(source):
+                continue
+            if ql:
+                hay = " ".join(
+                    str(item.get(k) or "") for k in ("title", "summary", "source_name", "source_id")
+                ).lower()
+                if ql not in hay:
+                    continue
+            out.append(item)
+            if len(out) >= max(limit * 4, limit + 20):
+                break
+        if len(out) >= max(limit * 4, limit + 20):
+            break
+    info = {
+        "ok": bool(out),
+        "kind": "local-news-snapshot",
+        "dir": str(base),
+        "latest_file": files[0].name if files else None,
+        "files_scanned": min(len(files), 12),
+    }
+    if not out:
+        info["reason"] = "no local news items"
+    return out, info
 
 
 
@@ -356,7 +563,7 @@ def _fetch_source(source: NewsSource, timeout: int = 8) -> list[dict[str, Any]]:
         title = _strip_html(title)
         if not title:
             return
-        pub_ts = _parse_time(pub) or int(time.time() * 1000)
+        pub_ts = _parse_time(pub) or 0
         tone = _tone(title)
         category = _category(title, source)
         rows.append({
@@ -413,7 +620,7 @@ def _fetch_10jqka(source: NewsSource, timeout: int = 8) -> list[dict[str, Any]]:
             if pub_ts and pub_ts < 10_000_000_000:
                 pub_ts *= 1000
         except Exception:
-            pub_ts = int(time.time() * 1000)
+            pub_ts = 0
         tone = _tone(title)
         category = _category(title, source)
         rows.append({
@@ -433,26 +640,28 @@ def _fetch_10jqka(source: NewsSource, timeout: int = 8) -> list[dict[str, Any]]:
 
 
 def _fetch_wallstreetcn(source: NewsSource, timeout: int = 8) -> list[dict[str, Any]]:
-    params = {"channel": "global", "limit": 50}
+    params = {"channel": "global-channel", "limit": 50}
     headers = {"User-Agent": "0913-news-engine/1.0 (+json; lightweight)"}
-    data = requests.get(source.url, params=params, timeout=timeout, headers=headers).json()
+    response = requests.get(source.url, params=params, timeout=timeout, headers=headers)
+    response.raise_for_status()
+    data = response.json()
     rows: list[dict[str, Any]] = []
     for live in (data.get("data", {}).get("items") or []):
-        content = _strip_html(str(live.get("content") or ""))
+        content = _strip_html(str(live.get("content_text") or live.get("content") or ""))
         if not content:
             continue
-        title = content[:180]
+        title = live.get("title") or content[:180]
         ts = live.get("display_time") or live.get("created_at") or live.get("updated_at") or 0
         try:
             pub_ts = int(ts) if isinstance(ts, int) else int(float(ts))
             if pub_ts and pub_ts < 10_000_000_000:
                 pub_ts *= 1000
         except Exception:
-            pub_ts = int(time.time() * 1000)
+            pub_ts = 0
         url = ""
         try:
             article = live.get("article") or {}
-            url = article.get("uri") or article.get("resource") or ""
+            url = live.get("uri") or article.get("uri") or article.get("resource") or ""
         except Exception:
             url = ""
         tone = _tone(title)
@@ -489,15 +698,23 @@ def collect_news(*, limit: int = 80, q: str | None = None, source: str | None = 
         if cached is not None:
             return cached
 
-    selected = [s for s in NEWS_SOURCES if not source or s.id == source]
     items: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
+    local_items, local_source = _load_local_news_items(limit=limit, q=q, source=source)
+    items.extend(local_items)
+    selected = [s for s in NEWS_SOURCES if not source or s.id == source]
     per_source_limit = max(12, min(50, limit))
-    for src in selected:
-        try:
-            items.extend(_fetch_source(src)[:per_source_limit])
-        except Exception as exc:
-            errors.append({"source_id": src.id, "source_name": src.name, "error": str(exc)[:160]})
+    remote_enabled = os.getenv("NEWS_REMOTE_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
+    if remote_enabled or not items:
+        worker_count = min(4, max(1, len(selected)))
+        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="news-source") as executor:
+            future_to_source = {executor.submit(_fetch_source, src): src for src in selected}
+            for future in as_completed(future_to_source):
+                src = future_to_source[future]
+                try:
+                    items.extend(future.result()[:per_source_limit])
+                except Exception as exc:
+                    errors.append({"source_id": src.id, "source_name": src.name, "error": str(exc)[:160]})
 
     if q:
         query = str(q).strip().lower()
@@ -531,25 +748,44 @@ def collect_news(*, limit: int = 80, q: str | None = None, source: str | None = 
         if len(deduped) >= limit:
             break
 
-    try:
-        english_titles = [str(it.get('title_original') or it.get('title') or '') for it in deduped if str(it.get('title_original') or it.get('title') or '') and not _has_chinese(str(it.get('title_original') or it.get('title') or ''))]
-        translations = _translate_titles_google(english_titles)
-        missing_titles = [t for t in english_titles if t not in translations]
-        if missing_titles:
-            translations.update(_translate_titles_batch(missing_titles))
-        if translations:
-            for it in deduped:
-                src_title = str(it.get('title_original') or it.get('title') or '')
-                if src_title in translations:
-                    zh = translations[src_title]
-                    it['title_zh'] = zh
-                    it['title'] = zh
-                    derived = it.get('derived') if isinstance(it.get('derived'), dict) else {}
-                    derived['key_info'] = zh[:160]
-                    it['derived'] = derived
-    except Exception:
-        pass
-    result = {"success": True, "total": len(deduped), "items": deduped, "errors": errors, "engine": "builtin-trend-radar-lite"}
+    online_translation_enabled = os.getenv("NEWS_ONLINE_TRANSLATION_ENABLED", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if online_translation_enabled:
+        try:
+            english_titles = [
+                str(it.get("title_original") or it.get("title") or "")
+                for it in deduped
+                if str(it.get("title_original") or it.get("title") or "")
+                and not _has_chinese(str(it.get("title_original") or it.get("title") or ""))
+            ]
+            translations = _translate_titles_google(english_titles)
+            missing_titles = [title for title in english_titles if title not in translations]
+            if missing_titles:
+                translations.update(_translate_titles_batch(missing_titles))
+            if translations:
+                for it in deduped:
+                    source_title = str(it.get("title_original") or it.get("title") or "")
+                    if source_title in translations:
+                        translated = translations[source_title]
+                        it["title_zh"] = translated
+                        it["title"] = translated
+                        derived = it.get("derived") if isinstance(it.get("derived"), dict) else {}
+                        derived["key_info"] = translated[:160]
+                        it["derived"] = derived
+        except Exception:
+            pass
+    result = {
+        "success": True,
+        "total": len(deduped),
+        "items": deduped,
+        "errors": errors,
+        "engine": "builtin-trend-radar-lite",
+        "source": local_source if local_items else {"ok": bool(deduped), "kind": "remote-news-sources"},
+    }
     _cache_set(cache_key, result, ttl=600)
     return result
 
@@ -574,6 +810,122 @@ def _keywords(items: list[dict[str, Any]], top_n: int = 12) -> list[dict[str, An
                 continue
             counts[normalized] = counts.get(normalized, 0) + 1
     return [{"keyword": k, "count": v} for k, v in sorted(counts.items(), key=lambda x: x[1], reverse=True)[:top_n]]
+
+
+def _alpha_item_text(item: dict[str, Any]) -> str:
+    derived = item.get("derived") if isinstance(item.get("derived"), dict) else {}
+    return " ".join(
+        str(value or "")
+        for value in (
+            item.get("title"),
+            item.get("title_original"),
+            item.get("summary"),
+            derived.get("key_info"),
+        )
+    )
+
+
+def _alpha_direction(items: list[dict[str, Any]]) -> str:
+    positive = 0
+    negative = 0
+    for item in items:
+        derived = item.get("derived") if isinstance(item.get("derived"), dict) else {}
+        tone = str(derived.get("tone") or "neutral").lower()
+        text = _alpha_item_text(item)
+        lower = text.lower()
+        if tone == "positive":
+            positive += 2
+        elif tone == "negative":
+            negative += 2
+        if any(keyword.lower() in lower or keyword in text for keyword in _POSITIVE):
+            positive += 1
+        if any(keyword.lower() in lower or keyword in text for keyword in _NEGATIVE):
+            negative += 1
+    if positive > negative:
+        return "positive"
+    if negative > positive:
+        return "negative"
+    return "neutral"
+
+
+def _build_alpha_hypotheses(items: list[dict[str, Any]], *, limit: int = 5) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for item in items:
+        text = _alpha_item_text(item)
+        lower = text.lower()
+        for rule in _ALPHA_THEME_RULES:
+            if not any(str(keyword).lower() in lower for keyword in rule["keywords"]):
+                continue
+            bucket = grouped.setdefault(str(rule["theme"]), {"rule": rule, "items": []})
+            bucket["items"].append(item)
+            break
+
+    hypotheses: list[dict[str, Any]] = []
+    for theme, bucket in grouped.items():
+        rule = bucket["rule"]
+        rows = sorted(
+            bucket["items"],
+            key=lambda item: (float(item.get("heat_score") or 0), int(item.get("pub_ts") or 0)),
+            reverse=True,
+        )
+        if not rows:
+            continue
+        direction = _alpha_direction(rows)
+        narrative_key = "negative" if direction == "negative" else "positive"
+        narrative = rule[narrative_key]
+        source_count = len({str(item.get("source_id") or item.get("source_name") or "") for item in rows})
+        average_heat = sum(float(item.get("heat_score") or 0) for item in rows) / len(rows)
+        confidence = round(
+            min(
+                92.0,
+                38.0
+                + min(len(rows), 4) * 7.0
+                + min(source_count, 3) * 6.0
+                + min(100.0, average_heat) * 0.12,
+            ),
+            1,
+        )
+        if direction == "neutral":
+            confidence = round(max(35.0, confidence - 10.0), 1)
+        focus_label = "潜在受益方向" if direction == "positive" else "重点承压方向" if direction == "negative" else "重点关注方向"
+        focus_directions = list(rule["beneficiaries"])
+        evidence = [
+            {
+                "id": str(item.get("id") or ""),
+                "title": str(item.get("title") or ""),
+                "source_name": str(item.get("source_name") or item.get("source_id") or "未知来源"),
+                "url": str(item.get("url") or ""),
+                "heat_score": round(float(item.get("heat_score") or 0), 1),
+            }
+            for item in rows[:3]
+        ]
+        hypotheses.append(
+            {
+                "theme": theme,
+                "direction": direction,
+                "event": str(rows[0].get("title") or ""),
+                "transmission": {
+                    "demand_supply": narrative["demand_supply"],
+                    "earnings": narrative["earnings"],
+                    "pricing": narrative["pricing"],
+                },
+                "focus_label": focus_label,
+                "focus_directions": focus_directions,
+                "beneficiaries": focus_directions if direction == "positive" else [],
+                "validation_signals": list(rule["validation_signals"]),
+                "falsifiers": list(rule["falsifiers"]),
+                "confidence": confidence,
+                "evidence_count": len(rows),
+                "source_count": source_count,
+                "evidence": evidence,
+            }
+        )
+
+    hypotheses.sort(
+        key=lambda item: (float(item.get("confidence") or 0), int(item.get("evidence_count") or 0)),
+        reverse=True,
+    )
+    return hypotheses[:limit]
 
 
 def analyze_news(items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -615,6 +967,7 @@ def analyze_news(items: list[dict[str, Any]]) -> dict[str, Any]:
     else:
         prediction = "当前热度偏平稳，优先关注结构性分化与长尾议题。"
 
+    alpha_hypotheses = _build_alpha_hypotheses(items)
     return {
         "total": total,
         "sentiment": tones,
@@ -629,6 +982,9 @@ def analyze_news(items: list[dict[str, Any]]) -> dict[str, Any]:
         "opportunities": opportunity_items[:8],
         "hot_items": sorted(items, key=lambda x: float(x.get("heat_score") or 0), reverse=True)[:10],
         "prediction": prediction,
+        "analysis_framework": "serenity-alpha-lite",
+        "alpha_hypotheses": alpha_hypotheses,
+        "alpha_note": "仅形成可跟踪、可验证、可证伪的新闻假设，不构成个股买卖建议。",
     }
 
 

@@ -55,20 +55,37 @@ run_one "gtrends"   "gtrends_hot.py" "--region us" &
 # ═══════════════════════════════════════════
 # NewsNow 输出多源JSON数组，需要拆分为单文件
 echo "  [newsnow] 多源聚合采集..."
-python3 "$PLATFORM_DIR/newsnow_hot.py" --limit "$LIMIT" $PRETTY > "$OUTPUT_DIR/.newsnow_raw.json" 2>/dev/null && \
+python3 "$PLATFORM_DIR/newsnow_hot.py" --limit "$LIMIT" $PRETTY > "$OUTPUT_DIR/.newsnow_raw.json" 2>/dev/null || true
+# Finish direct requests before deciding whether an aggregate fallback is needed.
+wait
+# 部分源失败仍拆分成功结果；非法/空 JSON 由下一步报错，不标成成功。
 python3 -c "
-import json, sys
+import json, sys, os
+from datetime import datetime, timezone
 with open('$OUTPUT_DIR/.newsnow_raw.json') as f:
     results = json.load(f)
 
 ok_count = 0
 for r in results:
-    if 'error' in r:
+    if 'error' in r or r.get('_stale') or not r.get('items'):
         continue
-    # 跳过已有直接采集的源（weibo, douyin）
+    # 仅当直接采集有效时跳过；聚合缓存必须有近期上游时间。
     sid = r.get('platform','').replace('newsnow/','')
     if sid in ('weibo', 'douyin'):
-        continue
+        direct_path = f'$OUTPUT_DIR/{sid}.json'
+        try:
+            with open(direct_path) as f:
+                direct = json.load(f)
+        except (OSError, ValueError):
+            direct = {}
+        if direct.get('items') and not direct.get('error'):
+            continue
+        try:
+            age = (datetime.now(timezone.utc) - datetime.fromisoformat(r.get('observed_at', ''))).total_seconds()
+        except (ValueError, TypeError):
+            continue
+        if not -300 <= age <= 3600:
+            continue
     outfile = f'$OUTPUT_DIR/newsnow_{sid}.json'
     with open(outfile, 'w') as f:
         json.dump(r, f, ensure_ascii=False$([ -n "$PRETTY" ] && echo ', indent=2'))

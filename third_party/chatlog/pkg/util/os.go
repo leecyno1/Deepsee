@@ -6,9 +6,14 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
+	"strings"
 
 	"github.com/rs/zerolog/log"
+)
+
+const (
+	chatlogDirEnv  = "CHATLOG_DIR"
+	chatlogDirName = ".chatlog"
 )
 
 // FindFilesWithPatterns 在指定目录下查找匹配多个正则表达式的文件
@@ -69,25 +74,168 @@ func FindFilesWithPatterns(directory string, pattern string, recursive bool) ([]
 	return matchedFiles, nil
 }
 
+// AppRootDir is the only default root that chatlog creates for persistent
+// configuration, logs, runtime state, caches and decrypted workspaces.
+// CHATLOG_DIR relocates the whole tree instead of relocating configuration
+// alone and leaving other generated directories behind.
+func AppRootDir() string {
+	if configured := strings.TrimSpace(os.Getenv(chatlogDirEnv)); configured != "" {
+		if absolute, err := filepath.Abs(configured); err == nil {
+			return filepath.Clean(absolute)
+		}
+		return filepath.Clean(configured)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return filepath.Join(os.TempDir(), "chatlog")
+	}
+	return filepath.Join(home, chatlogDirName)
+}
+
+// WorkDirAt returns the default decrypted workspace beneath root. Account names
+// are reduced to one safe path component so detector-provided values cannot
+// escape the application root.
+func WorkDirAt(root, account string) string {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		root = AppRootDir()
+	}
+	if strings.TrimSpace(account) == "" {
+		return filepath.Clean(root)
+	}
+	return filepath.Join(filepath.Clean(root), "workspaces", safePathComponent(account))
+}
+
 func DefaultWorkDir(account string) string {
-	if len(account) == 0 {
-		switch runtime.GOOS {
-		case "windows":
-			return filepath.Join(os.ExpandEnv("${USERPROFILE}"), "Documents", "chatlog")
-		case "darwin":
-			return filepath.Join(os.ExpandEnv("${HOME}"), "Documents", "chatlog")
-		default:
-			return filepath.Join(os.ExpandEnv("${HOME}"), "chatlog")
+	return WorkDirAt(AppRootDir(), account)
+}
+
+// CacheDirAt keeps generated caches under the same application root.
+func CacheDirAt(root string, names ...string) string {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		root = AppRootDir()
+	}
+	parts := []string{filepath.Clean(root), "cache"}
+	for _, name := range names {
+		if value := safePathComponent(name); value != "" {
+			parts = append(parts, value)
 		}
 	}
-	switch runtime.GOOS {
-	case "windows":
-		return filepath.Join(os.ExpandEnv("${USERPROFILE}"), "Documents", "chatlog", account)
-	case "darwin":
-		return filepath.Join(os.ExpandEnv("${HOME}"), "Documents", "chatlog", account)
-	default:
-		return filepath.Join(os.ExpandEnv("${HOME}"), "chatlog", account)
+	return filepath.Join(parts...)
+}
+
+func DefaultCacheDir(names ...string) string {
+	return CacheDirAt(AppRootDir(), names...)
+}
+
+// LegacyDefaultWorkDir returns the pre-unification workspace path. It is only
+// used to identify and migrate defaults created by older chatlog versions;
+// user-selected custom work directories are never rewritten.
+func LegacyDefaultWorkDir(account string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return ""
 	}
+	if strings.TrimSpace(account) == "" {
+		return filepath.Join(home, "Documents", "chatlog")
+	}
+	return filepath.Join(home, "Documents", "chatlog", account)
+}
+
+// MigrateLegacyDefaultWorkDir atomically moves an old automatically generated
+// account workspace into the unified root when it is safe to do so. Existing
+// non-empty destinations and custom paths are left untouched.
+func MigrateLegacyDefaultWorkDir(root, account, current string) (string, bool, error) {
+	account = strings.TrimSpace(account)
+	if account == "" || safePathComponent(account) != account {
+		return current, false, nil
+	}
+	legacy := LegacyDefaultWorkDir(account)
+	target := WorkDirAt(root, account)
+	if legacy == "" || !sameCleanPath(current, legacy) {
+		return current, false, nil
+	}
+
+	info, err := os.Stat(legacy)
+	switch {
+	case os.IsNotExist(err):
+		return target, true, nil
+	case err != nil:
+		return current, false, err
+	case !info.IsDir():
+		return current, false, fmt.Errorf("%s is not a directory", legacy)
+	}
+
+	if targetInfo, targetErr := os.Stat(target); targetErr == nil {
+		if !targetInfo.IsDir() {
+			return current, false, fmt.Errorf("%s is not a directory", target)
+		}
+		entries, readErr := os.ReadDir(target)
+		if readErr != nil {
+			return current, false, readErr
+		}
+		if len(entries) != 0 {
+			return current, false, fmt.Errorf("migration target is not empty: %s", target)
+		}
+		if removeErr := os.Remove(target); removeErr != nil {
+			return current, false, removeErr
+		}
+	} else if !os.IsNotExist(targetErr) {
+		return current, false, targetErr
+	}
+
+	if err := os.MkdirAll(filepath.Dir(target), 0700); err != nil {
+		return current, false, err
+	}
+	if err := os.Rename(legacy, target); err != nil {
+		return current, false, fmt.Errorf("move %s to %s: %w", legacy, target, err)
+	}
+	_ = os.Chmod(filepath.Dir(target), 0700)
+	_ = os.Chmod(target, 0700)
+	return target, true, nil
+}
+
+func sameCleanPath(a, b string) bool {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == "" || b == "" {
+		return false
+	}
+	aAbs, aErr := filepath.Abs(a)
+	bAbs, bErr := filepath.Abs(b)
+	if aErr == nil {
+		a = aAbs
+	}
+	if bErr == nil {
+		b = bAbs
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
+}
+
+func safePathComponent(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(len(value))
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9',
+			r == '-', r == '_', r == '.', r == '@':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	result := strings.Trim(b.String(), ". ")
+	if result == "" || result == ".." {
+		return "default"
+	}
+	return result
 }
 
 func GetDirSize(dir string) string {
@@ -121,7 +269,7 @@ func PrepareDir(path string) error {
 	stat, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			if err := os.MkdirAll(path, 0755); err != nil {
+			if err := os.MkdirAll(path, 0700); err != nil {
 				return err
 			}
 		} else {
@@ -131,5 +279,5 @@ func PrepareDir(path string) error {
 		log.Debug().Msgf("%s is not a directory", path)
 		return fmt.Errorf("%s is not a directory", path)
 	}
-	return nil
+	return os.Chmod(path, 0700)
 }

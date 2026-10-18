@@ -1,7 +1,8 @@
 {
   "chatlog_alpha": {
     "source": "third_party/chatlog",
-    "imported_commit": "bfb031f7f94923a97ac186f5f048ef6006ab3d63",
+    "repo": "https://gitflic.ru/project/goring/chatlog_alpha",
+    "imported_commit": "cc281cc5fc54c14c4f3f58ee48dab11e538eadac",
     "purpose": "仓库内置的本地微信聊天记录 HTTP sidecar 源码，由安装脚本本机构建"
   },
   "wx_cli": {

@@ -6,6 +6,7 @@ import time
 import random
 import threading
 import re
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 import requests
@@ -14,10 +15,16 @@ from ..config import settings
 
 
 DASHENG_CLOUD_PROVIDER_NAME = "大圣 Cloud（水木算力）"
-DASHENG_CLOUD_API_URL = "https://df.dawnloadai.com:9888/v1"
-DASHENG_CLOUD_MAIN_MODEL = "deepseek-ai/DeepSeek-V4-Pro"
-DASHENG_CLOUD_TOOL_MODEL = "MiniMax-M3"
-DASHENG_CLOUD_ONEPAGE_MODEL = "MiniMax-M3"
+DASHENG_CLOUD_API_URL = "https://app.watertimber.us/v1"
+DASHENG_CLOUD_MAIN_MODEL = "gpt-5.5"
+DASHENG_CLOUD_REPORT_MODEL = "gpt-5.5"
+DASHENG_CLOUD_M3_MODEL = "MiniMax-M3"
+DASHENG_CLOUD_FALLBACK_MODEL = "deepseek-ai/DeepSeek-V4-Flash"
+DASHENG_CLOUD_TOOL_MODEL = DASHENG_CLOUD_M3_MODEL
+DASHENG_CLOUD_ONEPAGE_MODEL = DASHENG_CLOUD_M3_MODEL
+DASHENG_CLOUD_QWEN_34B_MODEL = "Qwen/Qwen3-32B"
+DASHENG_CLOUD_QWEN35_4B_MODEL = "Qwen/Qwen3.5-4B"
+DASHENG_CLOUD_QWEN3_8B_MODEL = "Qwen/Qwen3-8B"
 
 
 DEFAULT_MODULE_PROMPTS: Dict[str, Dict[str, str]] = {
@@ -25,13 +32,13 @@ DEFAULT_MODULE_PROMPTS: Dict[str, Dict[str, str]] = {
         "system": "\n".join(
             [
                 "你是面向券商投研/基金经理的一线投研助理，目标是把大量聊天摘要提炼成“可执行、可交易、可跟踪”的市场观点。",
-                "输出必须为 Markdown（不要输出 HTML/代码块）。",
+                "按 user 要求返回 JSON，其中 markdown 字段使用 Markdown（不要 HTML/代码块）。",
                 "约束：",
-                "- 必须通览全部数据，合并相近主题，避免逐条复述；",
+                "- 通览本次实际提供的证据样本，合并相近主题，避免逐条复述；不得声称覆盖全部历史；",
                 "- 结构固定为 7 个部分：总基调、宏观政策、行业赛道、公司基本面、投资策略、市场情绪、风险负面；",
                 "- 各部分要短而密集，信息不足要直说“信息有限/暂无可靠线索”；",
                 "- 结论要落到：影响路径（为什么重要）+ 受益/受损方向（谁受影响）+ 需要跟踪的指标/触发条件；",
-                "- 严禁复制原文；仅基于 summary 等概括性字段归纳；",
+                "- 严禁大段复制原文；基于 summary 或 content 中的证据归纳；",
                 "- 需要引用证据时，在句尾追加 `#<id>`（可多个）。",
                 "- 行业赛道必须按“细分行业”分点输出；公司基本面必须按“重点公司”分点输出。",
             ]
@@ -52,7 +59,7 @@ DEFAULT_MODULE_PROMPTS: Dict[str, Dict[str, str]] = {
                 "- <公司A>：<结论>；<关键变量/估值/业绩变化>；<跟踪> #<id>",
                 "- <公司B>：<结论>；<关键变量/估值/业绩变化>；<跟踪> #<id>",
                 "## 投资策略",
-                "- <仓位/风格/配置建议>；<触发条件> #<id可选>",
+                "- 按研究优先级列出线索、证据与分歧、催化/期限、失效条件和验证指标；不编造仓位或买卖点。",
                 "## 市场情绪",
                 "- <资金与风险偏好观察>；<确认方式/指标> #<id可选>",
                 "## 风险/负面",
@@ -381,16 +388,44 @@ DEFAULT_TOOL_PROMPTS: Dict[str, Dict[str, Any]] = {
             "- 识别多人讨论：根据称呼/语气/问答/上下文，尽量区分角色；不确定时用“发言人A/B/主持/提问者”等占位。\n"
             "- 将 Q&A 片段整理为 Q(角色): / A(角色): 形式；讨论片段按角色分段。\n"
             "- 禁止编造未出现的信息；不要加入你的分析/评价。\n"
-            "- 输出为 JSON 对象（不是数组），字段 refined 为整理后的会议详细记录文本（可用 Markdown）。"
+            "- 输出为 JSON 数组；每个元素对应一条输入，字段 refined 为整理后的会议详细记录文本（可用 Markdown）。"
         ),
         "user": (
-            "请整理下面的会议转写（messages_json 是单元素数组，包含 id/time/sender/content）。\n"
-            "只返回一个 JSON 对象：\n"
-            "{\n"
+            "请逐条整理下面的会议转写（messages_json 包含 id/time/sender/content）。\n"
+            "只返回 JSON 数组，每个元素结构：\n"
+            "[{\n"
             "  \"id\": string,\n"
             "  \"summary\": string,     // 简短占位即可，必须以'ai: '开头（例如 ai: ok）\n"
             "  \"refined\": string      // 必填：整理后的会议详细记录（尽量保留细节，结构清晰，可多段）\n"
-            "}\n\n"
+            "}]\n\n"
+            "数据：{{messages_json}}"
+        ),
+    }
+    ,
+    "media_content_summary": {
+        "label": "自媒体内容摘要",
+        "system": (
+            "你是投研自媒体内容摘要助手。逐条提炼内容，不复读标题，不合并不同条目。"
+            "摘要需说明核心事实、市场影响或待验证点；信息不足时明确写信息有限。"
+        ),
+        "user": (
+            "请逐条分析以下自媒体内容，返回 JSON 数组，每个元素必须包含："
+            "{\"id\": string, \"summary\": string, \"tone\": string, \"keywords\": [string]}。\n"
+            "summary 不超过100字并以 ai: 开头；tone 只能是 bullish/bearish/neutral。\n"
+            "数据：{{messages_json}}"
+        ),
+    }
+    ,
+    "mp_content_summary": {
+        "label": "公众号内容摘要",
+        "system": (
+            "你是投研公众号内容摘要助手。逐条基于正文或原始简介提炼实质内容，不复读标题，"
+            "不合并文章，不编造正文中没有的信息。"
+        ),
+        "user": (
+            "请逐条分析以下公众号内容，返回 JSON 数组，每个元素必须包含："
+            "{\"id\": string, \"summary\": string, \"tone\": string, \"keywords\": [string]}。\n"
+            "summary 不超过120字并以 ai: 开头；tone 只能是 bullish/bearish/neutral。\n"
             "数据：{{messages_json}}"
         ),
     }
@@ -552,78 +587,129 @@ def _to_route_map(raw: Any, default_map: Dict[str, List[str]], valid_ids: set[st
 
 def _default_model_router(conf: Dict[str, Any]) -> Dict[str, Any]:
     main_model = str(conf.get("main_model") or conf.get("model") or DASHENG_CLOUD_MAIN_MODEL).strip()
-    mid_model = str(conf.get("tool_model_messages") or conf.get("tool_model") or DASHENG_CLOUD_TOOL_MODEL).strip()
+    report_m3_model = DASHENG_CLOUD_M3_MODEL
+    fallback_model = str(conf.get("fallback_model") or DASHENG_CLOUD_FALLBACK_MODEL).strip()
+    onepage_model = str(conf.get("onepage_model") or DASHENG_CLOUD_ONEPAGE_MODEL).strip()
     tool_msg_model = str(conf.get("tool_model_messages") or conf.get("tool_model") or DASHENG_CLOUD_TOOL_MODEL).strip()
     tool_email_model = str(conf.get("tool_model_emails") or conf.get("tool_model") or DASHENG_CLOUD_TOOL_MODEL).strip()
     main_channels = [
         {
-            "id": "dasheng-main-deepseek-v4-pro",
-            "name": "大圣Cloud 主模型 DeepSeek V4 Pro",
+            "id": "dasheng-report-gpt-55",
+            "name": "大圣Cloud 报告生成 GPT-5.5",
             "model": main_model,
-            "weight": 8,
+            "weight": 18,
             "enabled": True,
             "api_url": DASHENG_CLOUD_API_URL,
             "api_key": "",
-            "max_inflight": 4,
+            "max_inflight": 32,
         },
         {
-            "id": "dasheng-onepage-minimax-m3",
-            "name": "大圣Cloud 一页通 MiniMax M3",
-            "model": DASHENG_CLOUD_ONEPAGE_MODEL,
+            "id": "dasheng-report-minimax-m3",
+            "name": "大圣Cloud 报告生成 MiniMax M3",
+            "model": report_m3_model,
+            "weight": 14,
+            "enabled": True,
+            "api_url": DASHENG_CLOUD_API_URL,
+            "api_key": "",
+            "max_inflight": 32,
+        },
+        {
+            "id": "dasheng-report-deepseek-v4-flash",
+            "name": "大圣Cloud 报告兜底 DeepSeek V4 Flash",
+            "model": fallback_model,
             "weight": 4,
             "enabled": True,
             "api_url": DASHENG_CLOUD_API_URL,
             "api_key": "",
-            "max_inflight": 4,
+            "max_inflight": 24,
         },
     ]
-    mid_channels = [{"id": "mid-1", "name": "中模型-1", "model": mid_model, "weight": 1, "enabled": True, "api_url": "", "api_key": ""}]
+    mid_channels = [
+        {
+            "id": "dasheng-onepage-minimax-m3",
+            "name": "大圣Cloud 多模态一页通 MiniMax M3",
+            "model": onepage_model,
+            "weight": 16,
+            "enabled": True,
+            "api_url": DASHENG_CLOUD_API_URL,
+            "api_key": "",
+            "max_inflight": 16,
+        }
+    ]
     tool_channels = [
         {
             "id": "dasheng-tool-minimax-m3",
             "name": "大圣Cloud 小模型 MiniMax M3",
             "model": tool_msg_model,
-            "weight": 8,
+            "weight": 16,
             "enabled": True,
             "api_url": DASHENG_CLOUD_API_URL,
             "api_key": "",
-            "max_inflight": 8,
+            "max_inflight": 48,
         },
         {
             "id": "dasheng-email-minimax-m3",
             "name": "大圣Cloud 邮件 MiniMax M3",
             "model": tool_email_model,
+            "weight": 12,
+            "enabled": True,
+            "api_url": DASHENG_CLOUD_API_URL,
+            "api_key": "",
+            "max_inflight": 48,
+        },
+        {
+            "id": "dasheng-tool-qwen34b",
+            "name": "大圣Cloud 小模型 Qwen 34B",
+            "model": DASHENG_CLOUD_QWEN_34B_MODEL,
+            "weight": 6,
+            "enabled": True,
+            "api_url": DASHENG_CLOUD_API_URL,
+            "api_key": "",
+            "max_inflight": 32,
+        },
+        {
+            "id": "dasheng-tool-qwen35-4b",
+            "name": "大圣Cloud 小模型 Qwen3.5 4B",
+            "model": DASHENG_CLOUD_QWEN35_4B_MODEL,
             "weight": 4,
             "enabled": True,
             "api_url": DASHENG_CLOUD_API_URL,
             "api_key": "",
-            "max_inflight": 8,
+            "max_inflight": 32,
+        },
+        {
+            "id": "dasheng-tool-qwen3-8b",
+            "name": "大圣Cloud 小模型 Qwen3 8B",
+            "model": DASHENG_CLOUD_QWEN3_8B_MODEL,
+            "weight": 5,
+            "enabled": True,
+            "api_url": DASHENG_CLOUD_API_URL,
+            "api_key": "",
+            "max_inflight": 32,
         },
     ]
     main_route_defaults = {
-        "default": ["dasheng-main-deepseek-v4-pro"],
-        "onepage": ["dasheng-onepage-minimax-m3"],
-        "market": ["dasheng-main-deepseek-v4-pro"],
-        "meetings": ["dasheng-main-deepseek-v4-pro"],
-        "counter": ["dasheng-main-deepseek-v4-pro"],
-        "contacts": ["dasheng-main-deepseek-v4-pro"],
-        "newswatch": ["dasheng-main-deepseek-v4-pro"],
-        "socialwatch": ["dasheng-main-deepseek-v4-pro"],
-        "mediawatch": ["dasheng-main-deepseek-v4-pro"],
-        "mpwatch": ["dasheng-main-deepseek-v4-pro"],
-        "minuteswatch": ["dasheng-main-deepseek-v4-pro"],
+        "default": ["dasheng-report-gpt-55", "dasheng-report-deepseek-v4-flash"],
+        "market": ["dasheng-report-gpt-55", "dasheng-report-deepseek-v4-flash"],
+        "counter": ["dasheng-report-gpt-55", "dasheng-report-deepseek-v4-flash"],
+        "newswatch": ["dasheng-report-gpt-55", "dasheng-report-deepseek-v4-flash"],
+        "meetings": ["dasheng-report-minimax-m3", "dasheng-report-deepseek-v4-flash"],
+        "contacts": ["dasheng-report-minimax-m3", "dasheng-report-deepseek-v4-flash"],
+        "socialwatch": ["dasheng-report-minimax-m3", "dasheng-report-deepseek-v4-flash"],
+        "mediawatch": ["dasheng-report-minimax-m3", "dasheng-report-deepseek-v4-flash"],
+        "mpwatch": ["dasheng-report-minimax-m3", "dasheng-report-deepseek-v4-flash"],
+        "minuteswatch": ["dasheng-report-minimax-m3", "dasheng-report-deepseek-v4-flash"],
     }
     tool_route_defaults = {
-        "default": ["dasheng-tool-minimax-m3"],
-        "messages": ["dasheng-tool-minimax-m3"],
-        "emails": ["dasheng-email-minimax-m3"],
-        "minutes": ["dasheng-tool-minimax-m3"],
-        "reply": ["dasheng-tool-minimax-m3"],
+        "default": ["dasheng-tool-minimax-m3", "dasheng-tool-qwen3-8b", "dasheng-tool-qwen35-4b"],
+        "messages": ["dasheng-tool-minimax-m3", "dasheng-tool-qwen3-8b", "dasheng-tool-qwen35-4b"],
+        "emails": ["dasheng-email-minimax-m3", "dasheng-tool-qwen34b", "dasheng-tool-qwen3-8b"],
+        "minutes": ["dasheng-tool-minimax-m3", "dasheng-tool-qwen34b", "dasheng-tool-qwen3-8b"],
+        "reply": ["dasheng-tool-minimax-m3", "dasheng-tool-qwen3-8b", "dasheng-tool-qwen35-4b"],
     }
     mid_route_defaults = {
-        "default": ["mid-1"],
-        "messages": ["mid-1"],
-        "reply": ["mid-1"],
+        "default": ["dasheng-onepage-minimax-m3"],
+        "onepage": ["dasheng-onepage-minimax-m3"],
     }
     return {
         "enabled": True,
@@ -690,6 +776,11 @@ def _normalize_model_router(raw_router: Any, conf: Dict[str, Any]) -> Dict[str, 
         "mid_route_channels": _to_route_map(router.get("mid_route_channels"), mid_route_defaults, mid_ids),
         "tool_route_channels": _to_route_map(router.get("tool_route_channels"), tool_route_defaults, tool_ids),
     }
+    # A missing onepage mapping inherits the advanced default, never the old mid pool.
+    normalized["main_module_channels"]["onepage"] = _to_route_map(
+        router.get("main_module_channels"),
+        {"onepage": normalized["main_module_channels"].get("default", [])}, main_ids,
+    )["onepage"]
     return normalized
 
 
@@ -708,28 +799,57 @@ def load_ai_config() -> Dict[str, Any]:
         conf = {
             "api_key": settings.SILICONFLOW_API_KEY or "",
             "api_url": settings.SILICONFLOW_API_URL or DASHENG_CLOUD_API_URL,
+            "ai_provider_mode": (
+                "custom"
+                if settings.SILICONFLOW_API_URL and settings.SILICONFLOW_API_URL.rstrip("/") != DASHENG_CLOUD_API_URL
+                else "dasheng"
+            ),
             "model": settings.SILICONFLOW_MODEL or DASHENG_CLOUD_MAIN_MODEL,
             "main_model": conf.get("main_model") or DASHENG_CLOUD_MAIN_MODEL,
+            "fallback_model": DASHENG_CLOUD_FALLBACK_MODEL,
+            "onepage_model": DASHENG_CLOUD_ONEPAGE_MODEL,
             "tool_model": settings.SILICONFLOW_TOOL_MODEL or DASHENG_CLOUD_TOOL_MODEL,
             "tool_model_messages": settings.SILICONFLOW_TOOL_MODEL or DASHENG_CLOUD_TOOL_MODEL,
             "tool_model_emails": settings.SILICONFLOW_TOOL_MODEL or DASHENG_CLOUD_TOOL_MODEL,
             "max_tokens": 4000,
             "model_temperature": 0.7,
+            "onepage_output_mode": settings.ONEPAGE_IMAGE_MODE,
+            "onepage_image_api_url": settings.ONEPAGE_IMAGE_API_URL or "",
+            "onepage_image_api_key": settings.ONEPAGE_IMAGE_API_KEY or "",
+            "onepage_image_model": settings.ONEPAGE_IMAGE_MODEL,
+            "onepage_image_size": settings.ONEPAGE_IMAGE_SIZE,
+            "onepage_image_quality": settings.ONEPAGE_IMAGE_QUALITY,
             "message_filters": {"external_only": True, "exclude_short": True, "exclude_system": True},
-            "derive_defaults": {"batch_size": 20, "concurrency": 8, "temperature": 0.1, "force": False},
+            "derive_defaults": {"batch_size": 100, "concurrency": 3, "temperature": 0.1, "force": False},
         }
     else:
         conf.setdefault("api_key", settings.SILICONFLOW_API_KEY or conf.get("api_key", ""))
         conf.setdefault("api_url", settings.SILICONFLOW_API_URL or conf.get("api_url", DASHENG_CLOUD_API_URL))
+        mode = str(conf.get("ai_provider_mode") or "").strip()
+        if mode not in {"dasheng", "custom"}:
+            mode = "dasheng" if str(conf.get("api_url") or "").strip() == DASHENG_CLOUD_API_URL and bool(conf.get("api_key")) else "custom"
+        conf["ai_provider_mode"] = mode
         conf.setdefault("model", settings.SILICONFLOW_MODEL or conf.get("model", DASHENG_CLOUD_MAIN_MODEL))
         conf.setdefault("main_model", conf.get("main_model") or DASHENG_CLOUD_MAIN_MODEL)
+        conf.setdefault("fallback_model", conf.get("fallback_model") or DASHENG_CLOUD_FALLBACK_MODEL)
+        conf.setdefault("onepage_model", conf.get("onepage_model") or DASHENG_CLOUD_ONEPAGE_MODEL)
         conf.setdefault("tool_model", settings.SILICONFLOW_TOOL_MODEL or conf.get("tool_model", DASHENG_CLOUD_TOOL_MODEL))
         conf.setdefault("tool_model_messages", conf.get("tool_model_messages") or conf.get("tool_model", DASHENG_CLOUD_TOOL_MODEL))
         conf.setdefault("tool_model_emails", conf.get("tool_model_emails") or conf.get("tool_model", DASHENG_CLOUD_TOOL_MODEL))
         conf.setdefault("max_tokens", conf.get("max_tokens", 4000))
         conf.setdefault("model_temperature", conf.get("model_temperature", 0.7))
+        conf.setdefault("onepage_output_mode", conf.get("onepage_output_mode", settings.ONEPAGE_IMAGE_MODE))
+        conf.setdefault("onepage_image_api_url", settings.ONEPAGE_IMAGE_API_URL or conf.get("onepage_image_api_url", ""))
+        conf.setdefault("onepage_image_api_key", settings.ONEPAGE_IMAGE_API_KEY or conf.get("onepage_image_api_key", ""))
+        conf.setdefault("onepage_image_model", settings.ONEPAGE_IMAGE_MODEL or conf.get("onepage_image_model", DASHENG_CLOUD_ONEPAGE_MODEL))
+        conf.setdefault("onepage_image_size", settings.ONEPAGE_IMAGE_SIZE or conf.get("onepage_image_size", "1024x1536"))
+        conf.setdefault("onepage_image_quality", settings.ONEPAGE_IMAGE_QUALITY or conf.get("onepage_image_quality", "medium"))
         conf.setdefault("message_filters", conf.get("message_filters", {"external_only": True, "exclude_short": True, "exclude_system": True}))
-        conf.setdefault("derive_defaults", conf.get("derive_defaults", {"batch_size": 20, "concurrency": 8, "temperature": 0.1, "force": False}))
+        conf.setdefault("derive_defaults", conf.get("derive_defaults", {"batch_size": 100, "concurrency": 3, "temperature": 0.1, "force": False}))
+
+    # Agent execution belongs to the hosting Newma Runtime. Ignore legacy
+    # Deepsee settings so they cannot revive a second Agent route.
+    conf.pop("desk_agent", None)
 
     stored = conf.get("module_prompts") or {}
     merged_prompts: Dict[str, Dict[str, str]] = {}
@@ -797,6 +917,19 @@ def save_ai_config(conf: Dict[str, Any]) -> None:
             normalized["model_temperature"] = 0.0 if t < 0 else (1.0 if t > 1 else t)
     except Exception:
         normalized["model_temperature"] = 0.7
+    mode = str(normalized.get("onepage_output_mode") or "auto").strip().lower()
+    if mode not in {"auto", "image", "local"}:
+        mode = "auto"
+    normalized["onepage_output_mode"] = mode
+    normalized["onepage_image_model"] = str(normalized.get("onepage_image_model") or DASHENG_CLOUD_ONEPAGE_MODEL).strip() or DASHENG_CLOUD_ONEPAGE_MODEL
+    size = str(normalized.get("onepage_image_size") or "1024x1536").strip()
+    if size not in {"1024x1024", "1024x1536", "1536x1024"}:
+        size = "1024x1536"
+    normalized["onepage_image_size"] = size
+    quality = str(normalized.get("onepage_image_quality") or "medium").strip().lower()
+    if quality not in {"low", "medium", "high", "auto"}:
+        quality = "medium"
+    normalized["onepage_image_quality"] = quality
     # clamp derive defaults
     dd = normalized.get("derive_defaults") or {}
     try:
@@ -816,6 +949,7 @@ def save_ai_config(conf: Dict[str, Any]) -> None:
         dd["temperature"] = 0.1
     dd["force"] = bool(dd.get("force", False))
     normalized["derive_defaults"] = dd
+    normalized.pop("desk_agent", None)
     # ensure module prompts always contain defaults when missing
     stored = normalized.get("module_prompts") or {}
     merged_prompts: Dict[str, Dict[str, str]] = {}
@@ -921,7 +1055,34 @@ def _is_bad_api_key(api_key: str) -> bool:
         return True
 
 
-_THINK_BLOCK_RE = re.compile(r"<\s*(think|reasoning)[^>]*>.*?<\s*/\s*\1\s*>", re.IGNORECASE | re.DOTALL)
+_THINK_BLOCK_RE = re.compile(
+    r"<\s*(think|reasoning)[^>]*>(.*?)<\s*/\s*\1\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _clean_reasoning_fallback(text: str) -> str:
+    lines = []
+    for line in str(text or "").splitlines():
+        stripped = line.strip()
+        if re.match(
+            r"^(let me|i need to|i will|i'll|i should|we need to|now\s+(?:i|we)\b|the user\s+(?:wants|asked|is asking)\s+me\b)",
+            stripped,
+            re.IGNORECASE,
+        ):
+            continue
+        lines.append(line)
+    cleaned = "\n".join(lines).strip()
+    replacements = {
+        r"\bTime\s*:": "时间：",
+        r"\bPlatform\s*:": "平台：",
+        r"\bTopic\s*:": "主题：",
+        r"\bNumber\s*:": "会议号：",
+        r"\bMeeting\s+ID\s*:": "会议号：",
+    }
+    for pattern, replacement in replacements.items():
+        cleaned = re.sub(pattern, replacement, cleaned, flags=re.IGNORECASE)
+    return cleaned.strip()
 
 
 def _normalize_llm_content(raw: Any) -> str:
@@ -930,8 +1091,15 @@ def _normalize_llm_content(raw: Any) -> str:
         return ""
     text = raw.replace("\ufeff", "").replace("\x00", "")
     # Some providers prepend chain-of-thought-like blocks; drop them for stability.
+    reasoning_fallback = "\n".join(
+        str(match[1] or "").strip()
+        for match in _THINK_BLOCK_RE.findall(text)
+        if str(match[1] or "").strip()
+    ).strip()
     text = _THINK_BLOCK_RE.sub("", text)
     text = text.strip()
+    if not text and reasoning_fallback:
+        text = _clean_reasoning_fallback(reasoning_fallback)
     if not text:
         return ""
     # Guard against pathological outputs made of mostly whitespace/control chars.
@@ -939,6 +1107,13 @@ def _normalize_llm_content(raw: Any) -> str:
     if not visible:
         return ""
     return text
+
+
+def _normalize_model_content(raw: Any, *, model: str) -> str:
+    content = _normalize_llm_content(raw)
+    if content and "minimax-m3" in str(model or "").strip().lower():
+        return _clean_reasoning_fallback(content)
+    return content
 
 
 def _get_channel_runtime(channel_id: str) -> Dict[str, Any]:
@@ -1221,9 +1396,6 @@ def _route_pool(
     if route_kind == "tool":
         channels = router.get("tool_channels") if isinstance(router, dict) else []
         route_map = router.get("tool_route_channels") if isinstance(router, dict) else {}
-    elif route_kind == "mid":
-        channels = router.get("mid_channels") if isinstance(router, dict) else []
-        route_map = router.get("mid_route_channels") if isinstance(router, dict) else {}
     else:
         channels = router.get("main_channels") if isinstance(router, dict) else []
         route_map = router.get("main_module_channels") if isinstance(router, dict) else {}
@@ -1293,10 +1465,10 @@ def resolve_chat_targets(
     model_override: str | None,
 ) -> List[Dict[str, Any]]:
     """Resolve ordered model/api targets with optional router and fallback sequence."""
+    # Legacy onepage callers share advanced processing, including fallback and stats.
+    route_kind = "main" if route_kind == "mid" else route_kind
     if route_kind == "tool":
         default_model = str(model_override or conf.get("tool_model") or conf.get("model") or "").strip()
-    elif route_kind == "mid":
-        default_model = str(model_override or conf.get("tool_model_messages") or conf.get("tool_model") or conf.get("model") or "").strip()
     else:
         default_model = str(model_override or conf.get("model") or "").strip()
     base_api_url = str(conf.get("api_url") or "https://api.siliconflow.cn/v1").strip()
@@ -1306,6 +1478,15 @@ def resolve_chat_targets(
     fallback_target = _to_target_dict(base_api_url, base_api_key, fallback_model, None)
 
     router = conf.get("model_router") if isinstance(conf.get("model_router"), dict) else {}
+    # Replies use the configured lightweight pool, never the advanced fallback.
+    if route_kind == "tool" and str(route_key or "").strip().lower() == "reply":
+        if router.get("enabled") and (not model_override or router.get("prefer_router", True)):
+            candidates, rk = _route_pool(conf, route_kind=route_kind, route_key=route_key)
+            ordered = _dynamic_rank_channels(candidates, route_key=f"{route_kind}:{rk}", conf=conf)
+            if ordered:
+                return [_to_target_dict(base_api_url, base_api_key, default_model, c) for c in ordered]
+        return [default_target]
+
     # WeChat/message摘要要求“持续刷新”优先于“多路由试错”。
     # 对 messages 链路默认只保留稳定通道池，避免被已知慢/空响应/JSON异常通道拖住几分钟。
     if route_kind == "tool" and str(route_key or "").strip().lower() == "messages":
@@ -1318,7 +1499,13 @@ def resolve_chat_targets(
                 if isinstance(preferred_ids, str):
                     preferred_ids = [x.strip() for x in preferred_ids.split(",") if x.strip()]
                 if not isinstance(preferred_ids, list) or not preferred_ids:
-                    preferred_ids = ["tool-sf-qwen8b", "tool-sf-glm9b"]
+                    preferred_ids = [
+                        "dasheng-tool-minimax-m3",
+                        "dasheng-tool-qwen3-8b",
+                        "dasheng-tool-qwen35-4b",
+                        "tool-sf-qwen8b",
+                        "tool-sf-glm9b",
+                    ]
                 channels = router.get("tool_channels") if isinstance(router.get("tool_channels"), list) else []
                 route_map = router.get("tool_route_channels") if isinstance(router.get("tool_route_channels"), dict) else {}
                 route_ids = route_map.get("messages") or route_map.get("default") or []
@@ -1407,8 +1594,6 @@ def resolve_chat_target(
     )
     if route_kind == "tool":
         fallback_model = str(model_override or conf.get("tool_model") or conf.get("model") or "").strip()
-    elif route_kind == "mid":
-        fallback_model = str(model_override or conf.get("tool_model_messages") or conf.get("tool_model") or conf.get("model") or "").strip()
     else:
         fallback_model = str(model_override or conf.get("model") or "").strip()
     return targets[0] if targets else {
@@ -1493,6 +1678,60 @@ def _post_with_backoff(
     raise RuntimeError("LLM request failed after retries")
 
 
+def _chat_completions_url(api_url: str) -> str:
+    """Normalize an OpenAI-compatible base URL or full endpoint."""
+    value = str(api_url or "").strip().rstrip("/")
+    if not value:
+        value = "https://api.siliconflow.cn/v1"
+    if value.endswith("/chat/completions"):
+        return value
+    if value.endswith("/v1"):
+        return value + "/chat/completions"
+    return value + "/v1/chat/completions"
+
+
+def _prepare_chat_messages(messages: list[dict], *, model: str) -> list[dict]:
+    """Keep oversized MiniMax requests within a reliable input budget."""
+    if "minimax-m3" not in str(model or "").strip().lower():
+        return messages
+
+    limit = 48_000
+    marker = "\n\n[上下文已截断，优先保留开头与结尾]\n\n"
+    prepared: list[dict] = []
+    for message in messages:
+        item = dict(message) if isinstance(message, dict) else {"role": "user", "content": str(message)}
+        content = item.get("content")
+        if item.get("role") != "system" and isinstance(content, str) and len(content) > limit:
+            available = max(0, limit - len(marker))
+            head_size = int(available * 0.72)
+            tail_size = available - head_size
+            item["content"] = content[:head_size] + marker + content[-tail_size:]
+        prepared.append(item)
+    return prepared
+
+
+def _effective_max_tokens(model: str, configured: int) -> int:
+    value = max(1, int(configured or 4000))
+    if "minimax-m3" in str(model or "").strip().lower():
+        return min(value, 1800)
+    return value
+
+
+def _model_payload_extras(model: str) -> dict[str, Any]:
+    return {}
+
+
+@contextmanager
+def _chat_slot(deadline=None):
+    acquired = _LLM_SEMAPHORE.acquire(timeout=max(0, deadline - time.monotonic())) if deadline else _LLM_SEMAPHORE.acquire()
+    if not acquired:
+        raise RuntimeError("模型排队超时")
+    try:
+        yield
+    finally:
+        _LLM_SEMAPHORE.release()
+
+
 def siliconflow_chat(
     messages: list[dict],
     temperature: float | None = 0.3,
@@ -1502,11 +1741,29 @@ def siliconflow_chat(
     route_kind: str = "main",
     route_key: str | None = None,
     return_metadata: bool = False,
+    allow_web_search: bool = False,
+    request_timeout: float | None = None,
 ) -> str | Dict[str, Any]:
     """Call SiliconFlow once; auto‑retry with gentle backoff on rate limits.
     If it still fails, caller should handle local fallback.
     """
+    deadline = time.monotonic() + request_timeout if request_timeout is not None else None
+    route_kind = "main" if route_kind == "mid" else route_kind
     conf = load_ai_config()
+    from .ai_execution import agent_chat, agent_selected, execution_config, model_endpoint_usable
+    if agent_selected(conf, route_kind):
+        try:
+            return agent_chat(conf, messages, route_kind=route_kind, force_json=force_json,
+                              return_metadata=return_metadata, route_key=route_key,
+                              allow_web_search=allow_web_search,
+                              **({"request_timeout": request_timeout} if request_timeout is not None else {}))
+        except RuntimeError:
+            if not execution_config(conf).fallback_to_models:
+                raise
+    if allow_web_search:
+        messages = [*messages, {'role': 'system', 'content':
+            '本次通过内置模型 API 生成回复，没有提供联网或知识库工具。仅依据上下文和已有知识回答；'
+            '需要实时核验或查库但无法完成时明确说明，不声称已执行检索。'}]
     targets = resolve_chat_targets(
         conf,
         route_kind=route_kind,
@@ -1519,6 +1776,8 @@ def siliconflow_chat(
     temp = float(temperature if temperature is not None else conf.get("model_temperature") or 0.7)
     errors: list[str] = []
     for idx, target in enumerate(targets):
+        if deadline and time.monotonic() >= deadline:
+            raise RuntimeError("模型调用超时")
         api_key = str(target.get("api_key") or "").strip()
         api_url = str(target.get("api_url") or "https://api.siliconflow.cn/v1").strip()
         model = str(target.get("model") or conf.get("model") or "Qwen/Qwen3.5-4B").strip()
@@ -1529,11 +1788,7 @@ def siliconflow_chat(
             channels = (
                 router.get("tool_channels")
                 if route_kind == "tool"
-                else (
-                    router.get("mid_channels")
-                    if route_kind == "mid"
-                    else router.get("main_channels")
-                )
+                else router.get("main_channels")
             )
             if isinstance(channels, list):
                 for ch in channels:
@@ -1541,25 +1796,29 @@ def siliconflow_chat(
                         channel_dict = ch
                         break
 
-        if not api_key:
+        if not model_endpoint_usable(api_url, api_key):
             errors.append(f"[{idx+1}/{len(targets)} {channel_id}] missing_api_key")
             continue
         if _is_bad_api_key(api_key):
             errors.append(f"[{idx+1}/{len(targets)} {channel_id}] bad_api_key_cached")
             continue
 
-        url = api_url.rstrip("/") + "/chat/completions"
-        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        url = _chat_completions_url(api_url)
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers['Authorization'] = f'Bearer {api_key}'
         if "openrouter.ai" in api_url:
             headers.setdefault("HTTP-Referer", "https://localhost")
             headers.setdefault("X-Title", "Dr.Lemon Information Aggregation AI")
+        prepared_messages = _prepare_chat_messages(messages, model=model)
         payload = {
             "model": model,
-            "messages": messages,
+            "messages": prepared_messages,
             "temperature": temp,
-            "max_tokens": max_tokens,
+            "max_tokens": _effective_max_tokens(model, max_tokens),
             "stream": False,
         }
+        payload.update(_model_payload_extras(model))
         if force_json:
             try:
                 payload["response_format"] = {"type": "json_object"}
@@ -1569,7 +1828,7 @@ def siliconflow_chat(
         if channel_dict is not None:
             _router_mark_inflight(channel_id, +1)
         try:
-            with _LLM_SEMAPHORE:
+            with _chat_slot(deadline):
                 retry_attempts = 5
                 retry_backoff = 0.6
                 try:
@@ -1582,6 +1841,12 @@ def siliconflow_chat(
                 if route_kind == "tool" and str(route_key or "").strip().lower() == "messages":
                     retry_attempts = int(conf.get("tool_messages_retry_attempts") or 1)
                     retry_backoff = float(conf.get("tool_messages_retry_backoff") or 0.35)
+                if deadline:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise RuntimeError("模型调用超时")
+                    http_timeout = min(http_timeout, remaining)
+                    retry_attempts = 1
                 resp = _post_with_backoff(
                     url,
                     headers,
@@ -1593,7 +1858,7 @@ def siliconflow_chat(
             resp.raise_for_status()
             data = resp.json()
             raw_content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-            content = _normalize_llm_content(raw_content)
+            content = _normalize_model_content(raw_content, model=model)
             if content:
                 latency_ms = max(1.0, (time.perf_counter() - attempt_start) * 1000.0)
                 if channel_dict is not None:

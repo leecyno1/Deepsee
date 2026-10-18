@@ -6,11 +6,16 @@ import (
 )
 
 type Session struct {
-	UserName string    `json:"userName"`
-	NOrder   int       `json:"nOrder"`
-	NickName string    `json:"nickName"`
-	Content  string    `json:"content"`
-	NTime    time.Time `json:"nTime"`
+	UserName              string    `json:"userName"`
+	NOrder                int64     `json:"nOrder"`
+	NickName              string    `json:"nickName"`
+	Content               string    `json:"content"`
+	NTime                 time.Time `json:"nTime"`
+	UnreadCount           int64     `json:"unreadCount"`
+	LastMsgType           int64     `json:"lastMsgType"`
+	LastMsgSubType        int64     `json:"lastMsgSubType"`
+	LastMsgSender         string    `json:"lastMsgSender"`
+	LastSenderDisplayName string    `json:"lastSenderDisplayName"`
 }
 
 // CREATE TABLE Session(
@@ -38,7 +43,7 @@ type Session struct {
 // )
 type SessionV3 struct {
 	StrUsrName  string `json:"strUsrName"`
-	NOrder      int    `json:"nOrder"`
+	NOrder      int64  `json:"nOrder"`
 	StrNickName string `json:"strNickName"`
 	StrContent  string `json:"strContent"`
 	NTime       int64  `json:"nTime"`
@@ -80,8 +85,9 @@ func (s *Session) PlainText(limit int) string {
 	buf.WriteString(s.NTime.Format("2006-01-02 15:04:05"))
 	buf.WriteString("\n")
 	if limit > 0 {
-		if len(s.Content) > limit {
-			buf.WriteString(s.Content[:limit])
+		content := []rune(s.Content)
+		if len(content) > limit {
+			buf.WriteString(string(content[:limit]))
 			buf.WriteString(" <...>")
 		} else {
 			buf.WriteString(s.Content)

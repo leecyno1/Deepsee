@@ -9,6 +9,8 @@ from ..db import SessionLocal
 from ..models import Message, SyncState
 
 from ..services.mp_rss_store import DEFAULT_MP_UPSTREAM_URL, get_mp_article, list_mp_articles
+from ..services.external_content_summaries import overlay_cached_summaries, summarize_external_items
+from ..services.content_quality import article_text, noise_reason, RESEARCH
 
 
 router = APIRouter(prefix="/api/mp", tags=["mp-rss"])
@@ -49,12 +51,16 @@ def _mp_item_text(item: dict) -> str:
 
 
 def _is_investment_mp_item(item: dict) -> bool:
-    text = _mp_item_text(item)
+    text = article_text(item)
     return any(term in text for term in MP_INVESTMENT_KEEP_TERMS)
 
 
 def _is_spam_life_mp_item(item: dict) -> bool:
-    text = _mp_item_text(item)
+    if noise_reason(item):
+        return True
+    if RESEARCH.search(str(item.get('title') or '')):
+        return False
+    text = article_text(item)
     if not text:
         return False
     title = str(item.get("title") or "").strip()
@@ -213,16 +219,14 @@ def get_db():
 def _get_mp_config(db: Session) -> dict:
     row = db.get(SyncState, "mp_config")
     if not row or not row.value:
-        return {"upstream_base_url": DEFAULT_MP_UPSTREAM_URL}
+        return {}
     try:
         data = json.loads(row.value)
         if not isinstance(data, dict):
             data = {}
-        if not str(data.get("upstream_base_url") or "").strip():
-            data["upstream_base_url"] = DEFAULT_MP_UPSTREAM_URL
         return data
     except Exception:
-        return {"upstream_base_url": DEFAULT_MP_UPSTREAM_URL}
+        return {}
 
 
 @router.get("/articles")
@@ -271,7 +275,19 @@ def api_list_articles(
         source["spam_life_filtered"] = removed_count
         source["filter_mode"] = "investment_keep"
         result["source"] = source
+    result["items"] = overlay_cached_summaries(db, "mp", result.get("items") or [])
     return result
+
+
+@router.post("/articles/summaries")
+def api_summarize_articles(payload: dict, db: Session = Depends(get_db)):
+    items = payload.get("items") if isinstance(payload, dict) else []
+    return summarize_external_items(
+        db,
+        "mp",
+        items if isinstance(items, list) else [],
+        force=bool(payload.get("force", False)) if isinstance(payload, dict) else False,
+    )
 
 
 @router.get("/articles/{article_id:path}")

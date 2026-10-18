@@ -56,6 +56,7 @@ def list_items(
         "items": page,
         "analysis": payload.get("analysis") or {},
         "sources": payload.get("sources") or [],
+        "source": payload.get("source") or {},
         "engine": payload.get("engine"),
         "upstream_ok": True,
     }

@@ -19,6 +19,7 @@ package config
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/rs/zerolog/log"
@@ -106,7 +107,7 @@ func (c *Manager) Load(conf interface{}) error {
 	if err := c.Viper.Unmarshal(conf, decoderConfig()); err != nil {
 		return err
 	}
-	return nil
+	return c.securePermissions()
 }
 
 // LoadFile loads the configuration from a specified file.
@@ -130,6 +131,25 @@ func (c *Manager) SetConfig(key string, value interface{}) error {
 		if err := c.Viper.WriteConfig(); err != nil {
 			return err
 		}
+		if err := c.securePermissions(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Manager) securePermissions() error {
+	if err := os.Chmod(c.Path, 0700); err != nil {
+		return err
+	}
+	path := c.Viper.ConfigFileUsed()
+	if path == "" {
+		path = filepath.Join(c.Path, c.Name+"."+DefaultConfigType)
+	}
+	if _, err := os.Stat(path); err == nil {
+		return os.Chmod(path, 0600)
+	} else if !os.IsNotExist(err) {
+		return err
 	}
 	return nil
 }
@@ -145,7 +165,7 @@ func PrepareDir(path string) error {
 	stat, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			if err := os.MkdirAll(path, 0755); err != nil {
+			if err := os.MkdirAll(path, 0700); err != nil {
 				return err
 			}
 		} else {
@@ -155,5 +175,5 @@ func PrepareDir(path string) error {
 		log.Debug().Msgf("%s is not a directory", path)
 		return ErrInvalidDirectory
 	}
-	return nil
+	return os.Chmod(path, 0700)
 }

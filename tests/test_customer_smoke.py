@@ -54,4 +54,5 @@ def test_customer_smoke_report_mode_parses_ready_payload(tmp_path):
     report = json.loads(out_file.read_text(encoding="utf-8"))
     assert report["ready"]["healthy"] is True
     assert report["thresholds"]["max_rss_mb"] == 250
+    assert report["process"] == {"pid": None, "rss_mb": None, "inspected": False}
     assert report["status"] == "ok"

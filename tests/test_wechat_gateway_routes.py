@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import os
 import sys
 
@@ -27,6 +28,11 @@ def test_create_app_includes_wechat_gateway_routes():
     assert '/api/wechat-gateway/config' in paths
     assert '/api/wechat-gateway/trigger-rules' in paths
     assert '/api/wechat-gateway/callback' in paths
+
+
+def test_wechat_gateway_callback_uses_async_serial_ingest_worker():
+    assert inspect.iscoroutinefunction(wechat_gateway_router.receive_wechat_gateway_callback)
+    assert wechat_gateway_router._callback_ingest_executor._max_workers == 1
 
 
 def test_create_app_includes_wechat_gateway_bind_callback_route():
@@ -174,6 +180,62 @@ def test_agent_event_route_merges_into_messages_api(tmp_path):
     assert item["content_text"] == "从 agent websocket/HTTP 进入微信聚合"
     assert item["meta"]["source"] == "wechat_gateway"
     assert item["meta"]["agent_source"] == "openclaw"
+
+
+def test_wechatapi_callback_queues_incremental_contact_prediction_refresh(tmp_path, monkeypatch):
+    db_path = tmp_path / "wechat-gateway-contact-scoring.db"
+    engine = create_engine(f"sqlite:///{db_path}", future=True)
+    Base.metadata.create_all(engine, tables=[Chat.__table__, Contact.__table__, Message.__table__, SyncState.__table__])
+    Session = sessionmaker(bind=engine, autocommit=False, autoflush=False, expire_on_commit=False)
+
+    queued: list[tuple[object, tuple[object, ...]]] = []
+
+    class CapturingExecutor:
+        def submit(self, fn, *args, **kwargs):
+            queued.append((fn, args))
+            return None
+
+    def override_get_db():
+        session = Session()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    monkeypatch.setattr(wechat_gateway_router, "_contact_scoring_executor", CapturingExecutor(), raising=False)
+    monkeypatch.setattr(wechat_gateway_router, "_auto_reply_executor", CapturingExecutor())
+    monkeypatch.setattr(wechat_gateway_router, "SessionLocal", Session, raising=False)
+    app = create_app()
+    app.dependency_overrides[wechat_gateway_router.get_db] = override_get_db
+    client = TestClient(app)
+
+    payload = {
+        "TypeName": "AddMsg",
+        "Appid": "wx_app_test",
+        "Wxid": "self_wxid",
+        "Data": {
+            "MsgId": 901,
+            "NewMsgId": 902,
+            "MsgType": 1,
+            "CreateTime": 1783951200,
+            "FromUserName": {"string": "wxid_stock_sender"},
+            "ToUserName": {"string": "self_wxid"},
+            "Content": {"string": "继续看好宁德时代，未来一个月有望上涨。"},
+            "MsgSource": "<msgsource></msgsource>",
+        },
+    }
+
+    response = client.post("/api/wechat-gateway/callback", json=payload, headers=API_HEADERS)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["stored"] is True
+    assert data["contact_scoring"] == {"status": "queued", "message_id": data["message_id"]}
+    scoring_jobs = [item for item in queued if getattr(item[0], "__name__", "") == "_refresh_contact_prediction_for_message"]
+    assert len(scoring_jobs) == 1
+    assert scoring_jobs[0][0] is wechat_gateway_router._refresh_contact_prediction_for_message
+    assert scoring_jobs[0][1][0] == data["message_id"]
+    assert callable(scoring_jobs[0][1][1])
 
 
 def test_agent_send_text_route_sends_through_wechatapi_gateway(tmp_path, monkeypatch):
@@ -345,7 +407,7 @@ def test_wechat_gateway_config_roundtrip_includes_subsession_fields(tmp_path):
     assert data["auto_learn_subsession_members"] is True
 
 
-def test_callback_ingest_persists_fixed_subsession_memberships_and_turn(tmp_path):
+def test_callback_ingest_persists_fixed_subsession_memberships_and_turn(tmp_path, monkeypatch):
     db_path = tmp_path / "wechat-gateway-fixed-subsesson.db"
     engine = create_engine(f"sqlite:///{db_path}", future=True)
     Base.metadata.create_all(
@@ -382,6 +444,7 @@ def test_callback_ingest_persists_fixed_subsession_memberships_and_turn(tmp_path
         finally:
             session.close()
 
+    monkeypatch.setattr(wechat_gateway_router, "SessionLocal", Session, raising=False)
     app = create_app()
     app.dependency_overrides[wechat_gateway_router.get_db] = override_get_db
     client = TestClient(app)

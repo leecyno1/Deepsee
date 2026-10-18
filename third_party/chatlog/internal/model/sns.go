@@ -12,59 +12,96 @@ import (
 
 // SNSPost 朋友圈帖子
 type SNSPost struct {
-	TID         int64     `json:"tid"`
-	UserName    string    `json:"user_name"`
-	NickName    string    `json:"nickname"`
-	CreateTime  int64     `json:"create_time"`
-	CreateTimeStr string  `json:"create_time_str"`
-	ContentDesc string    `json:"content_desc"`
-	ContentType string    `json:"content_type"` // image, video, article, finder, text
-	Location    *SNSLocation `json:"location,omitempty"`
-	MediaList   []SNSMedia `json:"media_list,omitempty"`
-	Article     *SNSArticle `json:"article,omitempty"`
-	FinderFeed  *SNSFinderFeed `json:"finder_feed,omitempty"`
-	XMLContent  string    `json:"xml_content,omitempty"` // 原始XML，用于调试
+	TID           int64          `json:"tid"`
+	UserName      string         `json:"user_name"`
+	NickName      string         `json:"nickname"`
+	CreateTime    int64          `json:"create_time"`
+	CreateTimeStr string         `json:"create_time_str"`
+	ContentDesc   string         `json:"content_desc"`
+	ContentRaw    string         `json:"content_raw,omitempty"`
+	ContentType   string         `json:"content_type"` // image, video, article, finder, text
+	Location      *SNSLocation   `json:"location,omitempty"`
+	MediaList     []SNSMedia     `json:"media_list,omitempty"`
+	Article       *SNSArticle    `json:"article,omitempty"`
+	FinderFeed    *SNSFinderFeed `json:"finder_feed,omitempty"`
+	Likes         []SNSLike      `json:"likes,omitempty"`
+	Comments      []SNSComment   `json:"comments,omitempty"`
+	XMLContent    string         `json:"xml_content,omitempty"` // 原始XML，用于调试
 }
 
 // SNSLocation 位置信息
 type SNSLocation struct {
-	City        string  `json:"city,omitempty"`
-	Latitude    float64 `json:"latitude,omitempty"`
-	Longitude   float64 `json:"longitude,omitempty"`
-	POIName     string  `json:"poi_name,omitempty"`
-	POIAddress  string  `json:"poi_address,omitempty"`
+	City       string  `json:"city,omitempty"`
+	Latitude   float64 `json:"latitude,omitempty"`
+	Longitude  float64 `json:"longitude,omitempty"`
+	POIName    string  `json:"poi_name,omitempty"`
+	POIAddress string  `json:"poi_address,omitempty"`
 }
 
 // SNSMedia 媒体信息
 type SNSMedia struct {
-	Type     string `json:"type"`     // image, video
+	Type      string            `json:"type"` // image, video
+	URL       string            `json:"url,omitempty"`
+	ThumbURL  string            `json:"thumb_url,omitempty"`
+	Token     string            `json:"token,omitempty"`
+	Key       string            `json:"key,omitempty"`
+	MD5       string            `json:"md5,omitempty"`
+	EncIdx    string            `json:"enc_idx,omitempty"`
+	Width     int               `json:"width,omitempty"`
+	Height    int               `json:"height,omitempty"`
+	Duration  string            `json:"duration,omitempty"`
+	LivePhoto *SNSMediaResource `json:"live_photo,omitempty"`
+}
+
+type SNSMediaResource struct {
 	URL      string `json:"url,omitempty"`
 	ThumbURL string `json:"thumb_url,omitempty"`
-	Width    int    `json:"width,omitempty"`
-	Height   int    `json:"height,omitempty"`
-	Duration string `json:"duration,omitempty"`
+	Token    string `json:"token,omitempty"`
+	Key      string `json:"key,omitempty"`
+	EncIdx   string `json:"enc_idx,omitempty"`
 }
 
 // SNSArticle 文章信息
 type SNSArticle struct {
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	URL         string `json:"url"`
-	CoverURL    string `json:"cover_url"`
+	Title          string `json:"title"`
+	Description    string `json:"description"`
+	URL            string `json:"url"`
+	SourceName     string `json:"source_name,omitempty"`
+	SourceUserName string `json:"source_username,omitempty"`
+	CoverURL       string `json:"cover_url"`
+	CoverToken     string `json:"cover_token,omitempty"`
+	CoverKey       string `json:"cover_key,omitempty"`
+	CoverEncIdx    string `json:"cover_enc_idx,omitempty"`
+}
+
+type SNSLike struct {
+	UserName string `json:"username,omitempty"`
+	NickName string `json:"nickname,omitempty"`
+}
+
+type SNSComment struct {
+	ID              string `json:"id,omitempty"`
+	UserName        string `json:"username,omitempty"`
+	NickName        string `json:"nickname,omitempty"`
+	Content         string `json:"content,omitempty"`
+	ContentRaw      string `json:"content_raw,omitempty"`
+	CreateTime      int64  `json:"create_time,omitempty"`
+	ReplyToUserName string `json:"reply_to_username,omitempty"`
+	ReplyToNickName string `json:"reply_to_nickname,omitempty"`
 }
 
 // SNSFinderFeed 视频号信息
 type SNSFinderFeed struct {
-	Nickname     string `json:"nickname"`
-	Avatar       string `json:"avatar"`
-	Desc         string `json:"desc"`
-	MediaCount   int    `json:"media_count"`
-	VideoURL     string `json:"video_url"`
-	CoverURL     string `json:"cover_url"`
-	ThumbURL     string `json:"thumb_url"`
-	Width        int    `json:"width,omitempty"`
-	Height       int    `json:"height,omitempty"`
-	Duration     string `json:"duration,omitempty"`
+	Nickname   string `json:"nickname"`
+	Avatar     string `json:"avatar"`
+	Desc       string `json:"desc"`
+	MediaCount int    `json:"media_count"`
+	VideoURL   string `json:"video_url"`
+	CoverURL   string `json:"cover_url"`
+	ThumbURL   string `json:"thumb_url"`
+	Width      int    `json:"width,omitempty"`
+	Height     int    `json:"height,omitempty"`
+	Duration   string `json:"duration,omitempty"`
 }
 
 // ParseSNSContent 解析朋友圈 XML 内容
@@ -87,13 +124,26 @@ func ParseSNSContent(xmlContent string) (*SNSPost, error) {
 	post.NickName = extractXMLTag(xmlContent, "nickname")
 
 	// 提取 contentDesc
-	post.ContentDesc = extractXMLTag(xmlContent, "contentDesc")
+	post.ContentRaw = extractXMLTag(xmlContent, "contentDesc")
+	post.ContentDesc = NormalizeWeChatText(post.ContentRaw)
 
 	// 提取位置信息
 	post.Location = parseSNSLocation(xmlContent)
 
 	// 判断内容类型并提取相应信息
-	contentType := extractXMLTag(xmlContent, "type")
+	// Select TimelineObject/ContentObject/type explicitly. ContentObject also
+	// contains mediaList/media/type values, so relying on the first <type> in
+	// the whole document is coupled to WeChat's current field order.
+	contentObject := extractXMLSectionFold(xmlContent, "ContentObject")
+	contentType := extractXMLTag(contentObject, "type")
+	// Compatibility with older exports which used contentStyle or omitted the
+	// ContentObject wrapper.
+	if contentType == "" {
+		contentType = extractXMLTag(xmlContent, "contentStyle")
+	}
+	if contentType == "" {
+		contentType = extractXMLTag(xmlContent, "type")
+	}
 	post.ContentType = parseSNSContentType(contentType)
 
 	switch post.ContentType {
@@ -107,21 +157,147 @@ func ParseSNSContent(xmlContent string) (*SNSPost, error) {
 		post.FinderFeed = parseSNSFinderFeed(xmlContent)
 	}
 
+	post.Likes, post.Comments = parseSNSInteractions(xmlContent)
+	applySNSVideoKey(post.MediaList, extractSNSVideoKey(xmlContent))
+
 	return post, nil
+}
+
+var weChatTextEmojiReplacer = strings.NewReplacer(
+	"[胜利]", "✌️",
+	"[发怒]", "😡",
+	"[呲牙]", "😁",
+	"[加油]", "💪",
+	"[微笑]", "😊",
+	"[大笑]", "😄",
+	"[偷笑]", "🤭",
+	"[破涕为笑]", "😂",
+	"[流泪]", "😢",
+	"[大哭]", "😭",
+	"[害羞]", "😊",
+	"[色]", "😍",
+	"[爱心]", "❤️",
+	"[心]", "❤️",
+	"[玫瑰]", "🌹",
+	"[握手]", "🤝",
+	"[抱拳]", "🙏",
+	"[强]", "👍",
+	"[弱]", "👎",
+	"[OK]", "👌",
+	"[拳头]", "✊",
+	"[庆祝]", "🎉",
+	"[礼物]", "🎁",
+	"[太阳]", "☀️",
+	"[月亮]", "🌙",
+	"[咖啡]", "☕",
+	"[蛋糕]", "🎂",
+)
+
+func NormalizeWeChatText(value string) string {
+	return weChatTextEmojiReplacer.Replace(strings.TrimSpace(value))
 }
 
 // extractXMLTag 提取 XML 标签内容
 func extractXMLTag(xml, tag string) string {
-	re := regexp.MustCompile(`<` + tag + `>([^<]*)</` + tag + `>`)
+	quotedTag := regexp.QuoteMeta(tag)
+	re := regexp.MustCompile(`(?s)<` + quotedTag + `(?:\s[^>]*)?>(.*?)</` + quotedTag + `\s*>`)
 	matches := re.FindStringSubmatch(xml)
 	if len(matches) > 1 {
-		return strings.TrimSpace(matches[1])
+		value := strings.TrimSpace(matches[1])
+		if strings.HasPrefix(value, "<![CDATA[") && strings.HasSuffix(value, "]]>") {
+			value = strings.TrimSpace(value[len("<![CDATA[") : len(value)-len("]]>")])
+		}
+		return value
 	}
-	// 处理带属性的标签
-	re = regexp.MustCompile(`<` + tag + `[^>]*>([^<]*)</` + tag + `>`)
-	matches = re.FindStringSubmatch(xml)
-	if len(matches) > 1 {
-		return strings.TrimSpace(matches[1])
+	return ""
+}
+
+func extractXMLSectionFold(xml, tag string) string {
+	quotedTag := regexp.QuoteMeta(tag)
+	re := regexp.MustCompile(`(?is)<` + quotedTag + `(?:\s[^>]*)?>(.*?)</` + quotedTag + `\s*>`)
+	matches := re.FindStringSubmatch(xml)
+	if len(matches) <= 1 {
+		return ""
+	}
+	return matches[1]
+}
+
+func extractXMLSectionsFold(xml, tag string) []string {
+	quotedTag := regexp.QuoteMeta(tag)
+	re := regexp.MustCompile(`(?is)<` + quotedTag + `(?:\s[^>]*)?>(.*?)</` + quotedTag + `\s*>`)
+	matches := re.FindAllStringSubmatch(xml, -1)
+	result := make([]string, 0, len(matches))
+	for _, match := range matches {
+		if len(match) > 1 {
+			result = append(result, match[1])
+		}
+	}
+	return result
+}
+
+func parseSNSInteractions(xml string) ([]SNSLike, []SNSComment) {
+	likes := make([]SNSLike, 0)
+	comments := make([]SNSComment, 0)
+	nicknames := make(map[string]string)
+
+	for _, section := range extractXMLSectionsFold(xml, "like_user_list") {
+		for _, entry := range extractXMLSectionsFold(section, "user_comment") {
+			if extractXMLTag(entry, "b_deleted") == "1" {
+				continue
+			}
+			like := SNSLike{
+				UserName: extractXMLTag(entry, "username"),
+				NickName: NormalizeWeChatText(extractXMLTag(entry, "nickname")),
+			}
+			if like.UserName == "" && like.NickName == "" {
+				continue
+			}
+			likes = append(likes, like)
+			if like.UserName != "" && like.NickName != "" {
+				nicknames[like.UserName] = like.NickName
+			}
+		}
+	}
+
+	for _, section := range extractXMLSectionsFold(xml, "comment_user_list") {
+		for _, entry := range extractXMLSectionsFold(section, "user_comment") {
+			if extractXMLTag(entry, "b_deleted") == "1" {
+				continue
+			}
+			rawContent := extractXMLTag(entry, "content")
+			comment := SNSComment{
+				ID:              firstNonEmptySNS(extractXMLTag(entry, "comment_64id"), extractXMLTag(entry, "comment_id")),
+				UserName:        extractXMLTag(entry, "username"),
+				NickName:        NormalizeWeChatText(extractXMLTag(entry, "nickname")),
+				Content:         NormalizeWeChatText(rawContent),
+				ContentRaw:      rawContent,
+				ReplyToUserName: extractXMLTag(entry, "ref_username"),
+			}
+			if createTime := extractXMLTag(entry, "create_time"); createTime != "" {
+				comment.CreateTime, _ = strconv.ParseInt(createTime, 10, 64)
+			}
+			if comment.UserName == "" && comment.NickName == "" && comment.Content == "" {
+				continue
+			}
+			comments = append(comments, comment)
+			if comment.UserName != "" && comment.NickName != "" {
+				nicknames[comment.UserName] = comment.NickName
+			}
+		}
+	}
+	for index := range comments {
+		if comments[index].ReplyToUserName != "" {
+			comments[index].ReplyToNickName = nicknames[comments[index].ReplyToUserName]
+		}
+	}
+	return likes, comments
+}
+
+func firstNonEmptySNS(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" && value != "0" {
+			return value
+		}
 	}
 	return ""
 }
@@ -145,11 +321,15 @@ func parseSNSContentType(typeStr string) string {
 		return "video"
 	case "3":
 		return "article"
+	case "26":
+		return "article"
 	case "15":
 		return "video"
 	case "28":
 		return "finder"
 	case "7":
+		return "image"
+	case "54":
 		return "image"
 	default:
 		return "text"
@@ -187,7 +367,7 @@ func parseSNSLocation(xml string) *SNSLocation {
 
 // xmlContentLocation 提取 location 标签内容
 func xmlContentLocation(xml string) string {
-	re := regexp.MustCompile(`<location[^>]*>([^<]*)</location>`)
+	re := regexp.MustCompile(`(?s)<location[^>]*>(.*?)</location>`)
 	matches := re.FindStringSubmatch(xml)
 	if len(matches) > 1 {
 		return matches[1]
@@ -197,81 +377,157 @@ func xmlContentLocation(xml string) string {
 
 // parseSNSImageMedia 解析图片媒体
 func parseSNSImageMedia(xml string) []SNSMedia {
-	var mediaList []SNSMedia
+	return parseSNSMedia(xml, "image")
+}
 
-	// 查找所有 media 标签
-	re := regexp.MustCompile(`<media>(.*?)</media>`)
+// parseSNSVideoMedia 解析视频媒体
+func parseSNSVideoMedia(xml string) []SNSMedia {
+	return parseSNSMedia(xml, "video")
+}
+
+func parseSNSMedia(xml string, mediaType string) []SNSMedia {
+	re := regexp.MustCompile(`<media>([\s\S]*?)</media>`)
 	matches := re.FindAllStringSubmatch(xml, -1)
+	mediaList := make([]SNSMedia, 0, len(matches))
 
 	for _, match := range matches {
-		if len(match) > 1 {
-			media := SNSMedia{Type: "image"}
-			mediaXML := match[1]
-
-			// 提取 URL
-			urlTag := extractXMLTag(mediaXML, "url")
-			if urlTag == "" {
-				urlTag = extractXMLTag(mediaXML, "thumb")
-			}
-			media.URL = html.UnescapeString(urlTag)
-
-			// 提取尺寸
-			width := extractXMLTagAttr(mediaXML, "size", "width")
-			height := extractXMLTagAttr(mediaXML, "size", "height")
-			if width != "" {
-				media.Width, _ = strconv.Atoi(width)
-			}
-			if height != "" {
-				media.Height, _ = strconv.Atoi(height)
-			}
-
-			mediaList = append(mediaList, media)
+		if len(match) <= 1 {
+			continue
 		}
+		mediaXML := match[1]
+		urlTagMatch := regexp.MustCompile(`<url([^>]*)>`).FindStringSubmatch(mediaXML)
+		thumbTagMatch := regexp.MustCompile(`<thumb([^>]*)>`).FindStringSubmatch(mediaXML)
+
+		item := SNSMedia{
+			Type:     mediaType,
+			URL:      html.UnescapeString(extractXMLTag(mediaXML, "url")),
+			ThumbURL: html.UnescapeString(extractXMLTag(mediaXML, "thumb")),
+		}
+		if item.URL == "" && mediaType == "image" {
+			item.URL = item.ThumbURL
+		}
+		if len(urlTagMatch) > 1 {
+			item.Token = extractXMLAttr(urlTagMatch[1], "token")
+			item.Key = extractXMLAttr(urlTagMatch[1], "key")
+			item.MD5 = extractXMLAttr(urlTagMatch[1], "md5")
+			item.EncIdx = extractXMLAttr(urlTagMatch[1], "enc_idx")
+		}
+		if len(thumbTagMatch) > 1 {
+			if item.Token == "" {
+				item.Token = extractXMLAttr(thumbTagMatch[1], "token")
+			}
+			if item.Key == "" {
+				item.Key = extractXMLAttr(thumbTagMatch[1], "key")
+			}
+			if item.EncIdx == "" {
+				item.EncIdx = extractXMLAttr(thumbTagMatch[1], "enc_idx")
+			}
+		}
+
+		width := extractXMLTagAttr(mediaXML, "size", "width")
+		height := extractXMLTagAttr(mediaXML, "size", "height")
+		if width != "" {
+			item.Width, _ = strconv.Atoi(width)
+		}
+		if height != "" {
+			item.Height, _ = strconv.Atoi(height)
+		}
+
+		duration := extractXMLTag(mediaXML, "videoDuration")
+		if duration == "" {
+			duration = extractXMLTag(mediaXML, "videoPlayDuration")
+		}
+		if duration != "" {
+			if d, err := strconv.ParseFloat(duration, 64); err == nil {
+				if d > 10 && strings.Contains(duration, ".") == false {
+					item.Duration = fmt.Sprintf("%.0f秒", d/10)
+				} else {
+					item.Duration = fmt.Sprintf("%.2f秒", d)
+				}
+			}
+		}
+
+		item.LivePhoto = parseSNSLivePhoto(mediaXML)
+		mediaList = append(mediaList, item)
 	}
 
 	return mediaList
 }
 
-// parseSNSVideoMedia 解析视频媒体
-func parseSNSVideoMedia(xml string) []SNSMedia {
-	var mediaList []SNSMedia
-
-	// 查找所有 media 标签
-	re := regexp.MustCompile(`<media>(.*?)</media>`)
-	matches := re.FindAllStringSubmatch(xml, -1)
-
-	for _, match := range matches {
-		if len(match) > 1 {
-			media := SNSMedia{Type: "video"}
-			mediaXML := match[1]
-
-			// 提取 URL
-			media.URL = html.UnescapeString(extractXMLTag(mediaXML, "url"))
-			media.ThumbURL = html.UnescapeString(extractXMLTag(mediaXML, "thumb"))
-
-			// 提取尺寸
-			width := extractXMLTagAttr(mediaXML, "size", "width")
-			height := extractXMLTagAttr(mediaXML, "size", "height")
-			if width != "" {
-				media.Width, _ = strconv.Atoi(width)
-			}
-			if height != "" {
-				media.Height, _ = strconv.Atoi(height)
-			}
-
-			// 提取时长
-			duration := extractXMLTag(mediaXML, "videoDuration")
-			if duration != "" {
-				if d, err := strconv.ParseFloat(duration, 64); err == nil {
-					media.Duration = fmt.Sprintf("%.2f秒", d)
-				}
-			}
-
-			mediaList = append(mediaList, media)
+func parseSNSLivePhoto(mediaXML string) *SNSMediaResource {
+	liveXML := extractXMLSectionFold(mediaXML, "LivePhoto")
+	if liveXML == "" {
+		return nil
+	}
+	if liveMedia := extractXMLSectionFold(liveXML, "liveMedia"); liveMedia != "" {
+		liveXML = liveMedia
+	}
+	urlTagMatch := regexp.MustCompile(`(?i)<url([^>]*)>`).FindStringSubmatch(liveXML)
+	thumbTagMatch := regexp.MustCompile(`(?i)<thumb([^>]*)>`).FindStringSubmatch(liveXML)
+	res := &SNSMediaResource{
+		URL:      html.UnescapeString(extractXMLTag(liveXML, "url")),
+		ThumbURL: html.UnescapeString(extractXMLTag(liveXML, "thumb")),
+	}
+	if len(urlTagMatch) > 1 {
+		res.Token = extractXMLAttr(urlTagMatch[1], "token")
+		res.Key = extractXMLAttr(urlTagMatch[1], "key")
+		res.EncIdx = extractXMLAttr(urlTagMatch[1], "enc_idx")
+	}
+	if len(thumbTagMatch) > 1 {
+		if res.Token == "" {
+			res.Token = extractXMLAttr(thumbTagMatch[1], "token")
+		}
+		if res.Key == "" {
+			res.Key = extractXMLAttr(thumbTagMatch[1], "key")
+		}
+		if res.EncIdx == "" {
+			res.EncIdx = extractXMLAttr(thumbTagMatch[1], "enc_idx")
 		}
 	}
+	if res.Key == "" {
+		res.Key = extractXMLTagAttr(liveXML, "enc", "key")
+	}
+	if res.URL == "" && res.ThumbURL == "" {
+		return nil
+	}
+	return res
+}
 
-	return mediaList
+func extractXMLAttr(attrs, key string) string {
+	re := regexp.MustCompile(key + `="([^"]*)"`)
+	matches := re.FindStringSubmatch(attrs)
+	if len(matches) > 1 {
+		return strings.TrimSpace(matches[1])
+	}
+	return ""
+}
+
+func extractSNSVideoKey(xml string) string {
+	re := regexp.MustCompile(`<enc\s+key="(\d+)"`)
+	matches := re.FindStringSubmatch(xml)
+	if len(matches) > 1 {
+		return matches[1]
+	}
+	return ""
+}
+
+func applySNSVideoKey(mediaList []SNSMedia, videoKey string) {
+	if videoKey == "" {
+		return
+	}
+	for i := range mediaList {
+		if mediaList[i].Type == "video" && isEmptySNSMediaKey(mediaList[i].Key) {
+			mediaList[i].Key = videoKey
+		}
+		if mediaList[i].LivePhoto != nil && isEmptySNSMediaKey(mediaList[i].LivePhoto.Key) {
+			mediaList[i].LivePhoto.Key = videoKey
+		}
+	}
+}
+
+func isEmptySNSMediaKey(key string) bool {
+	key = strings.TrimSpace(key)
+	return key == "" || key == "0"
 }
 
 // parseSNSArticle 解析文章信息
@@ -281,15 +537,24 @@ func parseSNSArticle(xml string) *SNSArticle {
 	article.Title = extractXMLTag(xml, "title")
 	article.Description = extractXMLTag(xml, "description")
 	article.URL = html.UnescapeString(extractXMLTag(xml, "contentUrl"))
+	article.SourceName = extractXMLTag(xml, "sourceNickName")
+	article.SourceUserName = extractXMLTag(xml, "publicUserName")
 
 	// 提取封面图
-	re := regexp.MustCompile(`<media>(.*?)</media>`)
+	re := regexp.MustCompile(`(?s)<media>(.*?)</media>`)
 	matches := re.FindStringSubmatch(xml)
 	if len(matches) > 1 {
 		mediaXML := matches[1]
+		coverTagMatch := regexp.MustCompile(`<thumb([^>]*)>`).FindStringSubmatch(mediaXML)
 		article.CoverURL = html.UnescapeString(extractXMLTag(mediaXML, "thumb"))
 		if article.CoverURL == "" {
+			coverTagMatch = regexp.MustCompile(`<url([^>]*)>`).FindStringSubmatch(mediaXML)
 			article.CoverURL = html.UnescapeString(extractXMLTag(mediaXML, "url"))
+		}
+		if len(coverTagMatch) > 1 {
+			article.CoverToken = extractXMLAttr(coverTagMatch[1], "token")
+			article.CoverKey = extractXMLAttr(coverTagMatch[1], "key")
+			article.CoverEncIdx = extractXMLAttr(coverTagMatch[1], "enc_idx")
 		}
 	}
 
@@ -305,7 +570,7 @@ func parseSNSFinderFeed(xml string) *SNSFinderFeed {
 	feed := &SNSFinderFeed{}
 
 	// 提取 finderFeed 标签内容
-	re := regexp.MustCompile(`<finderFeed>(.*?)</finderFeed>`)
+	re := regexp.MustCompile(`(?s)<finderFeed>(.*?)</finderFeed>`)
 	matches := re.FindStringSubmatch(xml)
 	if len(matches) <= 1 {
 		return nil
@@ -324,7 +589,7 @@ func parseSNSFinderFeed(xml string) *SNSFinderFeed {
 	}
 
 	// 提取视频信息
-	mediaRe := regexp.MustCompile(`<media>(.*?)</media>`)
+	mediaRe := regexp.MustCompile(`(?s)<media>(.*?)</media>`)
 	mediaMatches := mediaRe.FindStringSubmatch(feedXML)
 	if len(mediaMatches) > 1 {
 		mediaXML := mediaMatches[1]

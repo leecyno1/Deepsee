@@ -10,6 +10,8 @@ LOG_FILE="$ROOT_DIR/uvicorn.log"
 REQ_HASH_FILE="$VENV_DIR/.requirements.sha256"
 BACKUP_DIR="$ROOT_DIR/backups"
 PROD_LITE_ENV_FILE="$ROOT_DIR/.env.production-lite.example"
+LAUNCHD_LABEL="com.dasheng.aiintel.8001"
+LAUNCHD_PLIST_PATH="$HOME/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"
 
 APP_IMPORT="app.main:app"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
@@ -246,6 +248,27 @@ pid_on_port() {
   lsof -nPiTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -n1 || true
 }
 
+launchd_service_configured() {
+  [[ "$(uname -s 2>/dev/null || true)" == "Darwin" ]] \
+    && [[ -f "$LAUNCHD_PLIST_PATH" ]] \
+    && [[ -x "$ROOT_DIR/scripts/launchd_8001.sh" ]] \
+    && grep -Fq "<string>${ROOT_DIR}/scripts/run_uvicorn_8001.sh</string>" "$LAUNCHD_PLIST_PATH"
+}
+
+launchd_service_loaded() {
+  launchd_service_configured \
+    && launchctl print "gui/$(id -u)/${LAUNCHD_LABEL}" >/dev/null 2>&1
+}
+
+sync_pid_file_from_port() {
+  local port=${1:-${PORT:-8001}}
+  local live_pid
+  live_pid=$(pid_on_port "$port")
+  if [[ -n "$live_pid" ]]; then
+    echo "$live_pid" > "$PID_FILE"
+  fi
+}
+
 pid_cwd() {
   local pid=${1:-}
   [[ -n "$pid" ]] || return 1
@@ -316,6 +339,17 @@ start_bg() {
   if is_running "$port"; then
     ok "服务已在运行 (PID: $(cat "$PID_FILE"))"
     exit 0
+  fi
+  if launchd_service_configured; then
+    info "检测到 launchd 托管配置，交由 launchd 启动"
+    bash "$ROOT_DIR/scripts/launchd_8001.sh" start
+    if wait_health "$host" "$port" 12; then
+      sync_pid_file_from_port "$port"
+      ok "launchd 服务已启动 (PID: $(cat "$PID_FILE"), http://$host:$port)"
+      return 0
+    fi
+    err "launchd 服务启动后健康检查失败"
+    return 1
   fi
   if tracked_pid_running; then
     err "检测到已有受管服务正在运行，但不在端口 $port 上。该脚本当前按单实例管理，请先执行: bash scripts/manage.sh stop"
@@ -413,6 +447,17 @@ stop_svc() {
   local host port
   host=${HOST:-127.0.0.1}
   port=${PORT:-8001}
+  if launchd_service_loaded; then
+    info "检测到 launchd 托管服务，交由 launchd 停止"
+    bash "$ROOT_DIR/scripts/launchd_8001.sh" stop
+    rm -f "$PID_FILE"
+    if is_port_listening "$port"; then
+      err "launchd 已停止，但端口 $port 仍被占用"
+      return 1
+    fi
+    ok "launchd 服务已停止"
+    return 0
+  fi
   if is_running "$port"; then
     local pid
     pid=$(cat "$PID_FILE")
@@ -447,6 +492,28 @@ stop_svc() {
   else
     warn "服务未在运行"
   fi
+}
+
+restart_svc() {
+  ensure_env
+  maybe_ensure_venv
+  export_env
+  local host port
+  host=${HOST:-127.0.0.1}
+  port=${PORT:-8001}
+  if launchd_service_configured; then
+    info "检测到 launchd 托管配置，交由 launchd 重启"
+    bash "$ROOT_DIR/scripts/launchd_8001.sh" restart
+    if wait_health "$host" "$port" 12; then
+      sync_pid_file_from_port "$port"
+      ok "launchd 服务已重启 (PID: $(cat "$PID_FILE"), http://$host:$port)"
+      return 0
+    fi
+    err "launchd 服务重启后健康检查失败"
+    return 1
+  fi
+  stop_svc
+  start_bg
 }
 
 status_svc() {
@@ -512,11 +579,11 @@ launchd_svc() {
   local action
   action=${1:-status}
   case "$action" in
-    install|restart|status|logs|health|uninstall|remove)
+    install|start|stop|restart|status|logs|health|uninstall|remove)
       bash "$ROOT_DIR/scripts/launchd_8001.sh" "$action"
       ;;
     *)
-      err "用法: bash scripts/manage.sh launchd <install|restart|status|logs|health|uninstall>"
+      err "用法: bash scripts/manage.sh launchd <install|start|stop|restart|status|logs|health|uninstall>"
       return 2
       ;;
   esac
@@ -539,7 +606,7 @@ usage() {
   printf '%s\n' '  restore <dir>  恢复备份（需 CONFIRM_RESTORE=RESTORE）'
   printf '%s\n' '  migrate [status|apply|plan]  查看或执行数据库迁移'
   printf '%s\n' '  release-check  运行发布前静态检查与关键测试'
-  printf '%s\n' '  launchd <install|restart|status|logs|health|uninstall>  管理 macOS 开机自启'
+  printf '%s\n' '  launchd <install|start|stop|restart|status|logs|health|uninstall>  管理 macOS 开机自启'
   printf '%s\n' '  logs [-f]      查看日志（-f 持续跟随）'
   printf '%s\n' '  sync           触发一次从 chatlog 拉取增量'
   printf '%s\n' '  emailsync [id] 同步邮箱（可选账户ID，省略则同步全部已启用账户）'
@@ -599,7 +666,7 @@ case "$cmd" in
   release-check) bash "$ROOT_DIR/scripts/release_check.sh" ;;
   launchd) shift || true; launchd_svc "${1:-status}" ;;
   logs) shift || true; logs_svc "${1:-}" ;;
-  restart) stop_svc; start_bg ;;
+  restart) restart_svc ;;
   sync) sync_once ;;
   emailsync)
     export_env || true

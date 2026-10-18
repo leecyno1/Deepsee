@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import math
 import re
+import json
+from pathlib import Path
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from statistics import pstdev
 from typing import Any, Callable, Iterable
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session, selectinload
 
 from ..models import (
     Contact,
@@ -27,12 +29,16 @@ from .market_data import (
     DEFAULT_BENCHMARK_CODE,
     fetch_market_series,
     load_market_data_config,
+    market_data_provider_order,
+    market_provider_health,
     search_asset_in_text,
+    normalize_asset_identity,
+    build_asset_text_resolver,
 )
 
 
-EXTRACTOR_VERSION = "contact-score-v1"
-SCORING_VERSION = "contact-score-calibrated-v2"
+EXTRACTOR_VERSION = "contact-score-evidence-v4"
+SCORING_VERSION = "contact-score-evidence-v3"
 DEFAULT_HORIZON_FLAGS = {"1m": True, "3m": True, "1y": True}
 HORIZON_DAYS = {"1m": 30, "3m": 90, "1y": 365}
 DEFAULT_BENCHMARK = DEFAULT_BENCHMARK_CODE
@@ -60,7 +66,27 @@ INDEX_ALIASES = {
     "中证500": "sh000905",
     "科创50": "sh000688",
     "上证50": "sh000016",
+    "中证1000": "sh000852",
+    "北证50": "bj899050",
 }
+
+BENCHMARK_LABELS = {
+    "sh000300": "沪深300",
+    "sh000001": "上证指数",
+    "sz399001": "深证成指",
+    "sz399006": "创业板指",
+    "sh000688": "科创50",
+    "sh000905": "中证500",
+    "sh000852": "中证1000",
+    "bj899050": "北证50",
+}
+
+STOCK_BENCHMARK_RULES = (
+    (("688",), "sh000688"),
+    (("300", "301", "302"), "sz399006"),
+    (("8", "4"), "bj899050"),
+    (("000", "001", "002", "003"), "sz399001"),
+)
 
 INDUSTRY_PROXY_CODES = {
     "半导体": "512480",
@@ -127,6 +153,8 @@ SERVICE_VALUE_WEIGHT = 0.28
 DEFAULT_SERVICE_VALUE_SCORE = 50.0
 HIT_RATE_PRIOR_STRENGTH = 4.0
 HIT_RATE_PRIOR = 0.5
+AUTO_FOCUS_RECENT_DAYS = 21
+AUTO_FOCUS_MAX_CONTACTS = 120
 
 
 def _clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
@@ -209,6 +237,12 @@ def _is_sales_forward_payload(payload: dict[str, Any], text: str) -> bool:
 
 
 def _find_direction(text: str) -> str | None:
+    text = re.split(r"风险提示[：:]|免责声明", text, maxsplit=1)[0]
+    explicit = re.search(r"不看好|看空|建议回避|建议减仓|做空|看好|推荐|建议加仓|建议关注|建议配置|做多|增配", text)
+    if explicit:
+        return "bearish" if explicit.group() in {"不看好", "看空", "建议回避", "建议减仓", "做空"} else "bullish"
+    if not re.search(r"未来|预计|有望|预期|判断|可能|将|仍|回避|谨慎|警惕", text):
+        return None  # Market recaps are observations, not prospective calls.
     for pattern in BULLISH_PATTERNS:
         if re.search(pattern, text, re.IGNORECASE):
             return "bullish"
@@ -218,13 +252,20 @@ def _find_direction(text: str) -> str | None:
     return None
 
 
+def _normalize_event_direction(direction: str | None) -> str:
+    value = str(direction or "").strip().lower()
+    if value in {"bullish", "bearish"}:
+        return value
+    return "neutral"
+
+
 def _detect_horizon_flags(text: str) -> dict[str, bool]:
     flags = dict(DEFAULT_HORIZON_FLAGS)
-    if re.search(r"(一个月|1个月|1月|短期)", text):
+    if re.search(r"(一个月|1个月|短期)", text):
         flags = {"1m": True, "3m": False, "1y": False}
-    elif re.search(r"(三个月|3个月|3月|一个季度)", text):
+    elif re.search(r"(三个月|3个月|一个季度)", text):
         flags = {"1m": False, "3m": True, "1y": False}
-    elif re.search(r"(半年|六个月|6个月|一年|1年|长期)", text):
+    elif re.search(r"(一年|1年|长期)", text):
         flags = {"1m": False, "3m": False, "1y": True}
     return flags
 
@@ -240,6 +281,35 @@ def _resolve_industry(entities: dict[str, list[str]]) -> tuple[str | None, str |
     for industry in entities.get("industries") or []:
         return INDUSTRY_PROXY_CODES.get(industry), industry
     return None, None
+
+
+def _select_benchmark_code(
+    asset_type: str | None,
+    asset_code: str | None,
+    text: str,
+) -> str | None:
+    if str(asset_type or "").lower() == "index":
+        return None  # An index view is judged on direction, not against itself.
+    explicit_code, _ = _resolve_index(text)
+    if explicit_code:
+        return explicit_code
+    kind = str(asset_type or "").strip().lower()
+    code = re.sub(r"\D", "", str(asset_code or ""))
+    if kind == "index":
+        return None
+    if kind == "stock":
+        for prefixes, benchmark_code in STOCK_BENCHMARK_RULES:
+            if code.startswith(prefixes):
+                return benchmark_code
+        return DEFAULT_BENCHMARK
+    if kind in {"industry", "etf", "fund"}:
+        return DEFAULT_BENCHMARK
+    return DEFAULT_BENCHMARK
+
+
+def _benchmark_label(code: str | None) -> str:
+    value = str(code or "").strip()
+    return BENCHMARK_LABELS.get(value, value or "无基准")
 
 
 def _find_six_digit_codes(text: str) -> list[str]:
@@ -267,11 +337,18 @@ def _resolve_asset_from_text(
     entities: dict[str, list[str]],
     asset_lookup_resolver: Callable[[str], dict[str, Any] | None] | None = None,
 ) -> tuple[str | None, str | None, str | None]:
+    # A named security is stronger evidence than a date, meeting ID or arbitrary 6 digits.
+    if asset_lookup_resolver:
+        matched = asset_lookup_resolver(text)
+        if matched and matched.get("asset_type") != "index":
+            return matched["asset_type"], matched["asset_code"], matched["asset_name"]
     a_codes = entities.get("a") or []
     if a_codes:
         return "stock", str(a_codes[0]), str(a_codes[0])
 
-    generic_codes = _find_six_digit_codes(text)
+    generic_codes = [code for code in _find_six_digit_codes(text)
+                     if normalize_asset_identity("stock", code).get("exchange")
+                     or code.startswith(ETF_PREFIXES)]
     if generic_codes:
         first_code = generic_codes[0]
         if _looks_like_fund_or_etf(text, first_code):
@@ -314,7 +391,7 @@ def _guess_confidence(text: str, direction: str | None) -> float:
 def _derive_event_kind(text: str, direction: str | None) -> str:
     kind = _classify_contact_event_kind(text)
     if kind == "risk_alert":
-        return "risk_alert"
+        return "risk_alert" if direction == "bearish" else "price_call"
     if kind in {"stock_pitch", "viewpoint_share"} and direction:
         return "price_call"
     if kind in {"roadshow_invite", "strategy_exchange"}:
@@ -406,7 +483,8 @@ def _dedupe_evaluation_rows(rows: Iterable[dict[str, Any]]) -> list[dict[str, An
         event_kind = str(row.get("event_kind") or "")
         key = (cluster_id, horizon_code, event_kind)
         current = deduped.get(key)
-        if not current or float(row.get("event_score") or 0.0) >= float(current.get("event_score") or 0.0):
+        # Keep the earliest recommendation in each cluster, never cherry-pick its best return.
+        if not current or str(row.get("source_time") or "9999") < str(current.get("source_time") or "9999"):
             deduped[key] = row
     return list(deduped.values())
 
@@ -585,6 +663,52 @@ def _build_case_card(row: dict[str, Any], case_type: str) -> dict[str, Any]:
     }
 
 
+def _build_verification_schedule(
+    event: ContactPredictionEvent,
+    *,
+    as_of: datetime | None = None,
+) -> dict[str, Any]:
+    as_of = as_of or datetime.utcnow()
+    source_time = event.source_time
+    flags = event.horizon_flags if isinstance(event.horizon_flags, dict) else DEFAULT_HORIZON_FLAGS
+    evaluated_horizons = {str(row.horizon_code or "") for row in event.evaluations}
+    rows: list[dict[str, Any]] = []
+    for horizon_code, days in HORIZON_DAYS.items():
+        if not flags.get(horizon_code):
+            continue
+        due_at = source_time + timedelta(days=days) if source_time else None
+        remaining_days = (due_at.date() - as_of.date()).days if due_at else None
+        is_evaluated = horizon_code in evaluated_horizons
+        rows.append(
+            {
+                "horizon_code": horizon_code,
+                "due_at": due_at.isoformat() if due_at else None,
+                "remaining_days": remaining_days,
+                "is_due": bool(remaining_days is not None and remaining_days <= 0),
+                "is_evaluated": is_evaluated,
+                "status": "evaluated" if is_evaluated else "due" if remaining_days is not None and remaining_days <= 0 else "pending",
+            }
+        )
+    pending_rows = [row for row in rows if not row["is_evaluated"]]
+    next_row = None
+    if pending_rows:
+        next_row = sorted(
+            pending_rows,
+            key=lambda row: (
+                not bool(row.get("is_due")),
+                row["remaining_days"] is None,
+                abs(int(row["remaining_days"] or 0)),
+                str(row["horizon_code"]),
+            ),
+        )[0]
+    return {
+        "items": rows,
+        "next": next_row,
+        "benchmark_code": event.benchmark_code,
+        "benchmark_name": _benchmark_label(event.benchmark_code),
+    }
+
+
 def _build_return_distribution(rows: list[dict[str, Any]]) -> dict[str, Any]:
     excess_values = [float(row.get("excess_return") or 0.0) for row in rows if row.get("excess_return") is not None]
     positive = [value for value in excess_values if value > 0]
@@ -599,6 +723,105 @@ def _build_return_distribution(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "avg_excess_return": round(avg_excess, 6),
         "max_excess_return": round(max(excess_values), 6) if excess_values else None,
         "min_excess_return": round(min(excess_values), 6) if excess_values else None,
+    }
+
+
+def _score_tone(value: float, *, good: float = 65.0, bad: float = 45.0) -> str:
+    if value >= good:
+        return "good"
+    if value < bad:
+        return "bad"
+    return "neutral"
+
+
+def _build_score_explanation(
+    score: dict[str, Any],
+    *,
+    asset_summary: list[dict[str, Any]],
+    top_hits: list[dict[str, Any]],
+    top_misses: list[dict[str, Any]],
+    pending_predictions: list[dict[str, Any]],
+    return_distribution: dict[str, Any],
+) -> dict[str, Any]:
+    final_rating = float(score.get("final_rating") or 0.0)
+    accuracy_score = float(score.get("accuracy_score") or 0.0)
+    service_value_score = float(score.get("service_value_score") or 0.0)
+    sample_size = int(score.get("sample_size") or 0)
+    hit_rate = float(score.get("hit_rate_overall") or 0.0)
+    avg_excess = float(score.get("excess_mean") or 0.0)
+    top_asset = asset_summary[0] if asset_summary else {}
+    best_hit = top_hits[0] if top_hits else {}
+    worst_miss = top_misses[0] if top_misses else {}
+    pending_count = len(pending_predictions)
+
+    drivers = [
+        {
+            "label": "准确度",
+            "value": round(accuracy_score, 1),
+            "tone": _score_tone(accuracy_score),
+            "detail": f"已验证样本 {sample_size} 条，方向命中率 {hit_rate * 100:.1f}%；准确度还会综合超额收益、风险提示和一致性",
+        },
+        {
+            "label": "超额收益",
+            "value": round(avg_excess * 100.0, 1),
+            "suffix": "%",
+            "tone": "good" if avg_excess > 0.03 else "bad" if avg_excess < -0.03 else "neutral",
+            "detail": f"收益样本 {int(return_distribution.get('sample_count') or 0)} 条，平均超额 {avg_excess * 100:.1f}%",
+        },
+        {
+            "label": "业务价值",
+            "value": round(service_value_score, 1),
+            "tone": _score_tone(service_value_score),
+            "detail": "综合路演、交流、时效、覆盖深度和信号纯度",
+        },
+        {
+            "label": "待验证",
+            "value": pending_count,
+            "tone": "bad" if pending_count >= 12 else "neutral" if pending_count else "good",
+            "detail": "近期新观点尚未到达 1M/3M/1Y 验证窗口",
+        },
+    ]
+    strengths: list[str] = []
+    risks: list[str] = []
+    next_steps: list[str] = []
+
+    if top_asset:
+        strengths.append(f"主线标的集中在 {top_asset.get('asset_name') or top_asset.get('asset_code')}")
+    if best_hit:
+        strengths.append(
+            f"最佳案例：{best_hit.get('asset_name') or best_hit.get('asset_code') or '观点'} "
+            f"{float(best_hit.get('event_score') or 0):.0f}分"
+        )
+    if service_value_score >= 65:
+        strengths.append("交流和路演服务价值较高")
+    if worst_miss:
+        risks.append(
+            f"失误案例：{worst_miss.get('asset_name') or worst_miss.get('asset_code') or '观点'} "
+            f"{float(worst_miss.get('event_score') or 0):.0f}分"
+        )
+    if sample_size < 8:
+        risks.append("已验证样本偏少，分数仍需更多周期确认")
+    if pending_count:
+        due_count = sum(1 for item in pending_predictions if (item.get("next_verification") or {}).get("is_due"))
+        if due_count:
+            next_steps.append(f"优先补跑 {due_count} 条已到期观点验证")
+        else:
+            next_steps.append(f"继续观察 {pending_count} 条待验证观点")
+    if int((score.get("evidence") or {}).get("verified_samples") or 0) < 24:
+        next_steps.append("独立样本有限，继续收集证据，不据此调整联系人权重")
+    elif accuracy_score >= 65:
+        next_steps.append("适合保持重点跟踪")
+    elif accuracy_score < 40:
+        next_steps.append("建议降低权重，仅保留少量样本观察")
+    else:
+        next_steps.append("维持观察，等待更多命中样本")
+
+    return {
+        "headline": f"综合分 {final_rating:.1f}，由准确度 {accuracy_score:.1f} 与业务价值 {service_value_score:.1f} 共同驱动",
+        "drivers": drivers,
+        "strengths": strengths[:4],
+        "risks": risks[:4],
+        "next_steps": next_steps[:4],
     }
 
 
@@ -626,27 +849,22 @@ def extract_prediction_events(
         if focus_contact_ids and contact_id not in focus_contact_ids:
             continue
         text = _extract_text(message)
-        if len(text) < 8:
+        if len(text) < 8 or text.startswith(("<?xml", "<msg", "<img", "<appmsg")):
             continue
         if _is_sales_forward_payload(message, text):
             continue
         direction = _find_direction(text)
+        event_direction = _normalize_event_direction(direction)
         event_kind_hint = _classify_contact_event_kind(text)
         if not direction and event_kind_hint not in {"roadshow_invite", "strategy_exchange"}:
             continue
 
         entities = _detect_entities(text)
         asset_type, asset_code, asset_name = _resolve_asset_from_text(text, entities, asset_lookup_resolver=asset_lookup_resolver)
-        benchmark_code = None
-
         if not asset_type:
             continue
 
-        if asset_type == "stock":
-            idx_code, _ = _resolve_index(text)
-            benchmark_code = idx_code or DEFAULT_BENCHMARK
-        elif asset_type in {"industry", "etf", "fund"}:
-            benchmark_code = DEFAULT_BENCHMARK
+        benchmark_code = _select_benchmark_code(asset_type, asset_code, text)
 
         event = {
             "contact_id": contact_id,
@@ -658,7 +876,7 @@ def extract_prediction_events(
             "asset_name": asset_name,
             "benchmark_code": benchmark_code,
             "topic": asset_name or asset_code,
-            "direction": direction,
+            "direction": event_direction,
             "confidence": _guess_confidence(text, direction),
             "horizon_flags": _detect_horizon_flags(text),
             "raw_text": text,
@@ -674,7 +892,7 @@ def extract_prediction_events(
         event["event_cluster_id"] = _build_cluster_id(
             contact_id,
             str(event["topic_key"] or ""),
-            direction,
+            event_direction,
             str(event["event_kind"] or ""),
             event.get("source_time"),
             event.get("horizon_flags"),
@@ -713,7 +931,7 @@ def _price_on_or_after(records: list[dict[str, Any]], target: date) -> float | N
     for dt, close in dated:
         if dt >= target:
             return close
-    return dated[-1][1]
+    return None
 
 
 def _compute_event_score(direction: str, direction_hit: bool, excess_return: float | None, absolute_return: float | None) -> float:
@@ -762,7 +980,7 @@ def _verification_strength(
 
 
 def _classify_contact_event_kind(text: str) -> str:
-    s = str(text or "")
+    s = re.split(r"风险提示[：:]|免责声明", str(text or ""), maxsplit=1)[0]
     if re.search(r"(路演|电话会|交流会|会议|参会|报名|预约|webinar|meeting)", s, re.IGNORECASE):
         return "roadshow_invite"
     if re.search(r"(风险|谨慎|警惕|回避|压力|利空|不确定|担忧|下跌)", s, re.IGNORECASE):
@@ -799,6 +1017,22 @@ def _build_contact_sub_scores(
     ) -> dict[str, Any]:
         matched = [event for kind in kinds for event in kind_to_events.get(kind, [])]
         samples = len(matched)
+        if any(kind in {"stock_pitch", "risk_alert"} for kind in kinds):
+            rows = _dedupe_evaluation_rows([
+                {"event_id": event.id, "cluster_id": event.event_cluster_id, "source_time": event.source_time,
+                 "horizon_code": ev.horizon_code, "direction_hit": ev.direction_hit, "event_score": ev.event_score}
+                for event in matched for ev in event.evaluations
+            ])
+            recent = [r for r in rows if r["source_time"] and r["source_time"] >= recent_cutoff]
+            def average(items):
+                return round(sum(float(r["event_score"]) for r in items) / len(items), 2) if items else None
+            score, recent_score = average(rows), average(recent)
+            return {"score": score, "samples": samples, "evaluated_samples": len(rows),
+                    "hit_samples": sum(bool(r["direction_hit"]) for r in rows),
+                    "miss_samples": sum(not r["direction_hit"] for r in rows),
+                    "recent_90d_score": recent_score, "recent_90d_samples": len(recent),
+                    "delta_recent_90d": round(recent_score - score, 2) if recent_score is not None and score is not None else None,
+                    "basis": "market_evidence"}
         hit_rows = [row for row in recent_hits if row.get("event_kind") in kinds]
         miss_rows = [row for row in recent_misses if row.get("event_kind") in kinds]
         scored_rows = hit_rows + miss_rows
@@ -864,6 +1098,9 @@ def _build_contact_sub_scores(
 
 
 def _build_contact_action_recommendation(sub_scores: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    if not any(sub_scores.get(key, {}).get("evaluated_samples") for key in ("recommendation_accuracy", "risk_alert_effectiveness")):
+        return {"action": "等待证据", "reason": "没有已验证投资观点，不据此降权或评价准确度", "flags": [],
+                "avg_score": None, "avg_recent_90d_score": None, "max_drop": 0, "max_rise": 0}
     values = [float(item.get("score") or 0.0) for item in sub_scores.values()]
     recent_values = [float(item.get("recent_90d_score") or 0.0) for item in sub_scores.values()]
     deltas = [float(item.get("delta_recent_90d") or 0.0) for item in sub_scores.values()]
@@ -926,17 +1163,23 @@ def evaluate_prediction_event(
         return []
     fetcher = price_fetcher or fetch_market_series
     start = src_time - timedelta(days=5)
-    end = max(as_of, src_time + timedelta(days=max(HORIZON_DAYS.values()) + 5))
-    asset_series = fetcher(str(event.get("asset_type") or ""), asset_code, start, end)
-    entry_price = _price_on_or_after(asset_series, src_time.date())
-    if entry_price in (None, 0):
+    end = as_of
+    fetched_asset = fetcher(str(event.get("asset_type") or ""), asset_code, start, end)
+    asset_series = [row for row in fetched_asset if str(row.get("date") or "")[:10] <= as_of.date().isoformat()]
+    entry_day = src_time.date() + timedelta(days=int(src_time.hour >= 15))
+    entry_row = next((row for row in sorted(asset_series, key=lambda row: row["date"])
+                      if row["date"][:10] >= entry_day.isoformat()), None)
+    entry_price = float(entry_row["close"]) if entry_row else None
+    if entry_price in (None, 0) or (date.fromisoformat(entry_row["date"][:10]) - entry_day).days > 15:
         return []
 
     benchmark_code = str(event.get("benchmark_code") or "").strip() or None
     benchmark_series = fetcher("index", benchmark_code, start, end) if benchmark_code else []
-    benchmark_entry = _price_on_or_after(benchmark_series, src_time.date()) if benchmark_code else None
+    benchmark_by_date = {row["date"][:10]: float(row["close"]) for row in benchmark_series}
+    benchmark_entry = benchmark_by_date.get(entry_row["date"][:10]) if benchmark_code else None
+    if benchmark_code and not benchmark_entry:
+        return []
     event_kind = str(event.get("event_kind") or "")
-    max_drawdown = _max_drawdown_from_records(asset_series)
 
     out: list[dict[str, Any]] = []
     for horizon_code, days in HORIZON_DAYS.items():
@@ -945,13 +1188,17 @@ def evaluate_prediction_event(
         target_dt = src_time + timedelta(days=days)
         if as_of < target_dt:
             continue
-        evaluation_price = _price_on_or_after(asset_series, target_dt.date())
-        if evaluation_price in (None, 0):
+        evaluation_row = next((row for row in sorted(asset_series, key=lambda row: row["date"])
+                               if row["date"][:10] >= target_dt.date().isoformat()), None)
+        evaluation_price = float(evaluation_row["close"]) if evaluation_row else None
+        if evaluation_price in (None, 0) or (date.fromisoformat(evaluation_row["date"][:10]) - target_dt.date()).days > 15:
             continue
         absolute_return = float(evaluation_price / entry_price - 1.0)
-        benchmark_eval = _price_on_or_after(benchmark_series, target_dt.date()) if benchmark_series else None
+        benchmark_eval = benchmark_by_date.get(evaluation_row["date"][:10]) if benchmark_code else None
+        if benchmark_code and not benchmark_eval:
+            continue
         benchmark_return = None
-        excess_return = absolute_return
+        excess_return = None
         if benchmark_entry not in (None, 0) and benchmark_eval not in (None, 0):
             benchmark_return = float(benchmark_eval / benchmark_entry - 1.0)
             excess_return = float(absolute_return - benchmark_return)
@@ -961,9 +1208,17 @@ def evaluate_prediction_event(
         meta = {
             "benchmark_return": round(benchmark_return, 6) if benchmark_return is not None else None,
             "verification_method": "asset_vs_benchmark" if benchmark_return is not None else "absolute_direction",
+            "entry_date": entry_row["date"][:10],
+            "evaluation_date": evaluation_row["date"][:10],
+            "target_date": target_dt.date().isoformat(),
+            "entry_rule": "当日收盘；15点后观点顺延下一交易日",
+            "asset_data": getattr(fetched_asset, "provenance", {}),
+            "benchmark_data": getattr(benchmark_series, "provenance", {}),
         }
         meta.update(_verification_strength(direction, absolute_return, excess_return, horizon_code, event_kind))
         if event_kind == "risk_alert":
+            max_drawdown = _max_drawdown_from_records([row for row in asset_series
+                if entry_row["date"] <= row["date"] <= evaluation_row["date"]])
             direction_hit = bool((absolute_return <= 0) or ((max_drawdown or 0.0) <= -0.15))
             meta["risk_rule"] = "drawdown_or_negative_return"
             meta["max_drawdown"] = max_drawdown
@@ -1049,18 +1304,22 @@ def summarize_contact_score(
 
     excess_values = [float(item.get("excess_return") or 0.0) for item in rows]
     excess_mean = sum(excess_values) / len(excess_values)
-    score_values = [float(item.get("event_score") or 50.0) for item in rows]
+    score_values = [float(item["event_score"] if item.get("event_score") is not None else 50.0) for item in rows]
     volatility = pstdev(score_values) if len(score_values) > 1 else 0.0
     stability_score = round(_clamp(100.0 - volatility * 1.6), 2)
-    frequency_penalty = round(max(0.0, (sample_size - 12) * 0.45) + max(0.0, (sample_size - 36) * 0.35), 2)
+    frequency_penalty = 0.0  # Repeated signals are deduplicated; more valid history is not a penalty.
     risk_rows = [row for row in rows if str(row.get("event_kind") or "") == "risk_alert"]
     risk_hits = [1.0 if bool(item.get("direction_hit")) else 0.0 for item in risk_rows]
 
     direction_accuracy_score = round(_clamp(hit_rate_overall * 100.0), 2)
-    excess_return_score = round(_clamp(50.0 + 50.0 * max(-1.0, min(1.0, excess_mean / 0.10))), 2)
+    signed_excess = [float(item["excess_return"]) * (-1 if item.get("direction") == "bearish" else 1)
+                    for item in rows if item.get("excess_return") is not None]
+    excess_return_score = round(_clamp(50.0 + 50.0 * max(-1.0, min(1.0,
+        (sum(signed_excess) / len(signed_excess) if signed_excess else 0.0) / 0.10))), 2)
     risk_alert_score = round(_clamp(_bayesian_rate(sum(risk_hits), len(risk_hits)) * 100.0), 2) if risk_hits else 50.0
     consistency_score = stability_score
-    evidence_confidence = _sample_confidence(sample_size, mature_sample=24)
+    independent_samples = len({str(row.get("cluster_id") or row.get("event_id") or i) for i, row in enumerate(rows)})
+    evidence_confidence = _sample_confidence(independent_samples, mature_sample=24)
     raw_accuracy_score = _clamp(
         direction_accuracy_score * 0.48
         + excess_return_score * 0.28
@@ -1118,6 +1377,8 @@ def resolve_manual_rating(contact: Contact) -> float:
 
 def resolve_auto_rating(contact: Contact) -> float | None:
     stats = resolve_contact_stats(contact)
+    if not int(stats.get("sample_size") or 0):
+        return None
     try:
         value = stats.get("auto_rating")
         return None if value is None else float(value)
@@ -1186,7 +1447,48 @@ def get_focus_contact_ids(db: Session) -> set[str]:
     if rows:
         return {str(row.contact_id) for row in rows if row.contact_id}
     contacts = db.execute(select(Contact)).scalars().all()
-    return {c.id for c in contacts if c.id and is_focus_contact(c)}
+    ids = {
+        c.id
+        for c in contacts
+        if c.id and bool(resolve_contact_stats(c).get("auto_focus"))
+    }
+    if ids:
+        return ids
+
+    cutoff = datetime.utcnow() - timedelta(days=AUTO_FOCUS_RECENT_DAYS)
+    recent_rows = db.execute(
+        select(
+            Message.sender_id,
+            func.max(Message.sender_name),
+            func.count(Message.id).label("message_count"),
+            func.max(Message.timestamp).label("last_message_at"),
+        )
+        .where(Message.sender_id.is_not(None))
+        .where(Message.timestamp >= cutoff)
+        .group_by(Message.sender_id)
+        .order_by(func.count(Message.id).desc())
+        .limit(AUTO_FOCUS_MAX_CONTACTS * 3)
+    ).all()
+    selected: set[str] = set()
+    for sender_id, sender_name, message_count, _last_message_at in recent_rows:
+        cid = str(sender_id or "").strip()
+        if not cid or cid.endswith("@chatroom") or cid.startswith("gh_") or cid in {"weixin", "filehelper"}:
+            continue
+        contact = db.get(Contact, cid)
+        identity = {
+            "name": contact.name if contact else sender_name,
+            "alias": contact.alias if contact else None,
+            "labels": contact.labels if contact else None,
+        }
+        if is_sales_contact_payload(identity):
+            continue
+        score_hint = int(getattr(contact, "rating", 50) or 50) if contact else 50
+        if int(message_count or 0) < 3 and score_hint < 65:
+            continue
+        selected.add(cid)
+        if len(selected) >= AUTO_FOCUS_MAX_CONTACTS:
+            break
+    return selected
 
 
 def extract_prediction_events_to_db(
@@ -1202,7 +1504,11 @@ def extract_prediction_events_to_db(
         return {"contacts": 0, "messages": 0, "inserted": 0, "updated": 0}
     market_cfg = load_market_data_config(db)
 
-    query = select(Message).where(Message.sender_id.in_(list(focus_ids)))
+    query = select(Message).where(
+        Message.sender_id.in_(list(focus_ids)),
+        (Message.direction.is_(None) | (Message.direction != "out")),
+        (Message.type.is_(None) | Message.type.in_(["text", "link", "文本", "链接"])),
+    )
     if time_from:
         query = query.where(Message.timestamp >= time_from)
     if time_to:
@@ -1216,9 +1522,8 @@ def extract_prediction_events_to_db(
             "sender_name": row.sender_name,
             "timestamp": row.timestamp,
             "content_text": row.content_text,
-                "derived": row.derived,
-                "sender_name": row.sender_name,
-            }
+            "derived": row.derived,
+        }
         for row in rows
     ]
     contact_payloads = {
@@ -1237,17 +1542,25 @@ def extract_prediction_events_to_db(
     extracted = extract_prediction_events(
         messages,
         focus_contact_ids=focus_ids,
-        asset_lookup_resolver=lambda text: search_asset_in_text(text, market_cfg),
+        asset_lookup_resolver=build_asset_text_resolver(market_cfg),
     )
     existing_by_source = {
         int(item.source_message_id): item
         for item in db.execute(select(ContactPredictionEvent).where(ContactPredictionEvent.source_message_id.is_not(None))).scalars().all()
         if item.source_message_id is not None
     }
+    if force:
+        valid_sources = {item.get("source_message_id") for item in extracted}
+        scoped_sources = {row.id for row in rows}
+        for source_id, old_event in list(existing_by_source.items()):
+            if source_id in scoped_sources and source_id not in valid_sources:
+                db.delete(old_event)  # Derived event only; original chat messages are untouched.
+                existing_by_source.pop(source_id)
     inserted = 0
     updated = 0
     cluster_updates: dict[str, dict[str, Any]] = {}
     for payload in extracted:
+        payload["direction"] = _normalize_event_direction(payload.get("direction"))
         source_message_id = payload.get("source_message_id")
         row = existing_by_source.get(int(source_message_id)) if source_message_id is not None else None
         if row and not force:
@@ -1257,6 +1570,7 @@ def extract_prediction_events_to_db(
             db.add(row)
             inserted += 1
         else:
+            row.evaluations.clear()
             for key, value in payload.items():
                 setattr(row, key, value)
             db.add(row)
@@ -1323,6 +1637,7 @@ def backfill_prediction_event_metadata(
         topic_key = _derive_topic_key(event.asset_type, event.asset_code, event.asset_name, raw_text)
         signal_strength = round(float(event.signal_strength or event.confidence or _guess_confidence(raw_text, event.direction)), 4)
         source_type = str(event.source_type or "wechat")
+        benchmark_code = _select_benchmark_code(event.asset_type, event.asset_code, raw_text)
         cluster_id = _build_cluster_id(
             str(event.contact_id or ""),
             topic_key,
@@ -1347,6 +1662,9 @@ def backfill_prediction_event_metadata(
             changed = True
         if event.source_type != source_type:
             event.source_type = source_type
+            changed = True
+        if event.benchmark_code != benchmark_code:
+            event.benchmark_code = benchmark_code
             changed = True
         if event.event_cluster_id != cluster_id:
             event.event_cluster_id = cluster_id
@@ -1396,6 +1714,8 @@ def evaluate_prediction_events_to_db(
     *,
     contact_ids: set[str] | None = None,
     as_of: datetime | None = None,
+    progress: Callable | None = None,
+    direct_history: bool = False,
 ) -> dict[str, Any]:
     as_of = as_of or datetime.utcnow()
     query = select(ContactPredictionEvent)
@@ -1403,6 +1723,16 @@ def evaluate_prediction_events_to_db(
         query = query.where(ContactPredictionEvent.contact_id.in_(list(contact_ids)))
     events = db.execute(query.order_by(ContactPredictionEvent.source_time.asc())).scalars().all()
     market_cfg = load_market_data_config(db)
+    if direct_history and market_cfg.get("provider_preference") == "a_stock_first":
+        # Probe the configured source chain once before a large import.
+        probe = fetch_market_series("index", "sh000300", as_of - timedelta(days=14), as_of, config={**market_cfg, "enable_akshare": False})
+        source = str(getattr(probe, "provenance", {}).get("source", ""))
+        if source.lower().startswith("tushare"):
+            market_cfg = {**market_cfg, "provider_preference": "tushare_only", "enable_akshare": False}
+        else:
+            market_cfg = {**market_cfg, "enable_akshare": False}
+        if progress:
+            progress(market_source=source or "行情暂不可用")
     eval_map: dict[tuple[int, str], ContactPredictionEvaluation] = {
         (row.event_id, row.horizon_code): row
         for row in db.execute(select(ContactPredictionEvaluation)).scalars().all()
@@ -1414,9 +1744,15 @@ def evaluate_prediction_events_to_db(
     if events:
         min_source_time = min((event.source_time for event in events if event.source_time), default=as_of) or as_of
         global_start = min_source_time - timedelta(days=5)
-        global_end = as_of + timedelta(days=5)
+        global_end = as_of
         for event in events:
             if not event.source_time or not event.asset_code:
+                continue
+            raw_text = str(event.normalized_text or event.raw_text or "")
+            event_kind = str(event.event_kind or _derive_event_kind(raw_text, event.direction) or "")
+            if event.is_actionable is False:
+                continue
+            if event.is_actionable is None and not _is_actionable_event(event_kind, event.direction, raw_text):
                 continue
             flags = event.horizon_flags or DEFAULT_HORIZON_FLAGS
             if not any(flags.get(code) and as_of >= (event.source_time + timedelta(days=days)) for code, days in HORIZON_DAYS.items()):
@@ -1426,10 +1762,27 @@ def evaluate_prediction_events_to_db(
             if event.benchmark_code:
                 series_keys.add(("index", event.benchmark_code))
 
+        def fetch_history(asset_type, asset_code):
+            cache = Path("data/market-history") / f"{asset_type}-{asset_code}-{global_start:%Y%m%d}-{global_end:%Y%m%d}.json"
+            if cache.exists() and datetime.now().timestamp() - cache.stat().st_mtime < 3600:
+                from .market_data import MarketSeries
+                stored = json.loads(cache.read_text())
+                result = MarketSeries(stored["rows"], source=stored["provenance"]["source"], adjustment=stored["provenance"]["adjustment"])
+                result.provenance = stored["provenance"]
+                return result
+            result = fetch_market_series(asset_type, asset_code, global_start, global_end, config=market_cfg)
+            if result:
+                cache.parent.mkdir(parents=True, exist_ok=True)
+                info = getattr(result, "provenance", {})
+                cache.write_text(json.dumps({"rows": result, "provenance": info or {"source": "unknown", "adjustment": "unknown"}}))
+            return result
+
         if series_keys:
-            with ThreadPoolExecutor(max_workers=min(8, max(1, len(series_keys)))) as executor:
+            # Tencent permits parallel reads; keep fallback providers serial.
+            workers = 4 if direct_history and not market_cfg.get("enable_akshare") else 1
+            with ThreadPoolExecutor(max_workers=workers) as executor:
                 future_map = {
-                    executor.submit(fetch_market_series, asset_type, asset_code, global_start, global_end, config=market_cfg): (asset_type, asset_code)
+                    executor.submit(fetch_history, asset_type, asset_code): (asset_type, asset_code)
                     for asset_type, asset_code in series_keys
                 }
                 for future in as_completed(future_map):
@@ -1438,6 +1791,8 @@ def evaluate_prediction_events_to_db(
                         series_cache[key] = future.result()
                     except Exception:
                         series_cache[key] = []
+                    if progress and (len(series_cache) % 20 == 0 or len(series_cache) == len(series_keys)):
+                        progress(assets_done=len(series_cache), assets_total=len(series_keys))
 
     def cached_fetcher(asset_type: str, asset_code: str | None, start_date: datetime, end_date: datetime) -> list[dict[str, Any]]:
         key = (asset_type, asset_code)
@@ -1460,6 +1815,9 @@ def evaluate_prediction_events_to_db(
         }
         results = evaluate_prediction_event(payload, as_of=as_of, price_fetcher=cached_fetcher)
         if not results:
+            event.status = "data_missing"
+            event.meta = {**(event.meta or {}), "verification_issue": "标的或基准缺少同期交易日价格", "checked_at": as_of.isoformat()}
+            db.add(event)
             continue
         event.status = "evaluated"
         for item in results:
@@ -1487,7 +1845,8 @@ def evaluate_prediction_events_to_db(
             eval_map[key] = row
         db.add(event)
     db.commit()
-    return {"events": len(events), "evaluated": evaluated, "updated": updated}
+    return {"events": len(events), "matured_events": len(matured_events), "evaluated": evaluated, "updated": updated,
+            "data_missing": sum(e.status == "data_missing" for e in matured_events), "assets_requested": len(series_keys)}
 
 
 def recompute_contact_scores(db: Session, *, contact_ids: set[str] | None = None, as_of: datetime | None = None) -> dict[str, Any]:
@@ -1497,9 +1856,9 @@ def recompute_contact_scores(db: Session, *, contact_ids: set[str] | None = None
         contacts_query = contacts_query.where(Contact.id.in_(list(contact_ids)))
     contacts = db.execute(contacts_query).scalars().all()
     contact_id_set = {str(contact.id) for contact in contacts if getattr(contact, "id", None)}
-    evaluations = db.execute(select(ContactPredictionEvaluation)).scalars().all()
+    evaluations = db.execute(select(ContactPredictionEvaluation).options(selectinload(ContactPredictionEvaluation.event))).scalars().all()
     events = (
-        db.execute(select(ContactPredictionEvent).where(ContactPredictionEvent.contact_id.in_(list(contact_id_set)))).scalars().all()
+        db.execute(select(ContactPredictionEvent).options(selectinload(ContactPredictionEvent.evaluations)).where(ContactPredictionEvent.contact_id.in_(list(contact_id_set))).execution_options(populate_existing=True)).scalars().all()
         if contact_id_set
         else []
     )
@@ -1511,6 +1870,9 @@ def recompute_contact_scores(db: Session, *, contact_ids: set[str] | None = None
         evals_by_contact[str(event.contact_id)].append(
             {
                 "horizon_code": evaluation.horizon_code,
+                "event_id": event.id,
+                "source_time": event.source_time,
+                "direction": event.direction,
                 "direction_hit": evaluation.direction_hit,
                 "excess_return": evaluation.excess_return,
                 "event_score": evaluation.event_score,
@@ -1520,10 +1882,12 @@ def recompute_contact_scores(db: Session, *, contact_ids: set[str] | None = None
             }
         )
     events_by_contact: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    objects_by_contact = defaultdict(list)
     for event in events:
         cid = str(event.contact_id or "").strip()
         if not cid:
             continue
+        objects_by_contact[cid].append(event)
         events_by_contact[cid].append(
             {
                 "event_id": event.id,
@@ -1549,8 +1913,10 @@ def recompute_contact_scores(db: Session, *, contact_ids: set[str] | None = None
             as_of=as_of,
         )
         stats = resolve_contact_stats(contact)
+        evidence = _contact_evidence(objects_by_contact.get(contact.id, []), as_of)
         stats.update(
             {
+                "evidence": evidence,
                 "manual_rating": summary["manual_rating"],
                 "auto_rating": summary["auto_rating"],
                 "final_rating": summary["final_rating"],
@@ -1569,8 +1935,13 @@ def recompute_contact_scores(db: Session, *, contact_ids: set[str] | None = None
             }
         )
         contact.stats = stats
-        contact.rating = int(round(summary["final_rating"]))
+        if evidence["verified_samples"]:
+            contact.rating = int(round(summary["final_rating"]))
         db.add(contact)
+        if not evidence["verified_samples"]:
+            # Keep the legacy manual field, but never create a fictional performance snapshot.
+            updated += 1
+            continue
         db.add(
             ContactScoreSnapshot(
                 contact_id=contact.id,
@@ -1614,6 +1985,43 @@ def recompute_contact_scores(db: Session, *, contact_ids: set[str] | None = None
     return {"contacts": len(contacts), "updated": updated}
 
 
+def _contact_evidence(events, as_of):
+    actionable = [e for e in events if e.is_actionable is not False and e.direction in {"bullish", "bearish"}
+                  and _is_actionable_event(e.event_kind, e.direction, e.normalized_text or e.raw_text or "")]
+    clusters = {}
+    for event in sorted(actionable, key=lambda e: e.source_time or datetime.min):
+        clusters.setdefault(event.event_cluster_id or str(event.id), event)
+    independent = list(clusters.values())
+    matured = [e for e in independent if e.source_time and any(
+        (e.horizon_flags or DEFAULT_HORIZON_FLAGS).get(h) and e.source_time + timedelta(days=d) <= as_of
+        for h, d in HORIZON_DAYS.items())]
+    verified = [e for e in matured if e.evaluations]
+    n = len(verified)
+    status = "rated" if n >= 24 else "limited" if n else "pending" if actionable else "unrated"
+    return {"status": status, "verified_samples": n, "actionable_samples": len(independent),
+            "matured_samples": len(matured), "waiting_samples": len(independent) - len(matured),
+            "missing_samples": len(matured) - n,
+            "coverage": round(n / len(matured), 4) if matured else None,
+            "method": "自动抽取的观点回测，不等同于实际持仓或投资收益；同主题重复消息去重，至少24个独立样本才标为较充分。"}
+
+
+def _evidence_recommendation(score, evidence):
+    samples = evidence.get("verified_samples", 0)
+    value = score.get("accuracy_score")
+    if not samples:
+        action, reason = "等待证据", "没有已验证投资观点，不据此降权或评价准确度"
+    elif samples < 24:
+        action, reason = "继续观察", f"仅 {samples} 个独立样本，暂不作稳定能力判断"
+    elif value is not None and value >= 65:
+        action, reason = "重点跟踪", f"{samples} 个独立样本支持当前实证表现，仍需核对原始观点"
+    elif value is not None and value < 40:
+        action, reason = "谨慎使用", f"{samples} 个独立样本的历史验证偏弱，不自动调整联系人权重"
+    else:
+        action, reason = "维持观察", f"已有 {samples} 个独立样本，继续跟踪后续判断"
+    return {"action": action, "reason": reason, "flags": [], "avg_score": value if samples else None,
+            "avg_recent_90d_score": None, "max_drop": 0, "max_rise": 0}
+
+
 def run_full_scoring_cycle(
     db: Session,
     *,
@@ -1649,15 +2057,15 @@ def build_contact_scorecard(db: Session, contact_id: str, *, limit: int = 50) ->
     ).scalars().all()
     all_events = db.execute(
         select(ContactPredictionEvent)
+        .options(selectinload(ContactPredictionEvent.evaluations))
         .where(ContactPredictionEvent.contact_id == contact_id)
         .order_by(ContactPredictionEvent.source_time.desc())
     ).scalars().all()
-    events = db.execute(
-        select(ContactPredictionEvent)
-        .where(ContactPredictionEvent.contact_id == contact_id)
-        .order_by(ContactPredictionEvent.source_time.desc())
-        .limit(limit)
-    ).scalars().all()
+    latest_message_time = db.execute(
+        select(func.max(Message.timestamp)).where(Message.sender_id == contact_id)
+    ).scalar()
+    # Show validated history as well as fresh, not-yet-matured views.
+    events = sorted(all_events, key=lambda e: (bool(e.evaluations), e.source_time or datetime.min), reverse=True)[:limit]
 
     stats = resolve_contact_stats(contact)
     score_block = {
@@ -1700,6 +2108,11 @@ def build_contact_scorecard(db: Session, contact_id: str, *, limit: int = 50) ->
             },
         ),
     }
+    as_of = datetime.now()  # Message timestamps use local, naive Asia/Shanghai time.
+    evidence = _contact_evidence(all_events, as_of)
+    score_block["evidence"] = evidence
+    for key in ("auto_rating", "final_rating", "accuracy_score", "hit_rate_overall", "excess_mean"):
+        score_block[key] = stats.get(key, score_block.get(key)) if evidence["verified_samples"] else None
 
     prediction_rows = []
     for event in events:
@@ -1714,12 +2127,15 @@ def build_contact_scorecard(db: Session, contact_id: str, *, limit: int = 50) ->
                 "direction": event.direction,
                 "confidence": event.confidence,
                 "benchmark_code": event.benchmark_code,
+                "benchmark_name": _benchmark_label(event.benchmark_code),
                 "event_kind": event.event_kind,
                 "topic_key": event.topic_key,
                 "event_cluster_id": event.event_cluster_id,
+                "is_actionable": event.is_actionable,
                 "normalized_text": event.normalized_text,
                 "raw_text": event.raw_text,
                 "thesis_card": _build_thesis_card(event),
+                "verification_schedule": _build_verification_schedule(event, as_of=as_of),
                 "evaluations": [
                     {
                         "id": ev.id,
@@ -1731,6 +2147,9 @@ def build_contact_scorecard(db: Session, contact_id: str, *, limit: int = 50) ->
                         "evaluated_at": ev.evaluated_at.isoformat() if ev.evaluated_at else None,
                         "entry_price": ev.entry_price,
                         "evaluation_price": ev.evaluation_price,
+                        "benchmark_entry": ev.benchmark_entry,
+                        "benchmark_evaluation": ev.benchmark_evaluation,
+                        "meta": ev.meta or {},
                     }
                     for ev in sorted(event.evaluations, key=lambda x: x.horizon_code or "")
                 ],
@@ -1758,10 +2177,15 @@ def build_contact_scorecard(db: Session, contact_id: str, *, limit: int = 50) ->
             "asset_name": ev.asset_name or ev.asset_code or "未识别标的",
             "direction": ev.direction,
             "confidence": ev.confidence,
+            "source_message_id": ev.source_message_id,
+            "benchmark_code": ev.benchmark_code,
+            "benchmark_name": _benchmark_label(ev.benchmark_code),
             "normalized_text": ev.normalized_text or ev.raw_text or "",
             "event_kind": event_kind,
             "is_actionable": ev.is_actionable,
         }
+        payload["verification_schedule"] = _build_verification_schedule(ev, as_of=as_of)
+        payload["next_verification"] = payload["verification_schedule"].get("next")
         if evaluation is not None:
             payload.update(
                 {
@@ -1779,7 +2203,8 @@ def build_contact_scorecard(db: Session, contact_id: str, *, limit: int = 50) ->
         event_timeline.append(base_row)
         evals = sorted(ev.evaluations, key=lambda row: row.horizon_code or "")
         if not evals:
-            pending_predictions.append(base_row)
+            if ev.is_actionable is not False and ev.direction in {"bullish", "bearish"}:
+                pending_predictions.append(base_row)
             continue
         bucket = asset_buckets.setdefault(
             _asset_bucket_key(ev),
@@ -1876,11 +2301,47 @@ def build_contact_scorecard(db: Session, contact_id: str, *, limit: int = 50) ->
     bearish_count = sum(1 for ev in all_events if str(ev.direction or "") == "bearish")
     market_curve = None
     market_curves: list[dict[str, Any]] = []
-    curve_assets = [
-        item
-        for item in asset_summary
-        if str(item.get("asset_code") or "").strip() and str(item.get("asset_type") or "").strip()
-    ][:4]
+    market_curve_missing_assets: list[dict[str, Any]] = []
+    curve_assets: list[dict[str, Any]] = []
+    selected_curve_asset_keys: set[tuple[str, str]] = set()
+
+    # New recommendations need to be visible immediately, before they have waited
+    # long enough to receive a 1M/3M/1Y evaluation. De-duplicate repeated calls on
+    # the same asset, then use the historical high-score list to fill remaining slots.
+    for event in all_events:
+        asset_code = str(event.asset_code or "").strip()
+        asset_type = str(event.asset_type or "").strip()
+        if not asset_code or not asset_type or event.evaluations or event.is_actionable is False or event.direction not in {"bullish", "bearish"}:
+            continue
+        asset_key = (asset_type, asset_code)
+        if asset_key in selected_curve_asset_keys:
+            continue
+        selected_curve_asset_keys.add(asset_key)
+        curve_assets.append(
+            {
+                "asset_name": event.asset_name or asset_code,
+                "asset_code": asset_code,
+                "asset_type": asset_type,
+                "latest_source_time": event.source_time.isoformat() if event.source_time else None,
+                "is_pending": True,
+            }
+        )
+        if len(curve_assets) >= 4:
+            break
+
+    if len(curve_assets) < 4:
+        for item in asset_summary:
+            asset_code = str(item.get("asset_code") or "").strip()
+            asset_type = str(item.get("asset_type") or "").strip()
+            if not asset_code or not asset_type:
+                continue
+            asset_key = (asset_type, asset_code)
+            if asset_key in selected_curve_asset_keys:
+                continue
+            selected_curve_asset_keys.add(asset_key)
+            curve_assets.append({**item, "is_pending": False})
+            if len(curve_assets) >= 4:
+                break
     market_config = None
     if curve_assets:
         try:
@@ -1934,9 +2395,9 @@ def build_contact_scorecard(db: Session, contact_id: str, *, limit: int = 50) ->
         ]
         curve_start = min(
             (ev.source_time for ev in anchor_events if ev.source_time is not None),
-            default=datetime.utcnow() - timedelta(days=180),
+            default=datetime.now() - timedelta(days=180),
         ) - timedelta(days=10)
-        curve_end = datetime.utcnow()
+        curve_end = datetime.now()
         try:
             curve_items = fetch_market_series(
                 str(primary_asset.get("asset_type") or ""),
@@ -1948,6 +2409,28 @@ def build_contact_scorecard(db: Session, contact_id: str, *, limit: int = 50) ->
         except Exception:
             curve_items = []
         if curve_items:
+            latest_item = max(
+                (
+                    item
+                    for item in curve_items
+                    if str(item.get("date") or "").strip() and item.get("close") is not None
+                ),
+                key=lambda item: str(item.get("date") or ""),
+                default=None,
+            )
+            latest_market_date = str((latest_item or {}).get("date") or "")[:10] or None
+            latest_close = None
+            if latest_item is not None:
+                try:
+                    latest_close = float(latest_item.get("close"))
+                except (TypeError, ValueError):
+                    latest_close = None
+            market_date = _parse_record_date(latest_market_date or "")
+            data_age_days = max(0, (as_of.date() - market_date).days) if market_date else None
+            latest_recommendation_time = max(
+                (event.source_time for event in anchor_events if event.source_time is not None),
+                default=None,
+            )
             curve_payload = {
                 "asset_name": primary_asset.get("asset_name"),
                 "asset_code": primary_asset.get("asset_code"),
@@ -1955,10 +2438,34 @@ def build_contact_scorecard(db: Session, contact_id: str, *, limit: int = 50) ->
                 "count": len(curve_items),
                 "items": curve_items[-180:],
                 "anchor_points": _build_curve_anchor_points(anchor_events),
+                "latest_recommendation_time": latest_recommendation_time.isoformat() if latest_recommendation_time else None,
+                "is_pending": bool(primary_asset.get("is_pending")),
+                "latest_market_date": latest_market_date,
+                "latest_close": latest_close,
+                "data_age_days": data_age_days,
+                "provenance": getattr(curve_items, "provenance", {}),
             }
+            benchmark_code = next((e.benchmark_code for e in anchor_events if e.benchmark_code), None)
+            if benchmark_code:
+                benchmark_items = fetch_market_series("index", benchmark_code, curve_start, curve_end, config=market_config)
+                if benchmark_items:
+                    curve_payload["benchmark"] = {
+                        "asset_name": _benchmark_label(benchmark_code), "asset_code": benchmark_code,
+                        "asset_type": "index", "is_benchmark": True,
+                        "items": benchmark_items[-180:], "provenance": getattr(benchmark_items, "provenance", {}),
+                    }
             market_curves.append(curve_payload)
             if market_curve is None:
                 market_curve = curve_payload
+        else:
+            market_curve_missing_assets.append(
+                {
+                    "asset_name": primary_asset.get("asset_name"),
+                    "asset_code": primary_asset.get("asset_code"),
+                    "asset_type": primary_asset.get("asset_type"),
+                    "reason": "行情源未返回有效日线",
+                }
+            )
 
     compact_horizon_groups = {
         key: {
@@ -2034,8 +2541,20 @@ def build_contact_scorecard(db: Session, contact_id: str, *, limit: int = 50) ->
         reverse=True,
     )[:10]
     return_distribution = _build_return_distribution(recent_hits + recent_misses)
+    score_explanation = _build_score_explanation(
+        score_block,
+        asset_summary=asset_summary,
+        top_hits=top_hits,
+        top_misses=top_misses,
+        pending_predictions=pending_predictions,
+        return_distribution=return_distribution,
+    )
+    if not evidence["verified_samples"]:
+        score_explanation = {"headline": "尚无到期且行情完整的独立样本，暂不评分", "drivers": [], "cautions": [evidence["method"]]}
     sub_scores = _build_contact_sub_scores(all_events, recent_hits, recent_misses)
-    recommended_action = _build_contact_action_recommendation(sub_scores)
+    if evidence["verified_samples"]:
+        score_explanation["headline"] = f"实证评分 {float(score_block.get('accuracy_score') or 0):.1f}；方向命中48%、方向调整后的超额28%、风险提示12%、稳定性12%，小样本向50分收缩。行为价值不计入此实证分。"
+    recommended_action = _evidence_recommendation(score_block, evidence)
     cluster_topics_map: dict[str, dict[str, Any]] = {}
     for ev in all_events:
         cluster_id = str(ev.event_cluster_id or "").strip() or str(ev.id)
@@ -2070,42 +2589,6 @@ def build_contact_scorecard(db: Session, contact_id: str, *, limit: int = 50) ->
         )[:10]
     ]
 
-    try:
-        db.query(ContactScoringCase).filter(ContactScoringCase.contact_id == contact_id).delete()
-    except Exception:
-        pass
-    for row in top_hits[:3]:
-        db.add(
-            ContactScoringCase(
-                contact_id=contact_id,
-                case_type="hit",
-                title=str(row.get("topic_key") or row.get("asset_name") or row.get("asset_code") or "命中案例"),
-                summary=str(row.get("normalized_text") or ""),
-                source_message_id=row.get("source_message_id"),
-                topic_key=row.get("topic_key"),
-                asset_code=row.get("asset_code"),
-                horizon_code=row.get("horizon_code"),
-                score_impact=row.get("event_score"),
-                evidence_json=row,
-            )
-        )
-    for row in top_misses[:3]:
-        db.add(
-            ContactScoringCase(
-                contact_id=contact_id,
-                case_type="miss",
-                title=str(row.get("topic_key") or row.get("asset_name") or row.get("asset_code") or "失误案例"),
-                summary=str(row.get("normalized_text") or ""),
-                source_message_id=row.get("source_message_id"),
-                topic_key=row.get("topic_key"),
-                asset_code=row.get("asset_code"),
-                horizon_code=row.get("horizon_code"),
-                score_impact=row.get("event_score"),
-                evidence_json=row,
-            )
-        )
-    db.commit()
-
     return {
         "contact": {
             "id": contact.id,
@@ -2126,6 +2609,7 @@ def build_contact_scorecard(db: Session, contact_id: str, *, limit: int = 50) ->
             "horizon_event_groups": compact_horizon_groups,
             "asset_summary": asset_summary[:10],
             "sub_scores": sub_scores,
+            "score_explanation": score_explanation,
             "recommended_action": recommended_action,
             "recent_hits": top_hits,
             "recent_misses": top_misses,
@@ -2141,6 +2625,21 @@ def build_contact_scorecard(db: Session, contact_id: str, *, limit: int = 50) ->
         },
         "market_curve": market_curve,
         "market_curves": market_curves,
+        "market_data_status": {
+            "provider_order": market_data_provider_order(market_config),
+            "provider_health": market_provider_health(market_config),
+            "latest_message_time": latest_message_time.isoformat() if latest_message_time else None,
+            "latest_prediction_time": all_events[0].source_time.isoformat() if all_events and all_events[0].source_time else None,
+            "scoring_lag_days": (
+                max(0, (latest_message_time - all_events[0].source_time).days)
+                if latest_message_time and all_events and all_events[0].source_time
+                else None
+            ),
+            "curve_assets_requested": len(curve_assets),
+            "curve_assets_loaded": len(market_curves),
+            "missing_assets": market_curve_missing_assets,
+            "pending_not_in_score": len(pending_predictions),
+        },
         "timeline": [
             {
                 "as_of": row.as_of.isoformat() if row.as_of else None,
@@ -2195,6 +2694,7 @@ def build_contact_score_summaries(db: Session, contact_ids: Iterable[str]) -> di
 
     raw_events = db.execute(
         select(ContactPredictionEvent)
+        .options(selectinload(ContactPredictionEvent.evaluations))
         .where(ContactPredictionEvent.contact_id.in_(ids))
         .order_by(ContactPredictionEvent.source_time.desc())
     ).scalars().all()
@@ -2258,7 +2758,8 @@ def build_contact_score_summaries(db: Session, contact_ids: Iterable[str]) -> di
 
         event_evals = evals_by_event.get(int(event.id), [])
         if not event_evals:
-            summary["pending_predictions"] += 1
+            if event.is_actionable is not False and event.direction in {"bullish", "bearish"}:
+                summary["pending_predictions"] += 1
             continue
         for evaluation in event_evals:
             horizon_code = str(evaluation.horizon_code or "")
@@ -2304,12 +2805,12 @@ def build_contact_score_summaries(db: Session, contact_ids: Iterable[str]) -> di
             summary["top_asset_code"] = top_asset.get("asset_code")
             summary["top_asset_type"] = top_asset.get("asset_type")
         summary["sub_scores"] = _build_contact_sub_scores(events_by_contact.get(contact_id, []), [], [], as_of=datetime.utcnow())
-        action_payload = _build_contact_action_recommendation(summary["sub_scores"])
-        summary["recommended_action"] = action_payload
-        summary["warning_flags"] = action_payload.get("flags", [])
         contact_stats = resolve_contact_stats(contact) if contact else {}
-        summary["accuracy_score"] = float(contact_stats.get("accuracy_score", contact_stats.get("auto_rating", contact.rating if contact else 50)) or 50.0) if contact else 50.0
-        summary["service_value_score"] = float(contact_stats.get("service_value_score", 50.0) or 50.0) if contact else 50.0
+        summary["evidence"] = _contact_evidence(events_by_contact.get(contact_id, []), datetime.now())
+        summary["accuracy_score"] = contact_stats.get("accuracy_score") if summary["evidence"]["verified_samples"] else None
+        summary["recommended_action"] = _evidence_recommendation(summary, summary["evidence"])
+        summary["warning_flags"] = summary["recommended_action"]["flags"]
+        summary["service_value_score"] = contact_stats.get("service_value_score") if events_by_contact.get(contact_id) else None
         summary["watching"] = bool(watch_info.get("enabled"))
         summary["watch_status"] = watch_info.get("status")
         summary["watch_reason"] = watch_info.get("reason")

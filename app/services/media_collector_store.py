@@ -83,6 +83,10 @@ def list_hot_items(
                 "platform": plat_display,
                 "source_type": "hot",
                 "time": fetched_at,
+                "observed_at": data.get("observed_at") or fetched_at,
+                "published_at": "",
+                "_stale": bool(data.get("_stale")),
+                "cache_status": "stale" if data.get("_stale") else data.get("cache_status", "unknown"),
                 "title": it.get("title", ""),
                 "author": it.get("extra", {}).get("author", ""),
                 "url": it.get("url", ""),
@@ -166,10 +170,13 @@ def list_search_items(
             for it in item_list[:30]:
                 items.append({
                     "id": f"search_{kw}_{plat}_{it.get('rank', 0)}",
-                    "platform": plat,
+                    "platform": data.get("platform") or plat,
                     "source_type": "search",
-                    "keyword": kw,
+                    "keyword": data.get("keyword") or kw,
                     "time": fetched_at,
+                    "observed_at": fetched_at,
+                    "published_at": it.get("published_at", ""),
+                    "_stale": bool(data.get("_stale")),
                     "title": it.get("title", ""),
                     "author": it.get("extra", {}).get("author", ""),
                     "url": it.get("url", ""),
@@ -297,7 +304,7 @@ def get_collector_status() -> dict:
         status["hot"]["days"] = days[:7]
         if days:
             latest = hot_dir / days[0]
-            files = [f.name for f in latest.glob("*.json") if not f.name.startswith("_")]
+            files = [f.name for f in latest.glob("*.json") if not f.name.startswith(("_", "."))]
             status["hot"]["latest_day"] = days[0]
             status["hot"]["latest_files"] = files
 
@@ -314,7 +321,7 @@ def get_collector_status() -> dict:
         status["authors"]["days"] = days[:7]
         if days:
             latest = authors_dir / days[0]
-            files = [f.name for f in latest.glob("*.json") if not f.name.startswith("_")]
+            files = [f.name for f in latest.glob("*.json") if not f.name.startswith(("_", "."))]
             status["authors"]["latest_day"] = days[0]
             status["authors"]["authors_count"] = len(files)
 

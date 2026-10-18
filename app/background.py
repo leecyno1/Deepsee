@@ -1,23 +1,37 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
+import weakref
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+
 from fastapi import FastAPI
+
 from .config import settings
 from .db import SessionLocal
 from .services.sync_service import sync_from_chatlog
 from .services.email_engine import imap_fetch, FetchOptions
-from .models import EmailAccount, ExtAdapter
+from .models import EmailAccount, ExtAdapter, SyncState
 from .services.ext_adapter_service import ingest_adapter_logs
-from .services import news_client
+from .services import news_client, sync_runtime
 from .services.wechat8061_sync import wechat8061_sync_loop
+from .services.wechat_device_ws import wechat_device_ws_loop
 from .services.aggregation_retention import prune_aggregation_data
 from .services.media_collector_runner import run_media_collector_once
 from .services.cache_cleanup import cleanup_application_cache
 
 logger = logging.getLogger(__name__)
+_BACKGROUND_ERROR_MARKER_ATTR = "_deepsee_background_error_marker"
+_BACKGROUND_TASK_ERROR_MARKERS: weakref.WeakKeyDictionary[
+    asyncio.Task[object],
+    object,
+] = weakref.WeakKeyDictionary()
 BACKGROUND_RUNTIME: dict[str, dict] = {}
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -46,7 +60,17 @@ def _bg_mark_enabled(name: str, enabled: bool) -> None:
     state["enabled"] = bool(enabled)
 
 
+def _clear_current_task_recorded_exception() -> None:
+    try:
+        current_task = asyncio.current_task()
+    except RuntimeError:
+        current_task = None
+    if current_task is not None:
+        _BACKGROUND_TASK_ERROR_MARKERS.pop(current_task, None)
+
+
 def _bg_mark_start(name: str) -> None:
+    _clear_current_task_recorded_exception()
     state = _bg_state(name)
     state["running"] = True
     state["runs"] = int(state.get("runs") or 0) + 1
@@ -54,6 +78,7 @@ def _bg_mark_start(name: str) -> None:
 
 
 def _bg_mark_success(name: str) -> None:
+    _clear_current_task_recorded_exception()
     state = _bg_state(name)
     now = _utc_now()
     state["running"] = False
@@ -62,20 +87,37 @@ def _bg_mark_success(name: str) -> None:
     state["last_error"] = None
 
 
+def _background_error_text(exc: BaseException) -> str:
+    return str(exc).strip() or type(exc).__name__
+
+
 def _bg_mark_error(name: str, exc: Exception) -> None:
+    try:
+        current_task = asyncio.current_task()
+    except RuntimeError:
+        current_task = None
+    if current_task is not None:
+        marker = object()
+        try:
+            setattr(exc, _BACKGROUND_ERROR_MARKER_ATTR, marker)
+        except Exception:
+            _BACKGROUND_TASK_ERROR_MARKERS.pop(current_task, None)
+        else:
+            _BACKGROUND_TASK_ERROR_MARKERS[current_task] = marker
     state = _bg_state(name)
     now = _utc_now()
     state["running"] = False
     state["failures"] = int(state.get("failures") or 0) + 1
     state["last_finished_at"] = now
     state["last_error_at"] = now
-    state["last_error"] = str(exc)
+    state["last_error"] = _background_error_text(exc)
     logger.exception("background loop failed: %s", name)
 
 
 _BACKGROUND_RUNTIME_NAMES = [
     "chatlog_sync",
     "wechat8061_sync",
+    "wechat_device_ws",
     "email_sync",
     "ext_adapter_sync",
     "news_refresh",
@@ -180,7 +222,7 @@ def run_summary_overlay_once(db, *, cfg: dict | None = None) -> dict[str, int]:
             .limit(2000)
         ).scalars().all()
         result["wechat_fallback"] = int(populate_fallback_derived(db, recent_messages, force=False) or 0)
-        pending_limit = max(1, int(cfg.get("msg_tool_overlay_limit", 60) or 60))
+        pending_limit = max(1, int(cfg.get("msg_tool_overlay_limit", 100) or 100))
         pending_messages = []
         for msg in recent_messages:
             if _message_visible_len(msg) < 20:
@@ -198,8 +240,8 @@ def run_summary_overlay_once(db, *, cfg: dict | None = None) -> dict[str, int]:
                 db,
                 pending_messages,
                 force=False,
-                concurrency=1,
-                batch_size=1,
+                concurrency=3,
+                batch_size=100,
                 temperature=0.1,
             )
             result["wechat_tool"] = int((info or {}).get("updated") or 0)
@@ -229,12 +271,19 @@ def run_summary_overlay_once(db, *, cfg: dict | None = None) -> dict[str, int]:
 def _run_chatlog_sync_job() -> None:
     db = SessionLocal()
     try:
-        sync_from_chatlog(db)
-        try:
-            run_summary_overlay_once(db)
-        except Exception as exc:
-            logger.warning("background subtask failed: summary_overlay_once: %s", exc)
-        db.commit()
+        adapters = sync_runtime.ChatlogSyncRunAdapters(
+            sync_from_chatlog=lambda run_db, since: sync_from_chatlog(run_db, since),
+        )
+        result = sync_runtime.execute_chatlog_sync_run(
+            db,
+            adapters=adapters,
+            overlay_mode="inline",
+            model_cls=SyncState,
+        )
+        if str(result.get("status") or "") == "error":
+            error_code = str(result.get("error_code") or "SYNC-CHATLOG-UNKNOWN-001")
+            error = str(result.get("error") or "chatlog sync failed")
+            raise RuntimeError(f"{error_code}: {error}")
     finally:
         db.close()
 
@@ -512,54 +561,199 @@ async def _summary_overlay_loop():
         await asyncio.sleep(max(300, interval))
 
 
-async def start_background_loops(app: FastAPI | None = None) -> None:
-    interval = int(settings.__dict__.get("SYNC_INTERVAL_SECONDS", 0) or 0)
-    _bg_mark_enabled("chatlog_sync", bool(interval and interval > 0))
-    if interval and interval > 0:
-        asyncio.create_task(_sync_loop())
-    # Deprecated optional 8061 fallback; keep runtime entry but do not start unless explicitly enabled.
-    try:
-        from .services.llm_client import load_ai_config
+@dataclass(frozen=True)
+class BackgroundLoopSpec:
+    name: str
+    enabled: bool
+    runner: Callable[[], Awaitable[None]]
 
-        wechat8061_enabled = bool((load_ai_config() or {}).get("wechatpad_sync_enabled", False))
-    except Exception:
-        wechat8061_enabled = False
-    _bg_mark_enabled("wechat8061_sync", wechat8061_enabled)
-    if wechat8061_enabled:
-        asyncio.create_task(wechat8061_sync_loop())
-    # 邮件同步改为“仅手动触发”，不再定时自动拉取
-    # 如需恢复定时，请显式改回并确保 EMAIL_SYNC_INTERVAL_SECONDS > 0
-    # email_interval = int(settings.__dict__.get("EMAIL_SYNC_INTERVAL_SECONDS", 0) or 0)
-    # if email_interval and email_interval > 0:
-    #     asyncio.create_task(_email_loop())
-    _bg_mark_enabled("email_sync", False)
-    if settings.__dict__.get("LANGBOT_ADAPTER_LOG_DIR"):
-        asyncio.create_task(_ext_adapter_loop())
-    else:
-        _bg_mark_enabled("ext_adapter_sync", False)
+
+def _build_background_loop_specs() -> list[BackgroundLoopSpec]:
+    interval = int(settings.__dict__.get("SYNC_INTERVAL_SECONDS", 0) or 0)
+    wechat8061_enabled = False
     news_interval = int(settings.__dict__.get("NEWSNOW_REFRESH_INTERVAL_SECONDS", 0) or 0)
-    _bg_mark_enabled("news_refresh", bool(news_interval and news_interval > 0))
-    if news_interval and news_interval > 0:
-        asyncio.create_task(_news_loop())
-    # Start snapshot loop for news sentiment datasets (every ~3h by default)
     snap_interval = int(settings.__dict__.get("NEWS_SNAPSHOT_INTERVAL_SECONDS", 0) or 0)
-    _bg_mark_enabled("news_snapshot", bool(snap_interval and snap_interval > 0))
-    if snap_interval and snap_interval > 0:
-        asyncio.create_task(_news_snapshot_loop())
     media_collector_enabled = bool(settings.__dict__.get("MEDIA_COLLECTOR_DAILY_ENABLED", True))
-    _bg_mark_enabled("media_collector", media_collector_enabled)
-    if media_collector_enabled:
-        asyncio.create_task(_media_collector_loop())
     summary_interval = int(settings.__dict__.get("SUMMARY_OVERLAY_INTERVAL_SECONDS", 3600) or 0)
-    _bg_mark_enabled("summary_overlay", bool(summary_interval and summary_interval > 0))
-    if summary_interval and summary_interval > 0:
-        asyncio.create_task(_summary_overlay_loop())
     retention_interval = int(settings.__dict__.get("AGGREGATION_RETENTION_INTERVAL_SECONDS", 86400) or 0)
-    _bg_mark_enabled("aggregation_retention", bool(retention_interval and retention_interval > 0))
-    if retention_interval and retention_interval > 0:
-        asyncio.create_task(_aggregation_retention_loop())
     cache_cleanup_enabled = bool(settings.__dict__.get("MEDIA_CACHE_CLEANUP_ENABLED", True))
     cache_cleanup_interval = int(settings.__dict__.get("MEDIA_CACHE_CLEANUP_INTERVAL_SECONDS", 86400) or 0)
-    _bg_mark_enabled("media_cache_cleanup", bool(cache_cleanup_enabled and cache_cleanup_interval > 0))
-    if cache_cleanup_enabled and cache_cleanup_interval > 0:
-        asyncio.create_task(_media_cache_cleanup_loop())
+
+    return [
+        BackgroundLoopSpec("chatlog_sync", interval > 0, _sync_loop),
+        BackgroundLoopSpec("wechat8061_sync", wechat8061_enabled, wechat8061_sync_loop),
+        BackgroundLoopSpec("wechat_device_ws", True, wechat_device_ws_loop),
+        # 邮件同步保持“仅手动触发”，不再定时自动拉取。
+        BackgroundLoopSpec("email_sync", False, _email_loop),
+        BackgroundLoopSpec(
+            "ext_adapter_sync",
+            bool(settings.__dict__.get("LANGBOT_ADAPTER_LOG_DIR")),
+            _ext_adapter_loop,
+        ),
+        BackgroundLoopSpec("news_refresh", news_interval > 0, _news_loop),
+        BackgroundLoopSpec("news_snapshot", snap_interval > 0, _news_snapshot_loop),
+        BackgroundLoopSpec("media_collector", media_collector_enabled, _media_collector_loop),
+        BackgroundLoopSpec("summary_overlay", summary_interval > 0, _summary_overlay_loop),
+        BackgroundLoopSpec("aggregation_retention", retention_interval > 0, _aggregation_retention_loop),
+        BackgroundLoopSpec(
+            "media_cache_cleanup",
+            cache_cleanup_enabled and cache_cleanup_interval > 0,
+            _media_cache_cleanup_loop,
+        ),
+    ]
+
+
+class BackgroundRuntime:
+    def __init__(
+        self,
+        spec_provider: Callable[[], list[BackgroundLoopSpec]] = _build_background_loop_specs,
+    ) -> None:
+        self._spec_provider = spec_provider
+        self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._lifecycle_lock: asyncio.Lock | None = None
+        self._lifecycle_loop: asyncio.AbstractEventLoop | None = None
+        self._owner_loop: asyncio.AbstractEventLoop | None = None
+        self._handled_tasks: weakref.WeakSet[asyncio.Task[None]] = weakref.WeakSet()
+
+    @property
+    def tasks(self) -> dict[str, asyncio.Task[None]]:
+        return dict(self._tasks)
+
+    def _handle_task_completion(self, name: str, task: asyncio.Task[None]) -> None:
+        if task in self._handled_tasks:
+            return
+        self._handled_tasks.add(task)
+        recorded_marker = _BACKGROUND_TASK_ERROR_MARKERS.pop(task, None)
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            exc = None
+
+        if self._tasks.get(name) is not task:
+            if exc is not None:
+                logger.error(
+                    "stale background loop exited unexpectedly: %s",
+                    name,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+            return
+        self._tasks.pop(name, None)
+        state = _bg_state(name)
+        state["running"] = False
+        exception_marker = getattr(exc, _BACKGROUND_ERROR_MARKER_ATTR, None) if exc is not None else None
+        already_recorded = recorded_marker is not None and exception_marker is recorded_marker
+        if exc is not None and not already_recorded:
+            now = _utc_now()
+            state["failures"] = int(state.get("failures") or 0) + 1
+            state["last_finished_at"] = now
+            state["last_error_at"] = now
+            state["last_error"] = _background_error_text(exc)
+            logger.error(
+                "background loop exited unexpectedly: %s",
+                name,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+        if not self._tasks:
+            self._owner_loop = None
+
+    def _get_lifecycle_lock(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        foreign_pending = [
+            task
+            for task in self._tasks.values()
+            if not task.done() and task.get_loop() is not loop
+        ]
+        owner_is_foreign = self._owner_loop is not None and self._owner_loop is not loop
+        if foreign_pending or (owner_is_foreign and any(not task.done() for task in self._tasks.values())):
+            raise RuntimeError("background runtime has pending tasks owned by another event loop")
+
+        if self._lifecycle_loop is not loop:
+            if self._lifecycle_lock is not None and self._lifecycle_lock.locked():
+                raise RuntimeError("background runtime lifecycle is active on another event loop")
+            for name, task in list(self._tasks.items()):
+                if task.done() and task.get_loop() is not loop:
+                    self._handle_task_completion(name, task)
+            self._lifecycle_lock = asyncio.Lock()
+            self._lifecycle_loop = loop
+        if self._owner_loop is None and any(not task.done() for task in self._tasks.values()):
+            self._owner_loop = loop
+        return self._lifecycle_lock
+
+    async def start(self, app: FastAPI | None = None) -> "BackgroundRuntime":
+        async with self._get_lifecycle_lock():
+            if app is not None:
+                app.state.background_runtime = self
+
+            for name, task in list(self._tasks.items()):
+                if task.done():
+                    self._handle_task_completion(name, task)
+
+            new_tasks: list[tuple[str, asyncio.Task[None]]] = []
+            try:
+                for spec in self._spec_provider():
+                    _bg_mark_enabled(spec.name, spec.enabled)
+                    current = self._tasks.get(spec.name)
+                    if not spec.enabled or (current is not None and not current.done()):
+                        continue
+                    runner = spec.runner()
+                    try:
+                        task = asyncio.create_task(
+                            runner,
+                            name=f"deepsee-background:{spec.name}",
+                        )
+                    except BaseException:
+                        if inspect.iscoroutine(runner):
+                            runner.close()
+                        raise
+                    self._tasks[spec.name] = task
+                    if self._owner_loop is None:
+                        self._owner_loop = asyncio.get_running_loop()
+                    new_tasks.append((spec.name, task))
+                    task.add_done_callback(
+                        lambda completed, name=spec.name: self._handle_task_completion(name, completed)
+                    )
+            except BaseException:
+                for _name, task in new_tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(
+                    *(task for _name, task in new_tasks),
+                    return_exceptions=True,
+                )
+                for name, task in new_tasks:
+                    self._handle_task_completion(name, task)
+                raise
+            return self
+
+    async def shutdown(self) -> None:
+        async with self._get_lifecycle_lock():
+            owned_tasks = list(self._tasks.items())
+            if not owned_tasks:
+                return
+
+            for _name, task in owned_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*(task for _name, task in owned_tasks), return_exceptions=True)
+
+            for name, task in owned_tasks:
+                self._handle_task_completion(name, task)
+
+
+BACKGROUND_TASK_RUNTIME = BackgroundRuntime()
+
+
+async def start_background_loops(app: FastAPI | None = None) -> BackgroundRuntime:
+    if app is None:
+        runtime = BACKGROUND_TASK_RUNTIME
+    else:
+        runtime = getattr(app.state, "background_runtime", None)
+        if runtime is None:
+            runtime = BackgroundRuntime()
+            app.state.background_runtime = runtime
+    return await runtime.start(app)
+
+
+async def stop_background_loops(app: FastAPI | None = None) -> None:
+    runtime = getattr(getattr(app, "state", None), "background_runtime", None)
+    await (runtime or BACKGROUND_TASK_RUNTIME).shutdown()

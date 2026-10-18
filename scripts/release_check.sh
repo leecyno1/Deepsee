@@ -60,6 +60,7 @@ PY
     tests/test_sync_stability.py \
     tests/test_wechat_gateway_trigger_rules.py \
     tests/test_agent_api_auth.py \
+    tests/test_local_content_sources.py \
     tests/test_production_guardrails.py
 else
   echo "pytest skipped (SKIP_PYTEST=1)"

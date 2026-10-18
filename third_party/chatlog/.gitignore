@@ -2,17 +2,20 @@
 # https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
 #
 # Binaries for programs and plugins
-*.exe
-*.exe~
-*.dll
 *.so
 *.dylib
+*.bin
+/chatlog
+/chatlog-mac
+/chatlog-*
 
 # Test binary, built with `go test -c`
 *.test
 
 # Output of the go coverage tool, specifically when used with LiteIDE
 *.out
+coverage.*
+coverage/
 
 # Dependency directories (remove the comment below to include it)
 # vendor/
@@ -23,16 +26,64 @@ go.work.sum
 
 # env file
 .env
+.env.*
+!.env.example
 
 # syncthing files
 .stfolder
 
-chatlog.exe# Added by goreleaser init:
+# Added by goreleaser init:
 dist/
+build/
+bin/
+release/
+
+# local build/cache dirs
+.cache/
+.gocache/
+.gocache_local/
+.gomodcache/
+.gopath/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+__pycache__/
+*.py[cod]
+.parcel-cache/
+.turbo/
+.vite/
+node_modules/
+
+# temp/run files
+*.pid
+*.log
+*.tmp
+*.temp
+tmp/
+temp/
+logs/
+
+# OS files
+.DS_Store
+._*
+
+# Editor / IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local runtime data and media output
+/data/
+/work/
+/media/
+/downloads/
 
 # Claude Code temp directories
 tmpclaude-*/
 
 # Test files
+/test/
 sns.md
 .claude/settings.local.json

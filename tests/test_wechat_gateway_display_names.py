@@ -1,11 +1,22 @@
 from datetime import datetime
 
-from app.db import SessionLocal
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from app.db import Base
 from app.models import Chat, Contact, Message
 from app.services.wechat_gateway import ingest_callback_event, record_outbound_message
 
 
-def test_ingest_callback_event_uses_contact_and_chat_display_names():
+@pytest.fixture
+def SessionLocal(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'names.db'}")
+    Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine)
+
+
+def test_ingest_callback_event_uses_contact_and_chat_display_names(SessionLocal):
     db = SessionLocal()
     try:
         existing = ingest_callback_event(db, {
@@ -28,7 +39,7 @@ def test_ingest_callback_event_uses_contact_and_chat_display_names():
         db.query(Chat).filter(Chat.id == "room_1@chatroom").delete()
         db.commit()
 
-        db.add(Contact(id="wxid_sender_1", name="张三", alias="zhangsan"))
+        db.add(Contact(id="wxid_sender_1", name="张三", alias="客户备注"))
         db.add(Chat(id="room_1@chatroom", title="柠檬工作室", is_chatroom=True))
         db.commit()
 
@@ -52,7 +63,7 @@ def test_ingest_callback_event_uses_contact_and_chat_display_names():
 
         message = db.get(Message, result["message_id"])
         assert message is not None
-        assert message.sender_name == "张三"
+        assert message.sender_name == "客户备注"
         assert message.talker_name == "柠檬工作室"
     finally:
         db.query(Message).filter(Message.chat_id == "room_1@chatroom").delete()
@@ -62,7 +73,7 @@ def test_ingest_callback_event_uses_contact_and_chat_display_names():
         db.close()
 
 
-def test_record_outbound_message_uses_chat_display_name():
+def test_record_outbound_message_uses_chat_display_name(SessionLocal):
     db = SessionLocal()
     try:
         db.query(Message).filter(Message.chat_id == "wxid_target_1").delete()

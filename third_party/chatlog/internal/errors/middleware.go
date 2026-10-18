@@ -54,7 +54,7 @@ func RecoveryMiddleware() gin.HandlerFunc {
 				log.Err(err).Msgf("PANIC RECOVERED\n%s", string(debug.Stack()))
 
 				// 返回 500 错误
-				c.JSON(http.StatusInternalServerError, err)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 				c.Abort()
 			}
 		}()

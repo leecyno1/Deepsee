@@ -56,7 +56,7 @@ func OpenDBFile(dbPath string, pageSize int) (*DBFile, error) {
 		return nil, errors.IncompleteRead(fmt.Errorf("read %d bytes, expected %d", n, pageSize))
 	}
 
-	if bytes.Equal(buffer[:len(SQLiteHeader)-1], []byte(SQLiteHeader[:len(SQLiteHeader)-1])) {
+	if bytes.Equal(buffer[:len(SQLiteHeader)], []byte(SQLiteHeader)) {
 		return nil, errors.ErrAlreadyDecrypted
 	}
 
@@ -77,7 +77,9 @@ func XorBytes(a []byte, b byte) []byte {
 }
 
 func ValidateKey(page1 []byte, key []byte, salt []byte, hashFunc func() hash.Hash, hmacSize int, reserve int, pageSize int, deriveKeys func([]byte, []byte) ([]byte, []byte)) bool {
-	if len(key) != KeySize {
+	if len(key) != KeySize || len(salt) < SaltSize || pageSize <= 0 ||
+		reserve < IVSize+hmacSize || len(page1) < pageSize ||
+		hashFunc == nil || deriveKeys == nil {
 		return false
 	}
 
@@ -98,25 +100,35 @@ func ValidateKey(page1 []byte, key []byte, salt []byte, hashFunc func() hash.Has
 }
 
 func DecryptPage(pageBuf []byte, encKey []byte, macKey []byte, pageNum int64, hashFunc func() hash.Hash, hmacSize int, reserve int, pageSize int) ([]byte, error) {
+	if pageSize <= 0 || reserve < IVSize || reserve > pageSize ||
+		len(pageBuf) < pageSize || len(encKey) != KeySize ||
+		pageNum < 0 {
+		return nil, errors.ErrDecryptIncorrectKey
+	}
 	offset := 0
 	if pageNum == 0 {
 		offset = SaltSize
 	}
 
-	mac := hmac.New(hashFunc, macKey)
-	mac.Write(pageBuf[offset : pageSize-reserve+IVSize])
+	if hashFunc != nil && hmacSize > 0 {
+		if len(macKey) == 0 || reserve < IVSize+hmacSize {
+			return nil, errors.ErrDecryptIncorrectKey
+		}
+		mac := hmac.New(hashFunc, macKey)
+		mac.Write(pageBuf[offset : pageSize-reserve+IVSize])
 
-	pageNoBytes := make([]byte, 4)
-	binary.LittleEndian.PutUint32(pageNoBytes, uint32(pageNum+1))
-	mac.Write(pageNoBytes)
+		pageNoBytes := make([]byte, 4)
+		binary.LittleEndian.PutUint32(pageNoBytes, uint32(pageNum+1))
+		mac.Write(pageNoBytes)
 
-	hashMac := mac.Sum(nil)
+		hashMac := mac.Sum(nil)
 
-	hashMacStartOffset := pageSize - reserve + IVSize
-	hashMacEndOffset := hashMacStartOffset + hmacSize
+		hashMacStartOffset := pageSize - reserve + IVSize
+		hashMacEndOffset := hashMacStartOffset + hmacSize
 
-	if !bytes.Equal(hashMac, pageBuf[hashMacStartOffset:hashMacEndOffset]) {
-		return nil, errors.ErrDecryptHashVerificationFailed
+		if !bytes.Equal(hashMac, pageBuf[hashMacStartOffset:hashMacEndOffset]) {
+			return nil, errors.ErrDecryptHashVerificationFailed
+		}
 	}
 
 	iv := pageBuf[pageSize-reserve : pageSize-reserve+IVSize]

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import Counter
+
 import os
 import sys
 
@@ -44,3 +46,18 @@ def test_agent_openapi_paths_do_not_include_removed_langbot_routes():
     assert "/api/send/langbot/bots" not in paths
     assert "/api/sync/langbot" not in paths
     assert "/api/langbot/bots" not in paths
+
+
+def test_app_does_not_register_duplicate_route_methods():
+    app = create_app()
+    route_keys = [
+        (
+            str(getattr(route, "path", "")),
+            tuple(sorted(getattr(route, "methods", set()) or set())),
+        )
+        for route in app.routes
+    ]
+
+    duplicates = {key: count for key, count in Counter(route_keys).items() if count > 1}
+
+    assert duplicates == {}

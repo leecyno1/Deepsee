@@ -1,17 +1,22 @@
 BINARY_NAME := chatlog
+BIN := bin/$(BINARY_NAME)
 GO := go
+GO_TAGS := -tags sqlite_fts5
+RUN_ARGS ?=
+BUILD_SCRIPT := scripts/build_chatlog_binary.sh
+VERIFY_SCRIPT := scripts/verify_chatlog_binary.sh
+GO_SOURCES := $(shell find . -type f -name '*.go' -not -path './.git/*')
+EMBEDDED_ASSETS := $(shell find internal -type f \( -name '*.htm' -o -name '*.html' -o -name '*.css' -o -name '*.js' -o -name '*.py' -o -name '*.wasm' -o -name '*.sh' -o -name '*.yaml' -o -name '*.yml' \))
 ifeq ($(VERSION),)
-	VERSION := $(shell git describe --tags --always --dirty="-dev")
+	VERSION := $(shell git describe --tags --always --dirty="-dev" 2>/dev/null || echo "unknown")
 endif
-LDFLAGS := -ldflags '-X "github.com/sjzar/chatlog/pkg/version.Version=$(VERSION)" -w -s'
 
 PLATFORMS := \
-	windows/amd64
+	darwin/arm64
 
-UPX_PLATFORMS := \
-	windows/amd64
+UPX_PLATFORMS :=
 
-.PHONY: all clean lint tidy test build crossbuild upx
+.PHONY: all clean lint tidy test build run crossbuild upx
 
 all: clean lint tidy test build
 
@@ -21,7 +26,7 @@ clean:
 
 lint:
 	@echo "🕵️‍♂️ Running linters..."
-	golangci-lint run ./...
+	golangci-lint run --build-tags sqlite_fts5 ./...
 
 tidy:
 	@echo "🧼 Tidying up dependencies..."
@@ -29,11 +34,17 @@ tidy:
 
 test:
 	@echo "🧪 Running tests..."
-	$(GO) test ./... -cover
+	CGO_ENABLED=1 $(GO) test $(GO_TAGS) ./... -cover
 
-build:
+build: $(BIN)
+
+$(BIN): $(GO_SOURCES) $(EMBEDDED_ASSETS) go.mod go.sum $(BUILD_SCRIPT) $(VERIFY_SCRIPT)
 	@echo "🔨 Building for current platform..."
-	CGO_ENABLED=1 $(GO) build -trimpath $(LDFLAGS) -o bin/$(BINARY_NAME) main.go
+	@CHATLOG_VERSION="$(VERSION)" $(BUILD_SCRIPT) $(BIN)
+
+run: build
+	@echo "🚀 Running compiled binary with SQLite FTS5..."
+	@exec ./$(BIN) $(RUN_ARGS)
 
 crossbuild: clean
 	@echo "🌍 Building for multiple platforms..."
@@ -45,7 +56,7 @@ crossbuild: clean
 		[ "$$float" != "" ] && output_name=$$output_name_$$float; \
 		echo "🔨 Building for $$os/$$arch..."; \
 		echo "🔨 Building for $$output_name..."; \
-		GOOS=$$os GOARCH=$$arch CGO_ENABLED=1 GOARM=$$float $(GO) build -trimpath $(LDFLAGS) -o $$output_name main.go ; \
+		CHATLOG_VERSION="$(VERSION)" GOOS=$$os GOARCH=$$arch GOARM=$$float $(BUILD_SCRIPT) $$output_name ; \
 		if [ "$(ENABLE_UPX)" = "1" ] && echo "$(UPX_PLATFORMS)" | grep -q "$$os/$$arch"; then \
 			echo "⚙️ Compressing binary $$output_name..." && upx --best $$output_name; \
 		fi; \

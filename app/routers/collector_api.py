@@ -7,7 +7,32 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from ..config import settings
+
 router = APIRouter(prefix="/api/collector", tags=["collector"])
+
+from ..services.social_sources import SocialSourcesConfig, load_sources, save_sources, reach_status, collect_sources
+
+
+@router.get('/sources')
+def get_social_sources():
+    return load_sources().model_dump()
+
+
+@router.put('/sources')
+def put_social_sources(payload: SocialSourcesConfig):
+    save_sources(payload)
+    return payload.model_dump()
+
+
+@router.get('/sources/health')
+def get_social_sources_health():
+    return reach_status()
+
+
+@router.post('/sources/refresh')
+def refresh_social_sources():
+    return collect_sources()
 
 
 class KeywordsUpdate(BaseModel):
@@ -32,6 +57,35 @@ def _keywords_path() -> Path:
 
 def _authors_path() -> Path:
     return (Path(__file__).resolve().parent.parent.parent / "media-collector" / "authors.json").resolve()
+
+
+def _read_json_file(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _default_sources_status() -> dict:
+    keywords_path = _keywords_path()
+    authors_path = _authors_path()
+    keywords_data = _read_json_file(keywords_path)
+    authors_data = _read_json_file(authors_path)
+    keywords = keywords_data.get("keywords") if isinstance(keywords_data.get("keywords"), list) else []
+    authors = authors_data.get("authors") if isinstance(authors_data.get("authors"), list) else []
+    return {
+        "collector_dir": str(keywords_path.parent),
+        "keywords_path": str(keywords_path),
+        "authors_path": str(authors_path),
+        "keywords_count": len(keywords),
+        "authors_count": len(authors),
+        "keywords_updated": keywords_data.get("updated") or "",
+        "authors_updated": authors_data.get("updated") or "",
+        "ready": keywords_path.exists() and authors_path.exists() and bool(keywords or authors),
+    }
 
 
 @router.get("/keywords")
@@ -127,6 +181,9 @@ def collector_status():
         "running": bool(run_state.get("running")),
         "current_run": run_state.get("current_run"),
         "last_run": run_state.get("last_run"),
+        "default_sources": _default_sources_status(),
+        "auto_bootstrap": bool(settings.__dict__.get("MEDIA_COLLECTOR_AUTO_BOOTSTRAP", True)),
+        "bootstrap_timeout_seconds": int(settings.__dict__.get("MEDIA_COLLECTOR_BOOTSTRAP_TIMEOUT_SECONDS", 60) or 60),
     }
 
 

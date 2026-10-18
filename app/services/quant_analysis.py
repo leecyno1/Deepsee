@@ -38,7 +38,7 @@ def _percent(part: int, total: int) -> int:
     return int(round((part / total) * 100))
 
 
-def normalize_quant(quant: dict | None) -> dict[str, Any]:
+def normalize_quant(quant: dict | None, *, allowed_ids: set[str] | None = None) -> dict[str, Any]:
     """Validate & normalize model-provided quant block into a safe, deterministic structure.
 
     Expected input:
@@ -60,6 +60,12 @@ def normalize_quant(quant: dict | None) -> dict[str, Any]:
         bullish = _dedupe_keep_order(_as_str_list(t.get("bullish_ids")))
         bearish = _dedupe_keep_order(_as_str_list(t.get("bearish_ids")))
         neutral = _dedupe_keep_order(_as_str_list(t.get("neutral_ids")))
+        if allowed_ids is not None:
+            bullish = [x for x in bullish if x in allowed_ids]
+            bearish = [x for x in bearish if x in allowed_ids]
+            neutral = [x for x in neutral if x in allowed_ids]
+            if not (bullish or bearish or neutral):
+                continue
 
         # Ensure a single stance per id (avoid double counting); keep precedence bullish > bearish > neutral.
         bullish_set = set(bullish)
@@ -106,6 +112,7 @@ def render_quant_section_markdown(quant: dict[str, Any], *, module: str) -> str:
 
     lines: list[str] = []
     lines.append("## 量化分析")
+    lines.append("仅统计本次证据样本中的观点分布，不代表市场涨跌概率或投资胜率。")
     lines.append("")
     lines.append("| 议题 | 样本 | 看好 | 看空 | 中性 |")
     lines.append("| --- | ---: | ---: | ---: | ---: |")

@@ -16,8 +16,16 @@ from ..config import settings
 import re
 import os
 import requests
-from urllib.parse import quote
 from .wx_cli_client import WxCliClient
+from .wechat_message_normalizer import (
+    NormalizedWechatMessage,
+    WechatMessageIdentity,
+    build_chatlog_media_url,
+    build_wechat_message_identity,
+    normalize_wechat_message,
+    parse_contents_dict,
+    wechat_message_identities_match,
+)
 
 
 def _to_local_naive(dt: Optional[datetime]) -> Optional[datetime]:
@@ -84,109 +92,172 @@ def _parse_messages(payload: Any) -> List[Dict[str, Any]]:
     return []
 
 
-def _normalize_http_base(base: str | None) -> str:
-    value = (base or "").strip()
-    if not value:
-        value = settings.CHATLOG_HTTP_BASE or "http://127.0.0.1:5030"
-    if not re.match(r"^https?://", value, flags=re.IGNORECASE):
-        value = f"http://{value}"
-    return value.rstrip("/")
-
-
-def _encode_rel_path(path: str | None) -> str:
-    text = str(path or "").strip().replace("\\", "/").lstrip("/")
-    if not text:
-        return ""
-    return "/".join(quote(seg, safe="") for seg in text.split("/") if seg)
-
-
 def _extract_contents_dict(raw: Any) -> dict[str, Any]:
-    if isinstance(raw, dict):
-        return raw
-    if isinstance(raw, str):
-        try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, dict):
-                return parsed
-        except Exception:
-            return {}
-    return {}
+    """Compatibility wrapper for legacy callers."""
+    return parse_contents_dict(raw)
 
 
 def _build_chatlog_media_url(msg_type: Any, contents: dict[str, Any] | None, *, host: str | None = None) -> str | None:
-    c = contents or {}
-    base = _normalize_http_base(host or c.get("host"))
-    mt = str(msg_type or "").strip().lower()
-    mt_num = None
-    try:
-        mt_num = int(mt)
-    except Exception:
-        mt_num = None
+    """Compatibility wrapper for legacy callers."""
+    return build_chatlog_media_url(msg_type, contents, host=host)
 
-    direct_image = str(c.get("cdnthumburl") or c.get("thumbUrl") or c.get("thumb_url") or c.get("image_url") or c.get("imageUrl") or "").strip()
-    if direct_image:
-        return direct_image
 
-    md5 = str(c.get("md5") or c.get("imageId") or c.get("image_id") or c.get("mediaId") or c.get("id") or "").strip()
-    path_raw = (
-        c.get("path")
-        or c.get("data")
-        or c.get("relative")
-        or c.get("image_path")
-        or c.get("localPath")
-        or c.get("video_path")
+def _normalize_chatlog_message(msg: dict[str, Any]) -> NormalizedWechatMessage:
+    return normalize_wechat_message(
+        msg_type=msg.get("type"),
+        content=msg.get("content") or msg.get("text"),
+        contents=msg.get("contents"),
     )
-    rel = _encode_rel_path(str(path_raw or ""))
 
-    if mt_num == 3 or mt in {"image", "img", "图片"}:
-        if md5 and rel:
-            return f"{base}/image/{quote(md5, safe='')},{rel}"
-        if md5:
-            return f"{base}/image/{quote(md5, safe='')}"
-        if rel:
-            return f"{base}/data/{rel}"
-        return None
 
-    if mt_num in {43, 62} or mt in {"video", "视频"}:
-        if md5 and rel:
-            return f"{base}/video/{quote(md5, safe='')},{rel}"
-        if md5:
-            return f"{base}/video/{quote(md5, safe='')}"
-        if rel:
-            return f"{base}/data/{rel}"
-        return None
+def _raw_chatlog_content(msg: dict[str, Any]) -> str:
+    return str(msg.get("content") or msg.get("text") or "")
 
-    if mt_num == 34 or mt in {"voice", "audio", "语音"}:
-        voice_id = str(c.get("voice") or c.get("voiceId") or c.get("id") or c.get("mediaId") or "").strip()
-        if voice_id:
-            return f"{base}/voice/{quote(voice_id, safe='')}"
-        if rel:
-            return f"{base}/data/{rel}"
-        return None
 
-    # chatlog uses type 49 for both links and files.
-    if mt_num == 49 or mt in {"file", "document", "文件", "链接", "link"}:
-        direct = str(c.get("url") or "").strip()
-        if direct:
-            return direct
-        if md5:
-            return f"{base}/file/{quote(md5, safe='')}"
-        if rel:
-            return f"{base}/data/{rel}"
-        return None
+_MESSAGE_EXTERNAL_ID_KEYS = (
+    "external_id",
+    "message_id",
+    "msg_id",
+    "msgId",
+    "new_msg_id",
+    "newMsgId",
+    "NewMsgId",
+    "id",
+)
 
-    if rel:
-        return f"{base}/data/{rel}"
+
+def _message_external_id(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    for key in _MESSAGE_EXTERNAL_ID_KEYS:
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _chatlog_message_identity(msg: dict[str, Any]) -> WechatMessageIdentity:
+    return build_wechat_message_identity(
+        msg_type=msg.get("type"),
+        content=_raw_chatlog_content(msg),
+        contents=msg.get("contents"),
+        external_id=_message_external_id(msg),
+    )
+
+
+def _stored_message_identity(msg_type: Any, content_text: Any, meta: Any) -> WechatMessageIdentity:
+    meta_obj = meta if isinstance(meta, dict) else {}
+    return build_wechat_message_identity(
+        msg_type=msg_type,
+        content=content_text,
+        contents=meta_obj.get("contents"),
+        external_id=_message_external_id(meta_obj),
+    )
+
+
+def _identity_sort_key(identity: WechatMessageIdentity) -> tuple[Any, ...]:
+    return (
+        identity.message_type,
+        identity.external_id,
+        identity.strong_fields,
+        identity.weak_text,
+        identity.raw_text,
+    )
+
+
+def _maximum_identity_matching(
+    incoming_identities: list[WechatMessageIdentity],
+    stored_identities: list[WechatMessageIdentity],
+) -> dict[int, int]:
+    """Return a deterministic maximum incoming-index -> stored-index matching.
+
+    Coordinate bucketing happens before this helper is called, so buckets are normally
+    tiny. Kuhn's augmenting-path algorithm avoids greedy cross-subset mismatches while
+    keeping work local to messages sharing the exact chat/sender/timestamp coordinate.
+    """
+    candidates: dict[int, list[int]] = {}
+    for incoming_index, incoming_identity in enumerate(incoming_identities):
+        matches = [
+            stored_index
+            for stored_index, stored_identity in enumerate(stored_identities)
+            if wechat_message_identities_match(incoming_identity, stored_identity)
+        ]
+        matches.sort(key=lambda index: (_identity_sort_key(stored_identities[index]), index))
+        candidates[incoming_index] = matches
+
+    incoming_order = sorted(
+        range(len(incoming_identities)),
+        key=lambda index: (
+            len(candidates[index]),
+            _identity_sort_key(incoming_identities[index]),
+            index,
+        ),
+    )
+    stored_to_incoming: dict[int, int] = {}
+
+    def assign(incoming_index: int, visited_stored: set[int]) -> bool:
+        for stored_index in candidates[incoming_index]:
+            if stored_index in visited_stored:
+                continue
+            visited_stored.add(stored_index)
+            current_incoming = stored_to_incoming.get(stored_index)
+            if current_incoming is None or assign(current_incoming, visited_stored):
+                stored_to_incoming[stored_index] = incoming_index
+                return True
+        return False
+
+    for incoming_index in incoming_order:
+        assign(incoming_index, set())
+
+    return {
+        incoming_index: stored_index
+        for stored_index, incoming_index in stored_to_incoming.items()
+    }
+
+
+def _find_existing_chatlog_message_id(
+    db: Session,
+    *,
+    chat_id: str | None,
+    sender_id: str | None,
+    timestamp: datetime,
+    incoming_identity: WechatMessageIdentity,
+    excluded_message_ids: set[int] | None = None,
+) -> int | None:
+    rows = db.execute(
+        select(Message.id, Message.type, Message.content_text, Message.meta).where(
+            Message.chat_id == chat_id,
+            Message.sender_id == sender_id,
+            Message.timestamp == timestamp,
+        )
+    ).all()
+    for message_id, msg_type, content_text, meta in rows:
+        if excluded_message_ids and int(message_id) in excluded_message_ids:
+            continue
+        stored_identity = _stored_message_identity(msg_type, content_text, meta)
+        if wechat_message_identities_match(incoming_identity, stored_identity):
+            return int(message_id)
     return None
 
 
-def _build_meta_and_media(msg: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+def _normalized_meta(
+    normalized: NormalizedWechatMessage,
+    *,
+    external_id: str = "",
+) -> dict[str, Any]:
     meta_payload: dict[str, Any] = {}
-    contents = _extract_contents_dict(msg.get("contents"))
-    if contents:
-        meta_payload["contents"] = contents
-    media_url = _build_chatlog_media_url(msg.get("type"), contents)
-    return meta_payload, media_url
+    if normalized.contents:
+        meta_payload["contents"] = normalized.contents
+    if normalized.display_title:
+        meta_payload["display_title"] = normalized.display_title
+    if external_id:
+        meta_payload["external_id"] = external_id
+    return meta_payload
+
+
+def _build_meta_and_media(msg: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    normalized = _normalize_chatlog_message(msg)
+    return _normalized_meta(normalized, external_id=_message_external_id(msg)), normalized.media_url
 
 
 def _load_wechat_id_filters(db: Session) -> tuple[set[str], set[str], set[str], set[str], bool]:
@@ -355,7 +426,7 @@ def sync_from_langbot_adapters(
       1) (optional) ingest adapter logs -> AdapterMessage
       2) copy new AdapterMessage rows -> Message/Chat/Contact with dedupe
 
-    Dedup is best-effort: (chat_id, sender_id, timestamp, content_text).
+    Dedup uses exact chat/sender/timestamp coordinates plus canonical WeChat identity.
     """
     # Always compare in local naive domain to match messages table.
     now = _to_local_naive(datetime.now()) or datetime.now()
@@ -449,6 +520,10 @@ def sync_from_langbot_adapters(
         max_seen_id = last_id
         scanned = 0
         inserted = 0
+        pending_identities_by_coordinate: dict[
+            tuple[str, str | None, datetime],
+            list[WechatMessageIdentity],
+        ] = {}
 
         for m in rows:
             scanned += 1
@@ -479,22 +554,9 @@ def sync_from_langbot_adapters(
             if ts and ts < since_dt:
                 continue
 
-            # de-dup against existing messages table
-            exists = None
-            if ts:
-                exists = db.execute(
-                    select(Message.id).where(
-                        Message.chat_id == talker,
-                        Message.sender_id == sender,
-                        Message.timestamp == ts,
-                        Message.content_text == content,
-                    )
-                ).scalar()
-            if exists:
-                continue
-
             meta_dict = meta if isinstance(meta, dict) else {}
             meta_inner = meta_dict.get("meta") if isinstance(meta_dict.get("meta"), dict) else {}
+
             def _mget(*keys: str):
                 for k in keys:
                     v = meta_dict.get(k)
@@ -507,8 +569,47 @@ def sync_from_langbot_adapters(
 
             talker_name = _mget("talker_name", "talkerName", "chat_name")
             sender_name = _mget("sender_name", "senderName", "nickname") or sender
-            msg_type = None
             msg_type = _mget("type", "msg_type", "message_type")
+
+            meta_payload: dict[str, Any] = {}
+            if isinstance(meta, dict):
+                meta_payload.update(meta)
+                # Flatten nested `meta` dict if present (legacy adapter ingest shape)
+                inner = meta_payload.pop("meta", None)
+                if isinstance(inner, dict):
+                    for k, v in inner.items():
+                        meta_payload.setdefault(k, v)
+            meta_payload.setdefault("source", "langbot")
+            meta_payload.setdefault("adapter_key", ad.key)
+            if m.external_id is not None:
+                meta_payload.setdefault("external_id", str(m.external_id))
+            normalized = normalize_wechat_message(
+                msg_type=msg_type if msg_type is not None else "text",
+                content=content,
+                contents=meta_payload.get("contents"),
+            )
+
+            incoming_identity = build_wechat_message_identity(
+                msg_type=normalized.message_type,
+                content=content,
+                contents=normalized.contents,
+                external_id=_message_external_id(meta_payload),
+            )
+            coordinate = (talker, sender, ts)
+            exists = _find_existing_chatlog_message_id(
+                db,
+                chat_id=talker,
+                sender_id=sender,
+                timestamp=ts,
+                incoming_identity=incoming_identity,
+            )
+            pending_identities = pending_identities_by_coordinate.get(coordinate, [])
+            if exists or any(
+                wechat_message_identities_match(incoming_identity, pending_identity)
+                for pending_identity in pending_identities
+            ):
+                continue
+            pending_identities_by_coordinate.setdefault(coordinate, []).append(incoming_identity)
 
             # upsert chat/contact (best-effort)
             is_chatroom = talker.endswith("@chatroom")
@@ -524,19 +625,10 @@ def sync_from_langbot_adapters(
                     db.add(c)
                 contact_cache[sender] = c
 
-            meta_payload: dict[str, Any] = {}
-            if isinstance(meta, dict):
-                meta_payload.update(meta)
-                # Flatten nested `meta` dict if present (legacy adapter ingest shape)
-                inner = meta_payload.pop("meta", None)
-                if isinstance(inner, dict):
-                    for k, v in inner.items():
-                        meta_payload.setdefault(k, v)
-            meta_payload.setdefault("source", "langbot")
-            meta_payload.setdefault("adapter_key", ad.key)
-            if m.external_id is not None:
-                meta_payload.setdefault("external_id", str(m.external_id))
-            media_url = _build_chatlog_media_url(msg_type, _extract_contents_dict(meta_payload.get("contents")))
+            if normalized.contents:
+                meta_payload["contents"] = normalized.contents
+            if normalized.display_title:
+                meta_payload.setdefault("display_title", normalized.display_title)
 
             msg = Message(
                 chat_id=talker,
@@ -545,9 +637,9 @@ def sync_from_langbot_adapters(
                 talker_name=str(talker_name) if talker_name else None,
                 timestamp=ts,
                 direction=(m.direction or "in").lower(),
-                type=str(msg_type) if msg_type is not None else "text",
-                content_text=content,
-                media_url=media_url,
+                type=normalized.message_type,
+                content_text=normalized.content_text,
+                media_url=normalized.media_url,
                 meta=meta_payload,
             )
             db.add(msg)
@@ -656,6 +748,10 @@ def sync_from_chatlog(db: Session, since: Optional[datetime] = None) -> Dict[str
     total_fetched = 0
     inserted = 0
     max_ts: Optional[datetime] = since
+    matched_existing_message_ids: set[int] = set()
+    seen_incoming_identities: set[
+        tuple[str | None, str | None, datetime, WechatMessageIdentity]
+    ] = set()
 
     cur = start_date
     while cur <= end_date:
@@ -677,9 +773,11 @@ def sync_from_chatlog(db: Session, since: Optional[datetime] = None) -> Dict[str
                             senderName = m.get("senderName")
                             isChatRoom = bool(m.get("isChatRoom"))
                             isSelf = bool(m.get("isSelf"))
-                            type_ = m.get("type")
-                            content = m.get("content") or m.get("text")
-                            meta_payload, media_url = _build_meta_and_media(m)
+                            normalized = _normalize_chatlog_message(m)
+                            type_ = normalized.message_type
+                            content = normalized.content_text
+                            meta_payload = _normalized_meta(normalized, external_id=_message_external_id(m))
+                            media_url = normalized.media_url
                             time_str = m.get("time") or m.get("timestamp")
                             ts = None
                             if time_str:
@@ -700,15 +798,21 @@ def sync_from_chatlog(db: Session, since: Optional[datetime] = None) -> Dict[str
                             # de-dup
                             exists = None
                             if ts:
-                                exists = db.execute(
-                                    select(Message.id).where(
-                                        Message.chat_id == talker,
-                                        Message.sender_id == sender,
-                                        Message.timestamp == ts,
-                                        Message.content_text == content,
-                                    )
-                                ).scalar()
+                                incoming_identity = _chatlog_message_identity(m)
+                                incoming_key = (talker, sender, ts, incoming_identity)
+                                if incoming_key in seen_incoming_identities:
+                                    continue
+                                seen_incoming_identities.add(incoming_key)
+                                exists = _find_existing_chatlog_message_id(
+                                    db,
+                                    chat_id=talker,
+                                    sender_id=sender,
+                                    timestamp=ts,
+                                    incoming_identity=incoming_identity,
+                                    excluded_message_ids=matched_existing_message_ids,
+                                )
                                 if exists:
+                                    matched_existing_message_ids.add(exists)
                                     continue
                             # upsert chat/contact
                             chat = db.get(Chat, talker)
@@ -761,9 +865,11 @@ def sync_from_chatlog(db: Session, since: Optional[datetime] = None) -> Dict[str
                         senderName = m.get("senderName")
                         isChatRoom = bool(m.get("isChatRoom"))
                         isSelf = bool(m.get("isSelf"))
-                        type_ = m.get("type")
-                        content = m.get("content") or m.get("text")
-                        meta_payload, media_url = _build_meta_and_media(m)
+                        normalized = _normalize_chatlog_message(m)
+                        type_ = normalized.message_type
+                        content = normalized.content_text
+                        meta_payload = _normalized_meta(normalized, external_id=_message_external_id(m))
+                        media_url = normalized.media_url
                         time_str = m.get("time") or m.get("timestamp")
                         ts = None
                         if time_str:
@@ -780,16 +886,22 @@ def sync_from_chatlog(db: Session, since: Optional[datetime] = None) -> Dict[str
                         if ts and ts < since:
                             continue
                         exists = None
-                        if ts and talker and sender and content:
-                            exists = db.execute(
-                                select(Message.id).where(
-                                    Message.chat_id == talker,
-                                    Message.sender_id == sender,
-                                    Message.timestamp == ts,
-                                    Message.content_text == content,
-                                )
-                            ).scalar()
+                        if ts and talker:
+                            incoming_identity = _chatlog_message_identity(m)
+                            incoming_key = (talker, sender, ts, incoming_identity)
+                            if incoming_key in seen_incoming_identities:
+                                continue
+                            seen_incoming_identities.add(incoming_key)
+                            exists = _find_existing_chatlog_message_id(
+                                db,
+                                chat_id=talker,
+                                sender_id=sender,
+                                timestamp=ts,
+                                incoming_identity=incoming_identity,
+                                excluded_message_ids=matched_existing_message_ids,
+                            )
                         if exists:
+                            matched_existing_message_ids.add(exists)
                             continue
                         if talker:
                             chat = db.get(Chat, talker)
@@ -879,6 +991,10 @@ def sync_full(db: Session, days: int = 30) -> Dict[str, Any]:
     cur = start_date
     max_ts: Optional[datetime] = None
     unreachable = False
+    matched_existing_message_ids: set[int] = set()
+    seen_incoming_identities: set[
+        tuple[str | None, str | None, datetime, WechatMessageIdentity]
+    ] = set()
     while cur <= end_date:
         day = cur.isoformat()
         if talkers:
@@ -898,9 +1014,11 @@ def sync_full(db: Session, days: int = 30) -> Dict[str, Any]:
                             senderName = m.get("senderName")
                             isChatRoom = bool(m.get("isChatRoom"))
                             isSelf = bool(m.get("isSelf"))
-                            type_ = m.get("type")
-                            content = m.get("content") or m.get("text")
-                            meta_payload, media_url = _build_meta_and_media(m)
+                            normalized = _normalize_chatlog_message(m)
+                            type_ = normalized.message_type
+                            content = normalized.content_text
+                            meta_payload = _normalized_meta(normalized, external_id=_message_external_id(m))
+                            media_url = normalized.media_url
                             time_str = m.get("time") or m.get("timestamp")
                             ts = None
                             if time_str:
@@ -915,15 +1033,21 @@ def sync_full(db: Session, days: int = 30) -> Dict[str, Any]:
                             if (talker and talker in bl_talk) or (sender and sender in bl_send):
                                 continue
                             if ts:
-                                exists = db.execute(
-                                    select(Message.id).where(
-                                        Message.chat_id == talker,
-                                        Message.sender_id == sender,
-                                        Message.timestamp == ts,
-                                        Message.content_text == content,
-                                    )
-                                ).scalar()
+                                incoming_identity = _chatlog_message_identity(m)
+                                incoming_key = (talker, sender, ts, incoming_identity)
+                                if incoming_key in seen_incoming_identities:
+                                    continue
+                                seen_incoming_identities.add(incoming_key)
+                                exists = _find_existing_chatlog_message_id(
+                                    db,
+                                    chat_id=talker,
+                                    sender_id=sender,
+                                    timestamp=ts,
+                                    incoming_identity=incoming_identity,
+                                    excluded_message_ids=matched_existing_message_ids,
+                                )
                                 if exists:
+                                    matched_existing_message_ids.add(exists)
                                     continue
                             chat = db.get(Chat, talker)
                             if not chat:
@@ -975,9 +1099,11 @@ def sync_full(db: Session, days: int = 30) -> Dict[str, Any]:
                         senderName = m.get("senderName")
                         isChatRoom = bool(m.get("isChatRoom"))
                         isSelf = bool(m.get("isSelf"))
-                        type_ = m.get("type")
-                        content = m.get("content") or m.get("text")
-                        meta_payload, media_url = _build_meta_and_media(m)
+                        normalized = _normalize_chatlog_message(m)
+                        type_ = normalized.message_type
+                        content = normalized.content_text
+                        meta_payload = _normalized_meta(normalized, external_id=_message_external_id(m))
+                        media_url = normalized.media_url
                         time_str = m.get("time") or m.get("timestamp")
                         ts = None
                         if time_str:
@@ -991,16 +1117,23 @@ def sync_full(db: Session, days: int = 30) -> Dict[str, Any]:
                             continue
                         if (talker and talker in bl_talk) or (sender and sender in bl_send):
                             continue
-                        if ts and talker and sender and content:
-                            exists = db.execute(
-                                select(Message.id).where(
-                                    Message.chat_id == talker,
-                                    Message.sender_id == sender,
-                                    Message.timestamp == ts,
-                                    Message.content_text == content,
-                                )
-                            ).scalar()
+                        exists = None
+                        if ts and talker:
+                            incoming_identity = _chatlog_message_identity(m)
+                            incoming_key = (talker, sender, ts, incoming_identity)
+                            if incoming_key in seen_incoming_identities:
+                                continue
+                            seen_incoming_identities.add(incoming_key)
+                            exists = _find_existing_chatlog_message_id(
+                                db,
+                                chat_id=talker,
+                                sender_id=sender,
+                                timestamp=ts,
+                                incoming_identity=incoming_identity,
+                                excluded_message_ids=matched_existing_message_ids,
+                            )
                             if exists:
+                                matched_existing_message_ids.add(exists)
                                 continue
                         if talker:
                             chat = db.get(Chat, talker)
@@ -1182,8 +1315,10 @@ def sync_from_wx_cli(db: Session, days: int = 1) -> Dict[str, Any]:
     }
 
 
-def _normalize_chatlog_record(m: Dict[str, Any]) -> tuple[str | None, str | None, datetime | None, str]:
-    """Return a comparison key (talker, sender, ts_local_naive, content_text)."""
+def _normalize_chatlog_record(
+    m: Dict[str, Any],
+) -> tuple[str | None, str | None, datetime | None, WechatMessageIdentity]:
+    """Return chat coordinates plus the stable message identity."""
     talker = m.get("talker") or m.get("chat_id")
     sender = m.get("sender") or m.get("sender_id")
     # time can be 'time' or 'timestamp' ISO string (with/without Z/offset)
@@ -1194,8 +1329,7 @@ def _normalize_chatlog_record(m: Dict[str, Any]) -> tuple[str | None, str | None
             ts = _to_local_naive(datetime.fromisoformat(ts_str))
         except Exception:
             ts = None
-    content = m.get("content") or m.get("text") or ""
-    return (talker or None, sender or None, ts, content or "")
+    return (talker or None, sender or None, ts, _chatlog_message_identity(m))
 
 
 def compare_with_chatlog(db: Session, *, days: int | None = None, date: str | None = None, fix: bool = False) -> Dict[str, Any]:
@@ -1231,7 +1365,6 @@ def compare_with_chatlog(db: Session, *, days: int | None = None, date: str | No
     cur = start_date
     while cur <= end_date:
         day = cur.isoformat()
-        chatlog_keys: set[tuple[str | None, str | None, datetime | None, str]] = set()
         chatlog_records: list[Dict[str, Any]] = []
 
         if talkers:
@@ -1247,8 +1380,6 @@ def compare_with_chatlog(db: Session, *, days: int | None = None, date: str | No
                     if not part:
                         break
                     for m in part:
-                        key = _normalize_chatlog_record(m)
-                        chatlog_keys.add(key)
                         chatlog_records.append(m)
                     if len(part) < 500:
                         break
@@ -1265,8 +1396,6 @@ def compare_with_chatlog(db: Session, *, days: int | None = None, date: str | No
                 if not part:
                     break
                 for m in part:
-                    key = _normalize_chatlog_record(m)
-                    chatlog_keys.add(key)
                     chatlog_records.append(m)
                 if len(part) < 500:
                     break
@@ -1276,27 +1405,61 @@ def compare_with_chatlog(db: Session, *, days: int | None = None, date: str | No
         start_dt = datetime.fromisoformat(day + "T00:00:00")
         end_dt = datetime.fromisoformat(day + "T23:59:59.999999")
         rows = db.execute(
-            select(Message.chat_id, Message.sender_id, Message.timestamp, Message.content_text)
+            select(
+                Message.chat_id,
+                Message.sender_id,
+                Message.timestamp,
+                Message.type,
+                Message.content_text,
+                Message.meta,
+            )
             .where(Message.timestamp >= start_dt, Message.timestamp <= end_dt)
         ).all()
-        db_keys: set[tuple[str | None, str | None, datetime | None, str]] = set()
-        for (chat_id, sender_id, ts, content_text) in rows:
-            db_keys.add((chat_id, sender_id, _to_local_naive(ts), content_text or ""))
+        db_entries: list[tuple[str | None, str | None, datetime | None, WechatMessageIdentity]] = []
+        for chat_id, sender_id, ts, msg_type, content_text, meta in rows:
+            db_entries.append(
+                (
+                    chat_id,
+                    sender_id,
+                    _to_local_naive(ts),
+                    _stored_message_identity(msg_type, content_text, meta),
+                )
+            )
 
-        missing = chatlog_keys - db_keys
-        extra = db_keys - chatlog_keys
+        matched_db_indexes: set[int] = set()
+        db_buckets: dict[
+            tuple[str | None, str | None, datetime | None],
+            list[tuple[int, WechatMessageIdentity]],
+        ] = {}
+        for index, db_entry in enumerate(db_entries):
+            db_buckets.setdefault(db_entry[:3], []).append((index, db_entry[3]))
+        chatlog_buckets: dict[
+            tuple[str | None, str | None, datetime | None],
+            list[tuple[Dict[str, Any], WechatMessageIdentity]],
+        ] = {}
+        for message in chatlog_records:
+            chatlog_entry = _normalize_chatlog_record(message)
+            chatlog_buckets.setdefault(chatlog_entry[:3], []).append((message, chatlog_entry[3]))
+        missing_records: list[Dict[str, Any]] = []
+        for coordinate, incoming_bucket in chatlog_buckets.items():
+            stored_bucket = db_buckets.get(coordinate, [])
+            local_matches = _maximum_identity_matching(
+                [identity for _message, identity in incoming_bucket],
+                [identity for _index, identity in stored_bucket],
+            )
+            for incoming_index, stored_index in local_matches.items():
+                matched_db_indexes.add(stored_bucket[stored_index][0])
+            missing_records.extend(
+                message
+                for incoming_index, (message, _identity) in enumerate(incoming_bucket)
+                if incoming_index not in local_matches
+            )
+        extra_count = len(db_entries) - len(matched_db_indexes)
 
         # Sample up to 50 missing for UI display
         sample_count = 0
-        if missing:
-            # Fast lookup from key to raw chatlog record
-            index = {}
-            for m in chatlog_records:
-                index[_normalize_chatlog_record(m)] = m
-            for key in list(missing):
-                m = index.get(key)
-                if not m:
-                    continue
+        if missing_records:
+            for m in missing_records:
                 details_sample.append({
                     "day": day,
                     "chat_id": m.get("talker") or m.get("chat_id"),
@@ -1310,17 +1473,13 @@ def compare_with_chatlog(db: Session, *, days: int | None = None, date: str | No
 
         # Optional repair: insert missing messages
         repaired = 0
-        if fix and missing:
-            index = { _normalize_chatlog_record(m): m for m in chatlog_records }
+        if fix and missing_records:
             created_chats: set[str] = set()
             created_contacts: set[str] = set()
             # Use engine-level transaction to bypass ORM pending flush
             from ..db import engine as _engine
             with _engine.begin() as conn:
-                for key in missing:
-                    m = index.get(key)
-                    if not m:
-                        continue
+                for m in missing_records:
                     talker = m.get("talker") or m.get("chat_id")
                     if not talker:
                         continue
@@ -1329,9 +1488,11 @@ def compare_with_chatlog(db: Session, *, days: int | None = None, date: str | No
                     senderName = m.get("senderName")
                     isChatRoom = 1 if bool(m.get("isChatRoom")) else 0
                     isSelf = bool(m.get("isSelf"))
-                    type_ = m.get("type")
-                    content = m.get("content") or m.get("text") or ""
-                    meta_payload, media_url = _build_meta_and_media(m)
+                    normalized = _normalize_chatlog_message(m)
+                    type_ = normalized.message_type
+                    content = normalized.content_text
+                    meta_payload = _normalized_meta(normalized, external_id=_message_external_id(m))
+                    media_url = normalized.media_url
                     ts = None
                     ts_str = m.get("time") or m.get("timestamp")
                     if ts_str:
@@ -1391,17 +1552,17 @@ def compare_with_chatlog(db: Session, *, days: int | None = None, date: str | No
 
         day_summary = {
             "day": day,
-            "chatlog": len(chatlog_keys),
-            "db": len(db_keys),
-            "missing_in_db": len(missing),
-            "extra_in_db": len(extra),
+            "chatlog": len(chatlog_records),
+            "db": len(db_entries),
+            "missing_in_db": len(missing_records),
+            "extra_in_db": extra_count,
             "repaired": repaired,
         }
         summary["days"].append(day_summary)
-        summary["totals"]["chatlog"] += len(chatlog_keys)
-        summary["totals"]["db"] += len(db_keys)
-        summary["totals"]["missing_in_db"] += len(missing)
-        summary["totals"]["extra_in_db"] += len(extra)
+        summary["totals"]["chatlog"] += len(chatlog_records)
+        summary["totals"]["db"] += len(db_entries)
+        summary["totals"]["missing_in_db"] += len(missing_records)
+        summary["totals"]["extra_in_db"] += extra_count
 
         cur = cur + timedelta(days=1)
 

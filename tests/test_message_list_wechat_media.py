@@ -91,6 +91,29 @@ def test_message_list_api_normalizes_wechat_gateway_image_meta_and_names(tmp_pat
     assert item['meta']['contents']['cdnthumburl'] == 'https://mmbiz.qpic.cn/test-thumb.jpg'
 
 
+def test_message_names_follow_current_remarks_without_changing_targets(tmp_path):
+    client, Session = _client(tmp_path)
+    with Session() as db:
+        db.add_all([
+            Contact(id="wxid_a", name="新昵称", alias="客户备注"),
+            Chat(id="wxid_a", title="旧昵称"),
+            Chat(id="room@chatroom", title="最新群名", is_chatroom=True),
+            Message(chat_id="wxid_a", sender_id="wxid_a", sender_name="旧昵称", talker_name="旧昵称",
+                    content_text="私聊", meta={"source": "wechat_gateway"}),
+            Message(chat_id="room@chatroom", sender_id="wxid_a", sender_name="旧昵称", talker_name="旧群名",
+                    content_text="群聊", meta={"source": "wechat_gateway"}),
+        ])
+        db.commit()
+    rows = client.get('/api/messages', headers=API_HEADERS).json()['items']
+    assert all(row['sender_name'] == '客户备注' and row['sender_id'] == 'wxid_a' for row in rows)
+    assert {row['chat_id']: row['talker_name'] for row in rows} == {
+        'wxid_a': '客户备注', 'room@chatroom': '最新群名',
+    }
+    ids = ','.join(str(row['id']) for row in rows)
+    selected = client.get('/api/messages/by-ids', params={'ids': ids}, headers=API_HEADERS).json()['items']
+    assert all(row['sender_name'] == '客户备注' for row in selected)
+
+
 def test_message_list_api_normalizes_wechat_gateway_names_from_meta_when_top_level_is_missing(tmp_path):
     client, Session = _client(tmp_path)
     db = Session()
@@ -156,6 +179,95 @@ def test_message_list_api_repairs_historical_wechat_gateway_id_names_and_numeric
     assert item['type'] == 'link'
 
 
+def test_message_list_api_preserves_explicit_appmsg_contents_and_fills_missing_xml_fields(tmp_path):
+    client, Session = _client(tmp_path)
+    db = Session()
+    try:
+        appmsg_xml = """<msg><appmsg>
+          <title>XML 标题</title>
+          <des>XML 补全描述</des>
+          <url>https://mp.weixin.qq.com/s/xml</url>
+          <type>5</type>
+          <sourceusername>gh_xml</sourceusername>
+          <sourcedisplayname>XML 来源</sourcedisplayname>
+        </appmsg></msg>"""
+        db.add(
+            Message(
+                chat_id="room_appmsg@chatroom",
+                sender_id="wxid_appmsg_sender",
+                direction="in",
+                type="49",
+                content_text=appmsg_xml,
+                media_url=None,
+                meta={
+                    "source": "wechat_gateway",
+                    "contents": {
+                        "title": "显式标题",
+                        "url": "https://mp.weixin.qq.com/s/explicit",
+                        "sourceusername": "gh_explicit",
+                    },
+                },
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    resp = client.get('/api/messages', headers=API_HEADERS)
+    assert resp.status_code == 200
+    item = resp.json()['items'][0]
+    assert item['type'] == 'link'
+    assert item['content_text'] == '显式标题'
+    assert item['media_url'] == 'https://mp.weixin.qq.com/s/explicit'
+    assert item['meta']['contents']['title'] == '显式标题'
+    assert item['meta']['contents']['url'] == 'https://mp.weixin.qq.com/s/explicit'
+    assert item['meta']['contents']['sourceusername'] == 'gh_explicit'
+    assert item['meta']['contents']['desc'] == 'XML 补全描述'
+    assert item['meta']['contents']['sourcedisplayname'] == 'XML 来源'
+
+
+def test_message_list_api_normalizes_historical_record_appmsg_as_file(tmp_path):
+    client, Session = _client(tmp_path)
+    db = Session()
+    try:
+        record_xml = """<msg><appmsg>
+          <title>聊天记录</title><type>24</type>
+          <recorditem><![CDATA[
+            <recordinfo><datalist><dataitem>
+              <cdn_dataurl>record-file-id</cdn_dataurl>
+              <cdn_datakey>record-file-key</cdn_datakey>
+              <datatitle>历史研报.pdf</datatitle>
+              <datafmt>pdf</datafmt>
+              <datasize>4096</datasize>
+            </dataitem></datalist></recordinfo>
+          ]]></recorditem>
+        </appmsg></msg>"""
+        db.add(
+            Message(
+                chat_id="room_record@chatroom",
+                sender_id="wxid_record",
+                direction="in",
+                type="49",
+                content_text=record_xml,
+                media_url=None,
+                meta={"source": "wechat_gateway"},
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    resp = client.get('/api/messages', headers=API_HEADERS)
+    assert resp.status_code == 200
+    item = resp.json()['items'][0]
+    assert item['type'] == 'file'
+    assert item['content_text'] == '聊天记录'
+    assert item['meta']['contents']['cdn_dataurl'] == 'record-file-id'
+    assert item['meta']['contents']['cdndatakey'] == 'record-file-key'
+    assert item['meta']['contents']['datatitle'] == '历史研报.pdf'
+    assert item['meta']['contents']['datafmt'] == 'pdf'
+
+
 def test_ingest_agent_wechat_event_backfills_sender_and_talker_names_from_meta(tmp_path):
     client, Session = _client(tmp_path)
     db = Session()
@@ -209,7 +321,7 @@ def test_main_message_list_frontend_recognizes_wechat_gateway_xml_image_as_image
     source = INDEX_HTML.read_text(encoding='utf-8')
     assert 'normalizeWechatGatewayMedia' in source
     assert 'const normalizedMedia = normalizeWechatGatewayMedia(m);' in source
-    assert "const messageType = normalizedMedia.type || mapMsgTypeCode(m.type);" in source
+    assert "const messageType = mapMsgTypeCode(normalizedMedia.type || m.type);" in source
     assert 'media_url: normalizedMedia.media_url || m.media_url || \'' in source
     assert 'contents: normalizedMedia.contents || ((m.meta && m.meta.contents) || {})' in source
 
@@ -243,7 +355,7 @@ def test_summary_list_content_uses_regular_font_weight():
 
 
 def test_local_wechat_mp_articles_have_summary_and_detail_support():
-    source = Path('app/routers/mp_rss.py').read_text(encoding='utf-8')
+    source = (ROOT / 'app/routers/mp_rss.py').read_text(encoding='utf-8')
     assert 'def _clean_local_summary' in source
     assert 'derived.get("key_info")' in source
     assert '"heat": heat_score' in source

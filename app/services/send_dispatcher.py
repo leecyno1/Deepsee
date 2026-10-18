@@ -13,10 +13,9 @@ from fastapi import Request, UploadFile
 
 from ..config import settings
 from ..db import SessionLocal
-from .llm_client import load_ai_config
+from .link_preview import fetch_link_preview, normalize_card_thumbnail_url
 from .wechat_gateway import apply_outbound_random_delay, evaluate_outbound_message, load_config as load_wechat_gateway_config, record_outbound_message
 from .wechatapi_client import WechatApiClient
-from .wechatpad_client import WeChatPadClient
 
 
 SEND_UPLOAD_MAX_BYTES = int(os.getenv("SEND_UPLOAD_MAX_BYTES", str(20 * 1024 * 1024)))
@@ -263,32 +262,18 @@ def render_text_fallback(parts: Iterable[dict[str, Any]], attachments: Iterable[
 
 
 def get_send_provider(provider_override: str | None = None) -> str:
-    if provider_override:
-        return str(provider_override).strip()
-    try:
-        conf = load_ai_config()
-    except Exception:
-        conf = {}
-    provider = str(conf.get("send_provider") or "").strip()
-    return provider if provider in {"wechatpad_direct", "wechatapi_gateway"} else "wechatapi_gateway"
+    return "wechatapi_gateway"
 
 
 def provider_capabilities(provider: str | None = None) -> dict[str, Any]:
-    chosen = get_send_provider(provider)
-    supports_image = False
-    supports_file = False
-    notes: list[str] = []
-    configured = False
-    if chosen == "wechatapi_gateway":
-        client = WechatApiClient()
-        configured = client.configured()
-        supports_image = True
-        supports_file = True
-        notes.append("wechatapi_gateway 支持文本、链接、图片、文件；本地上传素材需能被网关公网访问。")
-    else:
-        client = WeChatPadClient()
-        configured = client.configured()
-        notes.append("WeChatPad 直连仅保证文本发送；图片/文件将自动转为文字说明 + URL。")
+    chosen = "wechatapi_gateway"
+    client = WechatApiClient()
+    configured = client.configured()
+    supports_image = not client.device_key_mode
+    supports_file = not client.device_key_mode
+    notes = (["新设备已适配文本、链接卡片及通讯录名称同步；图片、文件接口尚未适配。"]
+             if client.device_key_mode else
+             ["微信联系人、群发、卡片、图片和文件统一通过 WeChatAPI；本地数据库仅作缓存。"])
     return {
         "provider": chosen,
         "configured": configured,
@@ -316,6 +301,44 @@ def _part_url(part: dict[str, Any]) -> str:
     return str(part.get("url") or part.get("fileUrl") or part.get("imageUrl") or "").strip()
 
 
+def _looks_like_url(value: str) -> bool:
+    parsed = urlparse(str(value or "").strip())
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _enrich_link_parts(parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    for part in parts:
+        if str(part.get("type") or "").strip().lower() != "link":
+            continue
+        url = _part_url(part)
+        title = str(part.get("title") or part.get("text") or part.get("name") or "").strip()
+        desc = str(part.get("desc") or part.get("description") or "").strip()
+        thumb_url = normalize_card_thumbnail_url(
+            str(part.get("thumb_url") or part.get("thumbUrl") or "").strip()
+        )
+        if not url:
+            continue
+        if not title or _looks_like_url(title) or not thumb_url:
+            preview = fetch_link_preview(url)
+            if not title or _looks_like_url(title):
+                title = str(preview.get("title") or "").strip()
+            if not desc:
+                desc = str(preview.get("desc") or "").strip()
+            if not thumb_url:
+                thumb_url = normalize_card_thumbnail_url(str(preview.get("thumb_url") or "").strip())
+        if not title:
+            raise ValueError("链接卡片缺少标题")
+        if not thumb_url:
+            raise ValueError("链接卡片缺少封面")
+        part.update(
+            title=title,
+            text=title,
+            desc=desc,
+            thumb_url=thumb_url,
+        )
+    return parts
+
+
 def _dispatch_wechatapi_parts(client: WechatApiClient, target: str, parts: list[dict[str, Any]], attachments: list[dict[str, Any]], rendered_text: str) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     rich_supported = all(hasattr(client, name) for name in ("send_link", "send_image", "send_file"))
@@ -333,7 +356,7 @@ def _dispatch_wechatapi_parts(client: WechatApiClient, target: str, parts: list[
                 results.append({"type": "link", "resp": client.send_link(
                     to_wxid=target,
                     url=url,
-                    title=str(part.get("text") or part.get("title") or part.get("name") or "链接"),
+                    title=str(part.get("title") or part.get("text") or part.get("name") or "链接"),
                     desc=str(part.get("desc") or part.get("description") or ""),
                     thumb_url=str(part.get("thumb_url") or part.get("thumbUrl") or ""),
                 )})
@@ -365,82 +388,67 @@ def dispatch_send_item(item: Any, request: Request | None = None) -> dict[str, A
     if not target:
         return {"ok": False, "error": "missing target"}
     provider = get_send_provider(payload.get("provider_override"))
-    if provider == "langbot_gateway":
-        return {
-            "ok": False,
-            "target": target,
-            "provider": provider,
-            "error": "removed send provider: langbot_gateway",
-        }
     parts = payload["content_parts"]
     attachments = payload["attachments"]
     rendered_text = render_text_fallback(parts, attachments)
     if not rendered_text:
         return {"ok": False, "error": "empty rendered text", "target": target}
-    if provider == "wechatapi_gateway":
-        db = SessionLocal()
-        try:
-            conf = load_wechat_gateway_config(db)
-            decision = evaluate_outbound_message(conf, target=target, text=rendered_text)
-            if not decision.get("allowed"):
-                return {
-                    "ok": False,
-                    "target": target,
-                    "provider": provider,
-                    "blocked": True,
-                    "rendered_text": rendered_text,
-                    "error": str(decision.get("reason") or "blocked by wechat gateway rule"),
-                    "rule": decision,
-                }
-            apply_outbound_random_delay(conf)
-            client = WechatApiClient()
-            if not client.configured():
-                return {"ok": False, "error": "wechatapi gateway not configured", "target": target, "provider": provider}
-            part_results = _dispatch_wechatapi_parts(client, target, parts, attachments, rendered_text)
-            resp = {"status": "ok", "results": part_results}
-            record_outbound_message(db, target=target, text=rendered_text, provider_result=resp)
-            used_text_fallback = any(str(r.get("type") or "") == "text_fallback" for r in part_results)
-            return {
-                "ok": True,
-                "target": target,
-                "provider": provider,
-                "mode": "text" if used_text_fallback else ("rich" if _has_rich_media(parts, attachments) or any(str(p.get("type") or "") == "link" for p in parts) else "text"),
-                "rendered_text": rendered_text,
-                "resp": resp,
-            }
-        except Exception as exc:
+    db = SessionLocal()
+    try:
+        conf = load_wechat_gateway_config(db)
+        decision = evaluate_outbound_message(conf, target=target, text=rendered_text)
+        if not decision.get("allowed"):
             return {
                 "ok": False,
                 "target": target,
                 "provider": provider,
-                "mode": "text",
+                "blocked": True,
                 "rendered_text": rendered_text,
-                "error": str(exc),
+                "error": str(decision.get("reason") or "blocked by wechat gateway rule"),
+                "rule": decision,
             }
-        finally:
-            db.close()
-    client = WeChatPadClient()
-    if not client.configured():
-        return {"ok": False, "error": "WeChatPadPro base not configured", "target": target}
-    try:
-        resp = client.send_text(target, rendered_text)
-        return {
+        apply_outbound_random_delay(conf)
+        client = WechatApiClient()
+        if not client.configured():
+            return {"ok": False, "error": "wechatapi gateway not configured", "target": target, "provider": provider}
+        _enrich_link_parts(parts)
+        part_results = _dispatch_wechatapi_parts(client, target, parts, attachments, rendered_text)
+        resp = {"status": "ok", "results": part_results}
+        local_record_error = ""
+        try:
+            record_outbound_message(db, target=target, text=rendered_text, provider_result=resp)
+        except Exception as exc:
+            # The remote send has already succeeded. A local cache/SQLite failure
+            # must not turn that irreversible external result into a failed send,
+            # otherwise the UI invites a retry and can duplicate the message.
+            local_record_error = str(exc)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        used_text_fallback = any(str(r.get("type") or "") == "text_fallback" for r in part_results)
+        result = {
             "ok": True,
             "target": target,
             "provider": provider,
-            "mode": "text_fallback" if _has_rich_media(parts, attachments) else "text",
+            "mode": "text" if used_text_fallback else ("rich" if _has_rich_media(parts, attachments) or any(str(p.get("type") or "") == "link" for p in parts) else "text"),
             "rendered_text": rendered_text,
             "resp": resp,
         }
+        if local_record_error:
+            result["local_record_error"] = local_record_error
+        return result
     except Exception as exc:
         return {
             "ok": False,
             "target": target,
             "provider": provider,
-            "mode": "text_fallback" if _has_rich_media(parts, attachments) else "text",
+            "mode": "text",
             "rendered_text": rendered_text,
             "error": str(exc),
         }
+    finally:
+        db.close()
 
 
 def dispatch_send_items(items: Iterable[Any], request: Request | None = None) -> dict[str, Any]:

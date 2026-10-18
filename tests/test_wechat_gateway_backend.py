@@ -132,7 +132,192 @@ def test_ingest_callback_event_ack_and_dedupe(tmp_path):
         db.close()
 
 
-def test_wechat_gateway_rules_only_apply_to_wechat_provider(tmp_path, monkeypatch):
+def test_ingest_callback_event_stores_canonical_image_fields(tmp_path):
+    Session = _session_factory(tmp_path)
+    db = Session()
+    try:
+        image_xml = (
+            '<msg><fromusername>wxid_image_sender</fromusername><img '
+            'cdnthumburl="https://mmbiz.qpic.cn/callback-thumb.jpg" '
+            'cdnmidimgurl="callback-mid-1" cdnthumbaeskey="callback-key-1" '
+            'md5="callback-md5" length="1024" /></msg>'
+        )
+        result = ingest_callback_event(
+            db,
+            {
+                "TypeName": "AddMsg",
+                "Appid": "wx_app_image",
+                "Wxid": "self_wxid",
+                "Data": {
+                    "MsgId": 501,
+                    "NewMsgId": 502,
+                    "MsgType": 3,
+                    "CreateTime": 1778036780,
+                    "FromUserName": "room_image@chatroom",
+                    "ToUserName": "self_wxid",
+                    "Content": image_xml,
+                },
+            },
+        )
+
+        assert result["stored"] is True
+        message = db.get(Message, int(result["message_id"]))
+        assert message is not None
+        assert message.sender_id == "wxid_image_sender"
+        assert message.type == "image"
+        assert message.content_text == image_xml
+        assert message.media_url == "https://mmbiz.qpic.cn/callback-thumb.jpg"
+        assert (message.meta or {})["contents"] == {
+            "cdnthumburl": "https://mmbiz.qpic.cn/callback-thumb.jpg",
+            "cdnmidimgurl": "callback-mid-1",
+            "cdnthumbaeskey": "callback-key-1",
+            "md5": "callback-md5",
+            "length": "1024",
+        }
+    finally:
+        db.close()
+
+
+def test_ingest_callback_event_stores_file_appmsg_as_canonical_file(tmp_path):
+    Session = _session_factory(tmp_path)
+    db = Session()
+    try:
+        file_xml = """<msg>
+          <fromusername>wxid_file_sender</fromusername>
+          <appmsg>
+            <title>回调报告.pdf</title>
+            <type>6</type>
+            <url>https://files.example.com/callback-report.pdf</url>
+            <appattach>
+              <attachid>callback-attach-1</attachid>
+              <cdnattachurl>callback-cdn-1</cdnattachurl>
+              <aeskey>callback-file-key</aeskey>
+              <fileext>pdf</fileext>
+              <totallen>8192</totallen>
+            </appattach>
+          </appmsg>
+        </msg>"""
+        result = ingest_callback_event(
+            db,
+            {
+                "TypeName": "AddMsg",
+                "Appid": "wx_app_file",
+                "Wxid": "self_wxid",
+                "Data": {
+                    "MsgId": 601,
+                    "NewMsgId": 602,
+                    "MsgType": 49,
+                    "CreateTime": 1778036790,
+                    "FromUserName": "room_file@chatroom",
+                    "ToUserName": "self_wxid",
+                    "Content": file_xml,
+                },
+            },
+        )
+
+        assert result["stored"] is True
+        message = db.get(Message, int(result["message_id"]))
+        assert message is not None
+        assert message.sender_id == "wxid_file_sender"
+        assert message.type == "file"
+        assert message.content_text == "回调报告.pdf"
+        assert message.media_url == "https://files.example.com/callback-report.pdf"
+        contents = (message.meta or {})["contents"]
+        assert contents["appmsg_type"] == "6"
+        assert contents["attachid"] == "callback-attach-1"
+        assert contents["cdnattachurl"] == "callback-cdn-1"
+        assert contents["aeskey"] == "callback-file-key"
+        assert contents["fileext"] == "pdf"
+        assert contents["totallen"] == "8192"
+    finally:
+        db.close()
+
+
+def test_ingest_callback_event_keeps_opaque_image_id_only_in_contents(tmp_path):
+    Session = _session_factory(tmp_path)
+    db = Session()
+    try:
+        opaque_thumb_id = "3057020100044b30490201000204f1e2d3c402032f4c0204aabbccdd0204"
+        image_xml = (
+            '<msg><fromusername>wxid_opaque_image</fromusername><img '
+            f'cdnthumburl="{opaque_thumb_id}" md5="opaque-image-md5" /></msg>'
+        )
+        result = ingest_callback_event(
+            db,
+            {
+                "TypeName": "AddMsg",
+                "Appid": "wx_app_opaque_image",
+                "Wxid": "self_wxid",
+                "Data": {
+                    "MsgId": 701,
+                    "NewMsgId": 702,
+                    "MsgType": 3,
+                    "CreateTime": 1778036800,
+                    "FromUserName": "room_opaque_image@chatroom",
+                    "ToUserName": "self_wxid",
+                    "Content": image_xml,
+                },
+            },
+        )
+
+        assert result["stored"] is True
+        message = db.get(Message, int(result["message_id"]))
+        assert message is not None
+        assert message.type == "image"
+        assert message.media_url is None
+        assert (message.meta or {})["contents"]["cdnthumburl"] == opaque_thumb_id
+        assert (message.meta or {})["contents"]["md5"] == "opaque-image-md5"
+    finally:
+        db.close()
+
+
+def test_ingest_callback_event_does_not_forge_chatlog_url_for_opaque_file(tmp_path):
+    Session = _session_factory(tmp_path)
+    db = Session()
+    try:
+        opaque_file_id = "3052020100044b30490201000204a1b2c3d402032f4c0204ddeeff000204"
+        file_xml = f"""<msg>
+          <fromusername>wxid_opaque_file</fromusername>
+          <appmsg>
+            <title>opaque-report.pdf</title><type>6</type><md5>opaque-file-md5</md5>
+            <appattach>
+              <cdnattachurl>{opaque_file_id}</cdnattachurl>
+              <aeskey>opaque-file-key</aeskey><fileext>pdf</fileext><totallen>1024</totallen>
+            </appattach>
+          </appmsg>
+        </msg>"""
+        result = ingest_callback_event(
+            db,
+            {
+                "TypeName": "AddMsg",
+                "Appid": "wx_app_opaque_file",
+                "Wxid": "self_wxid",
+                "Data": {
+                    "MsgId": 801,
+                    "NewMsgId": 802,
+                    "MsgType": 49,
+                    "CreateTime": 1778036810,
+                    "FromUserName": "room_opaque_file@chatroom",
+                    "ToUserName": "self_wxid",
+                    "Content": file_xml,
+                },
+            },
+        )
+
+        assert result["stored"] is True
+        message = db.get(Message, int(result["message_id"]))
+        assert message is not None
+        assert message.type == "file"
+        assert message.content_text == "opaque-report.pdf"
+        assert message.media_url is None
+        contents = (message.meta or {})["contents"]
+        assert contents["cdnattachurl"] == opaque_file_id
+        assert contents["md5"] == "opaque-file-md5"
+    finally:
+        db.close()
+
+
+def test_wechat_gateway_rules_apply_even_when_legacy_provider_is_requested(tmp_path, monkeypatch):
     Session = _session_factory(tmp_path)
     db = Session()
     try:
@@ -163,15 +348,7 @@ def test_wechat_gateway_rules_only_apply_to_wechat_provider(tmp_path, monkeypatc
             self.calls.append((to_wxid, text))
             return {"ret": 200, "data": {"newMsgId": 9001, "msgId": 1, "toWxid": to_wxid, "type": 1}}
 
-    class _DummyPadClient:
-        def configured(self):
-            return True
-
-        def send_text(self, to_user: str, text: str):
-            return {"status": "ok", "target": to_user, "text": text}
-
     monkeypatch.setattr(send_dispatcher, "WechatApiClient", _DummyWechatApiClient, raising=False)
-    monkeypatch.setattr(send_dispatcher, "WeChatPadClient", _DummyPadClient)
 
     blocked = send_dispatcher.dispatch_send_item(
         {
@@ -191,8 +368,9 @@ def test_wechat_gateway_rules_only_apply_to_wechat_provider(tmp_path, monkeypatc
             "provider_override": "wechatpad_direct",
         }
     )
-    assert other_provider["ok"] is True
-    assert other_provider["provider"] == "wechatpad_direct"
+    assert other_provider["ok"] is False
+    assert other_provider["provider"] == "wechatapi_gateway"
+    assert other_provider["blocked"] is True
 
 
 def test_wechat_gateway_send_logs_outbound_message(tmp_path, monkeypatch):

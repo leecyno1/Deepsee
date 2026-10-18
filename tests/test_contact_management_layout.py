@@ -63,11 +63,18 @@ const html = renderContactScorecard({
   analytics: {
     recommended_action: { action: '继续重点跟踪', reason: '近期改善明显' },
     sub_scores: { recommendation_accuracy: { score: 80, recent_90d_score: 70, recent_90d_samples: 3 } },
-    horizon_event_groups: {}
+    horizon_event_groups: {},
+    score_explanation: {
+      headline: '综合分 72.0，样本稳定',
+      drivers: [{ label: '准确度', value: 74, tone: 'good', detail: '命中率较高' }],
+      strengths: ['主线集中'],
+      risks: ['待验证较多'],
+      next_steps: ['继续重点跟踪']
+    }
   },
   market_curves: [
-    { asset_name: '紫金矿业', asset_code: '601899', items: [{ date: '2026-01-01', close: 10 }, { date: '2026-02-01', close: 12 }], anchor_points: [{ date: '2026-01-01', direction: 'bullish', label: '看好 ×2', count: 2, samples: ['继续看好'] }] },
-    { asset_name: '宁德时代', asset_code: '300750', items: [{ date: '2026-01-01', close: 100 }, { date: '2026-02-01', close: 96 }], anchor_points: [{ date: '2026-02-01', direction: 'bearish', label: '看空', count: 1, samples: ['短期看空'] }] }
+    { asset_name: '紫金矿业', asset_code: '601899', latest_market_date: '2026-07-13', latest_close: 12, data_age_days: 0, is_pending: true, items: [{ date: '2026-01-01', close: 10 }, { date: '2026-07-13', close: 12 }], anchor_points: [{ date: '2026-01-01', direction: 'bullish', label: '看好 ×2', count: 2, samples: ['继续看好'] }] },
+    { asset_name: '宁德时代', asset_code: '300750', latest_market_date: '2026-07-13', latest_close: 96, data_age_days: 0, is_pending: false, items: [{ date: '2026-01-01', close: 100 }, { date: '2026-07-13', close: 96 }], anchor_points: [{ date: '2026-02-01', direction: 'bearish', label: '看空', count: 1, samples: ['短期看空'] }] }
   ],
   predictions: [{ source_time: '2026-02-01T09:00:00', asset_name: '紫金矿业', direction: 'bullish', normalized_text: '继续看好紫金矿业', evaluations: [{ horizon_code: '1m', direction_hit: true, excess_return: 0.08, event_score: 82 }] }],
   timeline: []
@@ -88,7 +95,7 @@ console.log(html);
     assert "contact-scorecard-shell" in html
     assert "contact-scorecard-primary" in html
     assert "contact-scorecard-secondary" in html
-    assert "核心标的动态" in html
+    assert "推荐标的价格曲线" in html
     assert "contact-score-trend-chart multi" in html
     assert "contact-score-overview" in html
     assert "综合分" in html
@@ -96,6 +103,11 @@ console.log(html);
     assert "看空" in html
     assert "contact-score-matrix" in html
     assert "评分矩阵" in html
+    assert "评分解释" in html
+    assert "综合分 72.0" in html
+    assert "行情截至 2026-07-13" in html
+    assert "最新价 12.00" in html
+    assert "待验证" in html
     assert "contact-score-terminal" in html
     assert "观点摘要" in html
 

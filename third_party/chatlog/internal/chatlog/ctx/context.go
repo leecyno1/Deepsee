@@ -1,23 +1,23 @@
 package ctx
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/rs/zerolog/log"
+
 	"github.com/sjzar/chatlog/internal/chatlog/conf"
 	"github.com/sjzar/chatlog/internal/wechat"
 	"github.com/sjzar/chatlog/pkg/config"
 	"github.com/sjzar/chatlog/pkg/filecopy"
+	clog "github.com/sjzar/chatlog/pkg/log"
 	"github.com/sjzar/chatlog/pkg/util"
 )
 
 const (
-	DefalutHTTPAddr = "127.0.0.1:5030"
+	DefaultHTTPAddr = "127.0.0.1:5030"
 )
 
 // Context is a context for a chatlog.
@@ -47,11 +47,19 @@ type Context struct {
 	HTTPEnabled bool
 	HTTPAddr    string
 
-	// 自动解密
-	AutoDecrypt bool
-	LastSession time.Time
-	WalEnabled  bool
-	AutoDecryptDebounce int
+	LastSession          time.Time
+	OCR                  conf.OCRConfig
+	HookKeywords         string
+	HookKeywordMode      string
+	HookEffectiveAt      int64
+	HookNotifyMode       string
+	HookPostURL          string
+	HookBeforeCount      int
+	HookAfterCount       int
+	HookForwardAll       bool
+	HookForwardContacts  string
+	HookForwardChatRooms string
+	LogRetentionDays     int
 
 	// 当前选中的微信实例
 	Current *wechat.Account
@@ -89,6 +97,8 @@ func (c *Context) loadConfig() {
 func (c *Context) SwitchHistory(account string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	previousDataDir := c.DataDir
+	previousWorkDir := c.WorkDir
 	c.Current = nil
 	c.PID = 0
 	c.ExePath = ""
@@ -105,8 +115,18 @@ func (c *Context) SwitchHistory(account string) {
 		c.WorkDir = history.WorkDir
 		c.HTTPEnabled = history.HTTPEnabled
 		c.HTTPAddr = history.HTTPAddr
-		c.WalEnabled = history.WalEnabled
-		c.AutoDecryptDebounce = history.AutoDecryptDebounce
+		c.OCR = history.OCR
+		c.HookKeywords = history.HookKeywords
+		c.HookKeywordMode = history.HookKeywordMode
+		c.HookEffectiveAt = history.HookEffectiveAt
+		c.HookNotifyMode = history.HookNotifyMode
+		c.HookPostURL = history.HookPostURL
+		c.HookBeforeCount = history.HookBeforeCount
+		c.HookAfterCount = history.HookAfterCount
+		c.HookForwardAll = history.HookForwardAll
+		c.HookForwardContacts = history.HookForwardContacts
+		c.HookForwardChatRooms = history.HookForwardChatRooms
+		c.LogRetentionDays = clog.NormalizeRetentionDays(history.LogRetentionDays)
 	} else {
 		c.Account = ""
 		c.Platform = ""
@@ -118,20 +138,70 @@ func (c *Context) SwitchHistory(account string) {
 		c.WorkDir = ""
 		c.HTTPEnabled = false
 		c.HTTPAddr = ""
-		c.WalEnabled = false
-		c.AutoDecryptDebounce = 0
+		c.OCR = conf.DefaultOCRConfig()
+		c.HookKeywords = ""
+		c.HookKeywordMode = conf.HookKeywordModeText
+		c.HookEffectiveAt = 0
+		c.HookNotifyMode = conf.HookNotifyPost
+		c.HookPostURL = ""
+		c.HookBeforeCount = 5
+		c.HookAfterCount = 5
+		c.HookForwardAll = false
+		c.HookForwardContacts = ""
+		c.HookForwardChatRooms = ""
+		c.LogRetentionDays = clog.DefaultRetentionDays
+	}
+	clog.SetRetention(c.LogRetentionDays)
+	if c.DataDir != previousDataDir {
+		c.DataUsage = ""
+	}
+	if c.WorkDir != previousWorkDir {
+		c.WorkUsage = ""
 	}
 }
 
 func (c *Context) SwitchCurrent(info *wechat.Account) {
-	c.SwitchHistory(info.Name)
+	if info == nil {
+		return
+	}
+	c.mu.Lock()
+	// Same account with a new WeChat PID (common after controlled restart) keeps
+	// the in-memory preference and address instead of reloading an older History
+	// snapshot.
+	sameAccount := c.Account != "" && c.Account == info.Name
+	c.mu.Unlock()
+	if !sameAccount {
+		c.SwitchHistory(info.Name)
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.Current = info
-	c.Refresh()
-
+	c.refreshLocked()
 }
+
+func (c *Context) CurrentAccount() *wechat.Account {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Current
+}
+
+func (c *Context) DefaultWorkDir(account string) string {
+	return util.WorkDirAt(c.GetRuntimeDir(), account)
+}
+
+func (c *Context) SetLastSession(value time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.LastSession = value
+}
+
 func (c *Context) Refresh() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.refreshLocked()
+}
+
+func (c *Context) refreshLocked() {
 	if c.Current != nil {
 		c.Account = c.Current.Name
 		c.Platform = c.Current.Platform
@@ -150,21 +220,18 @@ func (c *Context) Refresh() {
 		}
 		if c.Current.DataDir != c.DataDir {
 			c.DataDir = c.Current.DataDir
+			c.DataUsage = ""
 		}
 
 	}
 	if c.DataUsage == "" && c.DataDir != "" {
-		go func() {
-			c.DataUsage = util.GetDirSize(c.DataDir)
-		}()
+		c.DataUsage = util.GetDirSize(c.DataDir)
 	}
 	if c.WorkUsage == "" && c.WorkDir != "" {
-		go func() {
-			workSize := util.GetDirSize(c.WorkDir)
-			cacheDir := filecopy.GetCacheDir()
-			cacheSize := util.GetDirSize(cacheDir)
-			c.WorkUsage = fmt.Sprintf("%s (Cache: %s)", workSize, cacheSize)
-		}()
+		workSize := util.GetDirSize(c.WorkDir)
+		cacheDir := filecopy.GetCacheDir()
+		cacheSize := util.GetDirSize(cacheDir)
+		c.WorkUsage = fmt.Sprintf("%s (Cache: %s)", workSize, cacheSize)
 	}
 }
 
@@ -172,12 +239,22 @@ func (c *Context) GetDataDir() string {
 	return c.DataDir
 }
 
+// GetAccount 返回当前激活的 chatlog account（含 local hex suffix），用于
+// messagehook 把它 strip 后填到 Event.OwnerWxid，让 webhook 接收方能判定
+// 消息属于哪个微信账号，避免切号期间数据错乱。
+func (c *Context) GetAccount() string {
+	return c.Account
+}
+
 func (c *Context) GetWorkDir() string {
 	return c.WorkDir
 }
 
-func (c *Context) GetPlatform() string {
-	return c.Platform
+func (c *Context) GetRuntimeDir() string {
+	if c.conf != nil && strings.TrimSpace(c.conf.ConfigDir) != "" {
+		return c.conf.ConfigDir
+	}
+	return util.AppRootDir()
 }
 
 func (c *Context) GetVersion() int {
@@ -188,32 +265,85 @@ func (c *Context) GetDataKey() string {
 	return c.DataKey
 }
 
-func (c *Context) GetWalEnabled() bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.WalEnabled
-}
-
-func (c *Context) GetAutoDecryptDebounce() int {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.AutoDecryptDebounce
-}
-
 func (c *Context) GetHTTPAddr() string {
 	if c.HTTPAddr == "" {
-		c.HTTPAddr = DefalutHTTPAddr
+		c.HTTPAddr = DefaultHTTPAddr
 	}
 	return c.HTTPAddr
 }
 
-func (c *Context) GetWebhook() *conf.Webhook {
-	return c.conf.Webhook
+func (c *Context) GetMessageHook() *conf.MessageHook {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	snapshot := conf.NormalizeMessageHook(conf.MessageHook{
+		Keywords:         c.HookKeywords,
+		KeywordMode:      c.HookKeywordMode,
+		EffectiveAt:      c.HookEffectiveAt,
+		NotifyMode:       c.HookNotifyMode,
+		PostURL:          c.HookPostURL,
+		BeforeCount:      c.HookBeforeCount,
+		AfterCount:       c.HookAfterCount,
+		ForwardAll:       c.HookForwardAll,
+		ForwardContacts:  c.HookForwardContacts,
+		ForwardChatRooms: c.HookForwardChatRooms,
+	})
+	return &snapshot
+}
+
+func (c *Context) UpdateMessageHook(next conf.MessageHook) error {
+	next = conf.NormalizeMessageHook(next)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	current := conf.MessageHook{
+		Keywords: c.HookKeywords, KeywordMode: c.HookKeywordMode, EffectiveAt: c.HookEffectiveAt,
+		ForwardAll: c.HookForwardAll, ForwardContacts: c.HookForwardContacts, ForwardChatRooms: c.HookForwardChatRooms,
+	}
+	if !conf.MessageHookRulesEqual(current, next) {
+		if next.EffectiveAt <= 0 {
+			next.EffectiveAt = time.Now().Unix()
+		}
+	} else {
+		next.EffectiveAt = c.HookEffectiveAt
+	}
+	c.HookKeywords = next.Keywords
+	c.HookKeywordMode = next.KeywordMode
+	c.HookEffectiveAt = next.EffectiveAt
+	c.HookNotifyMode = next.NotifyMode
+	c.HookPostURL = next.PostURL
+	c.HookBeforeCount = next.BeforeCount
+	c.HookAfterCount = next.AfterCount
+	c.HookForwardAll = next.ForwardAll
+	c.HookForwardContacts = next.ForwardContacts
+	c.HookForwardChatRooms = next.ForwardChatRooms
+	c.UpdateConfig()
+	return nil
 }
 
 func (c *Context) GetSaveDecryptedMedia() bool {
 	// Default to true for now, can be made configurable later
 	return true
+}
+
+func (c *Context) GetOCRConfig() conf.OCRConfig {
+	c.mu.RLock()
+	ocrConfig := c.OCR
+	c.mu.RUnlock()
+	return conf.OCRConfigWithEnv(ocrConfig)
+}
+
+func (c *Context) GetStoredOCRConfig() conf.OCRConfig {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return conf.NormalizeOCRConfig(c.OCR)
+}
+
+func (c *Context) UpdateOCRConfig(next conf.OCRConfig) error {
+	next = conf.NormalizeOCRConfig(next)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.OCR = next
+	c.UpdateConfig()
+	return nil
 }
 
 func (c *Context) SetHTTPEnabled(enabled bool) {
@@ -243,8 +373,9 @@ func (c *Context) SetWorkDir(dir string) {
 		return
 	}
 	c.WorkDir = dir
+	c.WorkUsage = ""
 	c.UpdateConfig()
-	c.Refresh()
+	c.refreshLocked()
 }
 
 func (c *Context) SetDataDir(dir string) {
@@ -254,8 +385,9 @@ func (c *Context) SetDataDir(dir string) {
 		return
 	}
 	c.DataDir = dir
+	c.DataUsage = ""
 	c.UpdateConfig()
-	c.Refresh()
+	c.refreshLocked()
 }
 
 func (c *Context) SetImgKey(key string) {
@@ -268,33 +400,119 @@ func (c *Context) SetImgKey(key string) {
 	c.UpdateConfig()
 }
 
-func (c *Context) SetAutoDecrypt(enabled bool) {
+func (c *Context) SetDataKey(key string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.AutoDecrypt == enabled {
+	if c.DataKey == key {
 		return
 	}
-	c.AutoDecrypt = enabled
+	c.DataKey = key
 	c.UpdateConfig()
 }
 
-func (c *Context) SetWalEnabled(enabled bool) {
+func (c *Context) SetHookKeywords(keywords string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.WalEnabled == enabled {
+	if c.HookKeywords == keywords {
 		return
 	}
-	c.WalEnabled = enabled
+	c.HookKeywords = keywords
+	c.HookEffectiveAt = time.Now().Unix()
 	c.UpdateConfig()
 }
 
-func (c *Context) SetAutoDecryptDebounce(debounce int) {
+func (c *Context) SetHookNotifyMode(mode string) {
+	mode = conf.CanonicalHookNotifyMode(mode)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.AutoDecryptDebounce == debounce {
+	if c.HookNotifyMode == mode {
 		return
 	}
-	c.AutoDecryptDebounce = debounce
+	c.HookNotifyMode = mode
+	c.UpdateConfig()
+}
+
+func (c *Context) SetHookPostURL(url string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.HookPostURL == url {
+		return
+	}
+	c.HookPostURL = url
+	c.UpdateConfig()
+}
+
+func (c *Context) SetHookBeforeCount(n int) {
+	if n < 0 {
+		n = 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.HookBeforeCount == n {
+		return
+	}
+	c.HookBeforeCount = n
+	c.UpdateConfig()
+}
+
+func (c *Context) SetLogRetentionDays(days int) {
+	days = clog.NormalizeRetentionDays(days)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	saved := c.History[c.Account].LogRetentionDays
+	if c.LogRetentionDays == days && saved == days {
+		return
+	}
+	c.LogRetentionDays = days
+	clog.SetRetention(days)
+	c.UpdateConfig()
+}
+
+func (c *Context) SetHookAfterCount(n int) {
+	if n < 0 {
+		n = 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.HookAfterCount == n {
+		return
+	}
+	c.HookAfterCount = n
+	c.UpdateConfig()
+}
+
+func (c *Context) SetHookForwardAll(enabled bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.HookForwardAll == enabled {
+		return
+	}
+	c.HookForwardAll = enabled
+	c.HookEffectiveAt = time.Now().Unix()
+	c.UpdateConfig()
+}
+
+func (c *Context) SetHookForwardContacts(raw string) {
+	raw = strings.TrimSpace(raw)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.HookForwardContacts == raw {
+		return
+	}
+	c.HookForwardContacts = raw
+	c.HookEffectiveAt = time.Now().Unix()
+	c.UpdateConfig()
+}
+
+func (c *Context) SetHookForwardChatRooms(raw string) {
+	raw = strings.TrimSpace(raw)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.HookForwardChatRooms == raw {
+		return
+	}
+	c.HookForwardChatRooms = raw
+	c.HookEffectiveAt = time.Now().Unix()
 	c.UpdateConfig()
 }
 
@@ -302,19 +520,29 @@ func (c *Context) SetAutoDecryptDebounce(debounce int) {
 func (c *Context) UpdateConfig() {
 
 	pconf := conf.ProcessConfig{
-		Type:        "wechat",
-		Account:     c.Account,
-		Platform:    c.Platform,
-		Version:     c.Version,
-		FullVersion: c.FullVersion,
-		DataDir:     c.DataDir,
-		DataKey:     c.DataKey,
-		ImgKey:      c.ImgKey,
-		WorkDir:     c.WorkDir,
-		HTTPEnabled: c.HTTPEnabled,
-		HTTPAddr:    c.HTTPAddr,
-		WalEnabled:  c.WalEnabled,
-		AutoDecryptDebounce: c.AutoDecryptDebounce,
+		Type:                 "wechat",
+		Account:              c.Account,
+		Platform:             c.Platform,
+		Version:              c.Version,
+		FullVersion:          c.FullVersion,
+		DataDir:              c.DataDir,
+		DataKey:              c.DataKey,
+		ImgKey:               c.ImgKey,
+		WorkDir:              c.WorkDir,
+		HTTPEnabled:          c.HTTPEnabled,
+		HTTPAddr:             c.HTTPAddr,
+		OCR:                  c.OCR,
+		HookKeywords:         c.HookKeywords,
+		HookKeywordMode:      c.HookKeywordMode,
+		HookEffectiveAt:      c.HookEffectiveAt,
+		HookNotifyMode:       c.HookNotifyMode,
+		HookPostURL:          c.HookPostURL,
+		HookBeforeCount:      c.HookBeforeCount,
+		HookAfterCount:       c.HookAfterCount,
+		HookForwardAll:       c.HookForwardAll,
+		HookForwardContacts:  c.HookForwardContacts,
+		HookForwardChatRooms: c.HookForwardChatRooms,
+		LogRetentionDays:     c.LogRetentionDays,
 	}
 
 	if c.conf.History == nil {
@@ -335,6 +563,14 @@ func (c *Context) UpdateConfig() {
 			c.conf.History = append(c.conf.History, pconf)
 		}
 	}
+	// Keep the in-memory History map aligned with conf.History so account
+	// switching always restores the latest saved HTTP preference.
+	if c.History == nil {
+		c.History = make(map[string]conf.ProcessConfig)
+	}
+	if c.Account != "" {
+		c.History[c.Account] = pconf
+	}
 
 	if err := c.cm.SetConfig("last_account", c.Account); err != nil {
 		log.Error().Err(err).Msg("set last_account failed")
@@ -346,11 +582,4 @@ func (c *Context) UpdateConfig() {
 		return
 	}
 
-	if len(pconf.DataDir) != 0 {
-		if b, err := json.Marshal(pconf); err == nil {
-			if err := os.WriteFile(filepath.Join(pconf.DataDir, "chatlog.json"), b, 0644); err != nil {
-				log.Error().Err(err).Msg("save chatlog.json failed")
-			}
-		}
-	}
 }

@@ -105,6 +105,51 @@ def test_extensions_wechat_messages_main_table_exposes_chinese_names_and_image_m
     assert item["meta"]["contents"]["cdnthumburl"] == "https://mmbiz.qpic.cn/test-thumb.jpg"
 
 
+def test_extensions_wechat_messages_uses_stored_canonical_file_contents(tmp_path):
+    client, Session = _client(tmp_path)
+    db = Session()
+    try:
+        db.add(
+            Message(
+                chat_id="room_file_ext@chatroom",
+                sender_id="wxid_file_ext",
+                sender_name="文件发送人",
+                talker_name="文件群",
+                direction="in",
+                type="file",
+                content_text="扩展报告.pdf",
+                media_url="https://files.example.com/extension-report.pdf",
+                meta={
+                    "source": "wechat_gateway",
+                    "external_new_msg_id": "ext-file-1",
+                    "contents": {
+                        "appmsg_type": "6",
+                        "title": "扩展报告.pdf",
+                        "url": "https://files.example.com/extension-report.pdf",
+                        "attachid": "extension-attach-1",
+                        "cdnattachurl": "extension-cdn-1",
+                        "aeskey": "extension-key-1",
+                        "fileext": "pdf",
+                        "totallen": "1024",
+                    },
+                },
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    resp = client.get("/api/extensions/messages", params={"adapter_key": "wechat"}, headers=API_HEADERS)
+    assert resp.status_code == 200
+    item = resp.json()["items"][0]
+    assert item["external_id"] == "ext-file-1"
+    assert item["meta"]["media_url"] == "https://files.example.com/extension-report.pdf"
+    assert item["meta"]["contents"]["appmsg_type"] == "6"
+    assert item["meta"]["contents"]["attachid"] == "extension-attach-1"
+    assert item["meta"]["contents"]["cdnattachurl"] == "extension-cdn-1"
+    assert item["meta"]["contents"]["aeskey"] == "extension-key-1"
+
+
 def test_build_chatlog_media_url_supports_cdnthumburl_image_preview():
     url = _build_chatlog_media_url(
         3,

@@ -77,6 +77,29 @@ uninstall_service() {
   ok "launchd service removed: ${SERVICE_TARGET}"
 }
 
+start_service() {
+  if [[ ! -f "$PLIST_PATH" ]]; then
+    err "plist not found: $PLIST_PATH"
+    exit 1
+  fi
+  ensure_dirs
+  chmod +x "$RUNNER_PATH"
+  if ! launchctl print "$SERVICE_TARGET" >/dev/null 2>&1; then
+    launchctl bootstrap "$DOMAIN" "$PLIST_PATH"
+    launchctl enable "$SERVICE_TARGET" >/dev/null 2>&1 || true
+  fi
+  launchctl kickstart -k "$SERVICE_TARGET"
+  sleep 1
+  ok "service started: ${SERVICE_TARGET}"
+}
+
+stop_service() {
+  if launchctl print "$SERVICE_TARGET" >/dev/null 2>&1; then
+    launchctl bootout "$DOMAIN" "$PLIST_PATH"
+  fi
+  ok "service stopped: ${SERVICE_TARGET}"
+}
+
 status_service() {
   if launchctl print "$SERVICE_TARGET" >/dev/null 2>&1; then
     ok "service loaded: ${SERVICE_TARGET}"
@@ -123,13 +146,15 @@ health_check() {
 cmd="${1:-install}"
 case "$cmd" in
   install) install_service ;;
+  start) start_service ;;
+  stop) stop_service ;;
   uninstall|remove) uninstall_service ;;
   restart) restart_service ;;
   status) status_service ;;
   logs) logs_service ;;
   health) health_check ;;
   *)
-    echo "Usage: $0 [install|uninstall|restart|status|logs|health]"
+    echo "Usage: $0 [install|start|stop|uninstall|restart|status|logs|health]"
     exit 2
     ;;
 esac

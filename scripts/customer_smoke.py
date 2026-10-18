@@ -52,6 +52,7 @@ def _load_offline_ready(path: str | None) -> dict[str, Any] | None:
 def run(args: argparse.Namespace) -> dict[str, Any]:
     base = str(args.base_url).rstrip("/")
     ready = _load_offline_ready(args.offline_ready_json)
+    offline_mode = ready is not None
     health_samples: list[dict[str, Any]] = []
     errors: list[str] = []
     started = time.time()
@@ -70,8 +71,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             errors.append(f"ready {exc}")
 
     port = int(args.port or base.rsplit(":", 1)[-1].split("/", 1)[0] or 8001)
-    pid = _find_pid_on_port(port)
-    rss = _rss_mb(pid)
+    pid = None if offline_mode else _find_pid_on_port(port)
+    rss = None if offline_mode else _rss_mb(pid)
     max_rss = float(args.max_rss_mb)
     ready_healthy = bool(ready.get("healthy"))
     rss_ok = rss is None or rss <= max_rss
@@ -81,7 +82,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "base_url": base,
         "duration_seconds": round(time.time() - started, 2),
         "thresholds": {"max_rss_mb": max_rss},
-        "process": {"pid": pid, "rss_mb": rss},
+        "process": {"pid": pid, "rss_mb": rss, "inspected": not offline_mode},
         "health_samples": health_samples,
         "ready": ready,
         "errors": errors,

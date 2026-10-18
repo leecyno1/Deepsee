@@ -14,54 +14,42 @@ const (
 	Content   = `[yellow]Chatlog 使用指南[white]
 
 [green]基本操作:[white]
-• 使用 [yellow]←→[white] 键在主菜单和帮助页面之间切换
-• 使用 [yellow]↑↓[white] 键在菜单项之间移动
-• 按 [yellow]Enter[white] 选择菜单项
-• 按 [yellow]Esc[white] 返回上一级菜单
+• 使用 [yellow]←→[white] 在主菜单和帮助页面之间切换
+• 使用 [yellow]↑↓[white] 移动，按 [yellow]Enter[white] 选择，按 [yellow]Esc[white] 返回
 • 按 [yellow]Ctrl+C[white] 退出程序
 
 [green]使用步骤:[white]
 
-[yellow]1. 下载并安装微信客户端[white]
+[yellow]1. 准备微信聊天数据[white]
+   如需迁移手机记录，请在手机微信中选择「我 - 设置 - 通用 - 聊天记录迁移与备份」。
 
-[yellow]2. 迁移手机微信聊天记录[white]
-   手机微信上操作 [yellow]我 - 设置 - 通用 - 聊天记录迁移与备份 - 迁移 - 迁移到电脑[white]。
-   这一步的目的是将手机中的聊天记录传输到电脑上。
-   可以放心操作，不会影响到手机上的聊天记录。
+[yellow]2. 获取密钥并启动查询[white]
+   macOS 数据库密钥使用 Frida 获取：先执行 [yellow]pip3 install frida-tools[white]，
+   再选择「重启并获取数据库密钥」或运行 [yellow]chatlog ops database-key[white]。
+   图片密钥为独立流程；权限不足时仅对短生命周期扫描子进程请求管理员授权。
 
-[yellow]3. 解密数据[white]
-   重新打开 chatlog，选择"解密数据"菜单项，程序会使用获取的密钥解密微信数据库文件。
-   解密后的文件会保存到工作目录中（可在设置中修改）。
+[yellow]3. 启动 HTTP 服务[white]
+   选择「启动 HTTP 服务」，浏览器打开 [yellow]http://127.0.0.1:5030[white]。
+   控制面强制绑定本机回环地址，不允许直接暴露到局域网或公网。
 
-[yellow]4. 启动 HTTP 服务[white]
-   选择"启动 HTTP 服务"菜单项，启动 HTTP 和 MCP 服务。
-   启动后可以通过浏览器访问 http://localhost:5030 查看聊天记录。
+[green]HTTP API 示例:[white]
+• 会话列表: [yellow]GET http://127.0.0.1:5030/api/v1/sessions?limit=20[white]
+• 聊天记录: [yellow]GET http://127.0.0.1:5030/api/v1/history?chat=wxid_xxx&time=2026-01-01[white]
+• 消息搜索: [yellow]GET http://127.0.0.1:5030/api/v1/search?keyword=项目&chats=工作群[white]
+• 全局搜索: [yellow]GET http://127.0.0.1:5030/api/v1/db/search?keyword=项目&mode=deep[white]
+• 联系人: [yellow]GET http://127.0.0.1:5030/api/v1/contacts?limit=20[white]
+• 群聊: [yellow]GET http://127.0.0.1:5030/api/v1/chatrooms?limit=20[white]
+• 朋友圈: [yellow]GET http://127.0.0.1:5030/api/v1/sns_feed?limit=20[white]
 
-[yellow]5. 设置选项[white]
-   选择"设置"菜单项，可以配置:
-   • HTTP 服务端口 - 更改 HTTP 服务的监听端口
-   • 工作目录 - 更改解密数据的存储位置
-
-[green]HTTP API 使用:[white]
-• 聊天记录: [yellow]GET http://localhost:5030/api/v1/chatlog?time=2023-01-01&talker=wxid_xxx[white]
-• 联系人列表: [yellow]GET http://localhost:5030/api/v1/contact[white]
-• 群聊列表: [yellow]GET http://localhost:5030/api/v1/chatroom[white]
-• 会话列表: [yellow]GET http://localhost:5030/api/v1/session[white]
-
-[green]MCP 集成:[white]
-Chatlog 支持 Model Context Protocol，可与支持 MCP 的 AI 助手集成。
-通过 MCP，AI 助手可以直接查询您的聊天记录、联系人和群聊信息。
-
-[green]常见问题:[white]
-• 如果获取密钥失败，请确保微信程序正在运行
-• 如果解密失败，请检查密钥是否正确获取
-• 如果 HTTP 服务启动失败，请检查端口是否被占用
-• 数据目录和工作目录会自动保存，下次启动时自动加载
+[green]前端页面:[white]
+• 仪表盘、数据库浏览和全局搜索
+• 会话、群聊、联系人、朋友圈和消息检索
+• 关键词/指定对象推送，支持 POST、Hermes Weixin、Hermes QQ
 
 [green]数据安全:[white]
-• 所有数据处理均在本地完成，不会上传到任何外部服务器
-• 请妥善保管解密后的数据，避免隐私泄露
-`
+• 配置和密钥文件使用仅当前用户可读写的权限
+• Hermes Token 和 Client Secret 不会通过状态接口回显
+• 请妥善保管解密数据，不要通过反向代理公开控制台`
 )
 
 type Help struct {

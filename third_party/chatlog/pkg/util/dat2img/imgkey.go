@@ -3,6 +3,7 @@ package dat2img
 import (
 	"bytes"
 	"crypto/aes"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,7 +46,7 @@ func NewImgKeyValidator(path string) *AesKeyValidator {
 			return nil
 		}
 
-		data, err := os.ReadFile(filePath)
+		data, err := readImageKeyPrefix(filePath)
 		if err != nil {
 			return nil
 		}
@@ -85,8 +86,8 @@ func NewImgKeyValidator(path string) *AesKeyValidator {
 			return nil
 		}
 
-		// Read file content
-		data, err := os.ReadFile(filePath)
+		// Only the format marker and first encrypted AES block are needed.
+		data, err := readImageKeyPrefix(filePath)
 		if err != nil {
 			return nil
 		}
@@ -113,12 +114,28 @@ func NewImgKeyValidator(path string) *AesKeyValidator {
 	return validator
 }
 
+func readImageKeyPrefix(path string) ([]byte, error) {
+	const prefixSize = 15 + aes.BlockSize
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	data := make([]byte, prefixSize)
+	n, err := io.ReadFull(file, data)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return nil, err
+	}
+	return data[:n], nil
+}
+
 func (v *AesKeyValidator) Validate(key []byte) bool {
 	// 16 bytes for AES-128, 32 bytes for AES-256 (but we only use first 16 bytes for V4 image key)
 	if len(key) < 16 {
 		return false
 	}
-	
+
 	// Dart implementation explicitly uses first 16 bytes
 	aesKey := key[:16]
 
@@ -138,7 +155,7 @@ func (v *AesKeyValidator) Validate(key []byte) bool {
 	if bytes.HasPrefix(decrypted, []byte{0xFF, 0xD8, 0xFF}) {
 		return true
 	}
-	
+
 	// Keep existing checks for backward compatibility
 	return bytes.HasPrefix(decrypted, JPG.Header) || bytes.HasPrefix(decrypted, WXGF.Header)
 }

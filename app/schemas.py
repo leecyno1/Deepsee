@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from typing import List, Optional, Any
 from datetime import datetime
 
@@ -23,8 +23,7 @@ class MessageOut(BaseModel):
     upvotes: int
     downvotes: int
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class PaginatedMessages(BaseModel):
@@ -49,8 +48,7 @@ class ContactOut(BaseModel):
     role: Optional[str] = None
     is_sales: Optional[bool] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ContactsLookupRequest(BaseModel):
@@ -64,8 +62,7 @@ class ChatOut(BaseModel):
     is_chatroom: bool
     last_message_at: Optional[datetime]
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class UpDownVoteResult(BaseModel):
@@ -94,8 +91,8 @@ class MessageDeriveRequest(BaseModel):
     message_ids: Optional[List[int]] = None
     period: Optional[str] = None
     limit: Optional[int] = None
-    batch_size: int = Field(default=30, ge=1, le=200)
-    concurrency: int = Field(default=32, ge=1, le=128)
+    batch_size: int = Field(default=100, ge=1, le=100)
+    concurrency: int = Field(default=3, ge=1, le=3)
     temperature: float = Field(default=0.1, ge=0, le=1)
     force: bool = False
 
@@ -155,8 +152,7 @@ class SendDeliveryOut(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class SendCampaignOut(BaseModel):
@@ -176,8 +172,7 @@ class SendCampaignOut(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class SendCampaignDetailOut(SendCampaignOut):
@@ -263,8 +258,7 @@ class ReportOut(BaseModel):
     result_type: Optional[str]
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ReportArtifactOut(BaseModel):
@@ -280,8 +274,7 @@ class ReportArtifactOut(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ReportDetailOut(ReportOut):
@@ -312,8 +305,7 @@ class EmailAccountOut(EmailAccountIn):
     id: int
     last_sync_at: datetime | None = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class EmailSendRequest(BaseModel):
@@ -343,8 +335,7 @@ class EmailMessageOut(BaseModel):
     meta: dict | None = None
     derived: dict | None = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class PaginatedEmailMessages(BaseModel):
@@ -365,8 +356,7 @@ class ExtAdapterOut(ExtAdapterIn):
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class AdapterMessageOut(BaseModel):
@@ -380,8 +370,7 @@ class AdapterMessageOut(BaseModel):
     content_text: str | None = None
     meta: dict | None = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class PaginatedAdapterMessages(BaseModel):

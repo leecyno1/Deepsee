@@ -4,6 +4,7 @@ import json
 import requests
 from fastapi import APIRouter, Depends, HTTPException, Query
 from starlette.responses import FileResponse
+from typing import Any
 
 from ..config import settings
 from ..db import SessionLocal
@@ -15,6 +16,8 @@ from ..services.media_store import (
     resolve_media_meeting_audio_path,
 )
 from ..services.media_collector_store import list_all_items as list_collector_items, get_collector_status
+from ..services.external_content_summaries import overlay_cached_summaries, summarize_external_items
+from ..services.content_quality import article_text, noise_reason, RESEARCH
 
 
 router = APIRouter(prefix="/api/media", tags=["media"])
@@ -55,12 +58,16 @@ def _media_item_text(item: dict) -> str:
 
 
 def _is_high_value_media_event(item: dict) -> bool:
-    text = _media_item_text(item)
+    text = article_text(item)
     return any(term in text for term in MEDIA_KEEP_EVENT_TERMS)
 
 
 def _is_low_value_media_noise(item: dict) -> bool:
-    text = _media_item_text(item)
+    if noise_reason(item):
+        return True
+    if RESEARCH.search(str(item.get('title') or '')):
+        return False
+    text = article_text(item)
     if not text:
         return False
     if any(term in text for term in MEDIA_HARD_NOISE_TERMS):
@@ -80,6 +87,148 @@ def _is_low_value_media_noise(item: dict) -> bool:
 def _filter_low_value_media_items(items: list[dict]) -> tuple[list[dict], int]:
     filtered = [item for item in items if not _is_low_value_media_noise(item)]
     return filtered, max(0, len(items) - len(filtered))
+
+
+def _collector_has_local_data(status: dict[str, Any]) -> bool:
+    for key in ("hot", "search", "authors"):
+        section = status.get(key) if isinstance(status.get(key), dict) else {}
+        if section.get("latest_day") or section.get("latest_files") or section.get("keywords_count") or section.get("authors_count"):
+            return True
+    return False
+
+
+def _summarize_bootstrap_result(result: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(result, dict):
+        return None
+    summary: dict[str, Any] = {
+        "ok": bool(result.get("ok")),
+        "running": bool(result.get("running")),
+        "message": result.get("message") or "",
+        "tasks": result.get("tasks") or [],
+        "started_at": result.get("started_at") or "",
+        "finished_at": result.get("finished_at") or "",
+    }
+    results = result.get("results")
+    if isinstance(results, list):
+        summary["results"] = [
+            {
+                "name": item.get("name"),
+                "ok": bool(item.get("ok")),
+                "returncode": item.get("returncode"),
+                "error": item.get("error") or "",
+            }
+            for item in results
+            if isinstance(item, dict)
+        ]
+    return summary
+
+
+def _maybe_bootstrap_media_collector(q: str | None) -> dict[str, Any] | None:
+    if (q or "").strip():
+        return None
+    if not bool(settings.__dict__.get("MEDIA_COLLECTOR_AUTO_BOOTSTRAP", True)):
+        return None
+
+    status = get_collector_status()
+    if _collector_has_local_data(status):
+        return None
+
+    from ..services.media_collector_runner import get_media_collector_run_state, run_media_collector_once
+
+    run_state = get_media_collector_run_state()
+    if bool(run_state.get("running")):
+        return {
+            "ok": False,
+            "running": True,
+            "message": "自媒体默认源正在初始化",
+            "status": run_state.get("status") or status,
+        }
+    if run_state.get("last_run"):
+        return {
+            "ok": False,
+            "skipped": True,
+            "reason": "collector_already_attempted",
+            "message": "已尝试初始化默认自媒体源，可在设置页手动刷新",
+            "status": run_state.get("status") or status,
+        }
+
+    timeout = settings.__dict__.get("MEDIA_COLLECTOR_BOOTSTRAP_TIMEOUT_SECONDS", 60)
+    return run_media_collector_once(
+        hot=True,
+        search=False,
+        authors=False,
+        timeout_seconds=timeout,
+    )
+
+
+def _default_collector_source_paths() -> dict[str, str]:
+    root = _repo_root()
+    collector_dir = root / "media-collector"
+    return {
+        "keywords": str(collector_dir / "keywords.json"),
+        "authors": str(collector_dir / "authors.json"),
+    }
+
+
+def _repo_root():
+    from pathlib import Path
+    return Path(__file__).resolve().parent.parent.parent
+
+
+def _adapt_collector_items(
+    items: list[dict],
+    *,
+    limit: int,
+    filter_noise: bool,
+) -> tuple[list[dict], int]:
+    adapted = []
+    for it in items[:limit]:
+        stats = it.get("stats") if isinstance(it.get("stats"), dict) else {}
+        extra = stats.get("extra") if isinstance(stats.get("extra"), dict) else {}
+        heat = it.get("heat") or stats.get("heat") or 0
+        adapted.append({
+            **it,
+            "summary": it.get("description") or it.get("title") or "",
+            "task_source": it.get("keyword") or it.get("source_file") or it.get("source_type") or "",
+            "source_keyword": it.get("keyword") or "",
+            "transcript_status": it.get("source_type") or "collector",
+            "stats": {
+                **stats,
+                "like": extra.get("like") or extra.get("view") or extra.get("views") or heat or stats.get("rank") or 0,
+                "comment": extra.get("comment") or extra.get("comments") or 0,
+                "share": extra.get("share") or extra.get("shares") or 0,
+                "collect": extra.get("collect") or extra.get("favorite") or extra.get("favorites") or 0,
+            },
+        })
+    if filter_noise:
+        return _filter_low_value_media_items(adapted)
+    return adapted, 0
+
+
+def _collector_response(
+    items: list[dict],
+    *,
+    limit: int,
+    filter_noise: bool,
+    bootstrap: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    status = get_collector_status()
+    adapted, removed_count = _adapt_collector_items(items, limit=limit, filter_noise=filter_noise)
+    return {
+        "items": adapted,
+        "total": len(adapted),
+        "source": {
+            "kind": "media-collector",
+            "latest_day": status.get("hot", {}).get("latest_day") or status.get("search", {}).get("latest_day"),
+            "latest_files": status.get("hot", {}).get("latest_files", []),
+            "project_dir": str(_repo_root()),
+            "results_dir": str(status.get("data_dir") or ""),
+            "noise_filtered": removed_count,
+            "filter_mode": "major_event_keep",
+            "default_sources": _default_collector_source_paths(),
+            "bootstrap": _summarize_bootstrap_result(bootstrap),
+        },
+    }
 
 def get_db():
     db = SessionLocal()
@@ -136,57 +285,57 @@ def api_list_media_items(
     """自媒体列表数据。
 
     优先使用轻量 media-collector 的 data/hot + data/search。
-    若 collector 暂无数据，再回退到旧 MediaCrawlerPro data/results。
+    新安装且暂无数据时，自动用仓库自带默认源跑一次热榜初始化。
+    若 collector 仍暂无数据，再回退到旧 MediaCrawlerPro data/results。
     """
+    bootstrap: dict[str, Any] | None = None
     try:
         collector = list_collector_items(limit=limit, keyword=q)
         items = collector.get("items") or []
+        if not items:
+            bootstrap = _maybe_bootstrap_media_collector(q)
+            if bootstrap and not bool(bootstrap.get("running")):
+                collector = list_collector_items(limit=limit, keyword=q)
+                items = collector.get("items") or []
         if items:
-            status = get_collector_status()
-            # 适配前端旧表格字段：summary/task_source/transcript_status/stats.like 等
-            adapted = []
-            for it in items[:limit]:
-                stats = it.get("stats") if isinstance(it.get("stats"), dict) else {}
-                extra = stats.get("extra") if isinstance(stats.get("extra"), dict) else {}
-                heat = it.get("heat") or stats.get("heat") or 0
-                adapted.append({
-                    **it,
-                    "summary": it.get("description") or it.get("title") or "",
-                    "task_source": it.get("keyword") or it.get("source_file") or it.get("source_type") or "",
-                    "source_keyword": it.get("keyword") or "",
-                    "transcript_status": it.get("source_type") or "collector",
-                    "stats": {
-                        **stats,
-                        "like": extra.get("like") or extra.get("view") or extra.get("views") or heat or stats.get("rank") or 0,
-                        "comment": extra.get("comment") or extra.get("comments") or 0,
-                        "share": extra.get("share") or extra.get("shares") or 0,
-                        "collect": extra.get("collect") or extra.get("favorite") or extra.get("favorites") or 0,
-                    },
-                })
-            if filter_noise:
-                adapted, removed_count = _filter_low_value_media_items(adapted)
-            else:
-                removed_count = 0
-            return {
-                "items": adapted,
-                "total": len(adapted),
-                "source": {
-                    "kind": "media-collector",
-                    "latest_day": status.get("hot", {}).get("latest_day") or status.get("search", {}).get("latest_day"),
-                    "latest_files": status.get("hot", {}).get("latest_files", []),
-                    "project_dir": str(settings.BASE_DIR) if hasattr(settings, "BASE_DIR") else "",
-                    "results_dir": str(status.get("data_dir") or ""),
-                    "noise_filtered": removed_count,
-                    "filter_mode": "major_event_keep",
-                },
-            }
+            response = _collector_response(
+                items,
+                limit=limit,
+                filter_noise=filter_noise,
+                bootstrap=bootstrap,
+            )
+            response["items"] = overlay_cached_summaries(db, "media", response.get("items") or [])
+            return response
     except Exception:
         # 不中断旧数据源
         pass
 
     conf = _get_media_config(db)
     project_dir = str(conf.get("project_dir") or "").strip() or None
-    return list_media_items(limit=limit, q=q, project_dir=project_dir)
+    payload = list_media_items(limit=limit, q=q, project_dir=project_dir)
+    if filter_noise:
+        payload['items'], removed = _filter_low_value_media_items(payload.get('items') or [])
+        payload['source'] = {**(payload.get('source') or {}), 'noise_filtered': removed}
+    if bootstrap:
+        source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+        payload["source"] = {
+            **source,
+            "default_sources": _default_collector_source_paths(),
+            "media_collector_bootstrap": _summarize_bootstrap_result(bootstrap),
+        }
+    payload["items"] = overlay_cached_summaries(db, "media", payload.get("items") or [])
+    return payload
+
+
+@router.post("/items/summaries")
+def api_summarize_media_items(payload: dict, db: Session = Depends(get_db)):
+    items = payload.get("items") if isinstance(payload, dict) else []
+    return summarize_external_items(
+        db,
+        "media",
+        items if isinstance(items, list) else [],
+        force=bool(payload.get("force", False)) if isinstance(payload, dict) else False,
+    )
 
 
 @router.get("/meeting-records")

@@ -286,7 +286,7 @@ def agent_modules() -> dict[str, Any]:
             },
             {
                 "module": "sending",
-                "apis": ["/api/send", "/api/send/out", "/api/send/wechatpad"],
+                "apis": ["/api/send", "/api/send/out", "/api/send/campaigns"],
             },
             {
                 "module": "sync_and_backup",

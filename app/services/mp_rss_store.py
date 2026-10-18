@@ -298,10 +298,14 @@ def list_mp_articles(
     db_path: str | None = None,
     upstream_base_url: str | None = None,
     upstream_auth_token: str | None = None,
+    local_only: bool = False,
 ) -> dict:
     remote_base = _normalize_base_url(upstream_base_url) or _normalize_base_url(DEFAULT_MP_UPSTREAM_URL)
+    remote_enabled = os.getenv("MP_REMOTE_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"} or bool(
+        str(upstream_auth_token or "").strip()
+    )
     remote_error: str | None = None
-    if remote_base:
+    if not local_only and remote_enabled and remote_base:
         try:
             if str(upstream_auth_token or "").strip():
                 return _list_remote_articles_auth(
@@ -399,8 +403,11 @@ def get_mp_article(
     upstream_auth_token: str | None = None,
 ) -> dict:
     remote_base = _normalize_base_url(upstream_base_url) or _normalize_base_url(DEFAULT_MP_UPSTREAM_URL)
+    remote_enabled = os.getenv("MP_REMOTE_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"} or bool(
+        str(upstream_auth_token or "").strip()
+    )
     remote_error: str | None = None
-    if remote_base:
+    if remote_enabled and remote_base:
         try:
             item = _get_remote_article(
                 article_id,
